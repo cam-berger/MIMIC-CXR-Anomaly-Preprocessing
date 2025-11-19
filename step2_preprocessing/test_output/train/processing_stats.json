@@ -1,0 +1,15 @@
+{
+  "statistics": {
+    "total_samples": 5,
+    "processed": 5,
+    "failed": 0,
+    "image_errors": 0,
+    "structured_errors": 0,
+    "text_errors": 5,
+    "avg_processing_time": 114.81037720000002,
+    "image_success_rate": 1.0,
+    "structured_success_rate": 1.0,
+    "text_success_rate": 0.0
+  },
+  "failed_samples": []
+}

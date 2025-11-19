@@ -1,0 +1,56 @@
+{
+  "timestamp": "2025-11-18T21:12:57.181381",
+  "config": "/home/dev/Documents/Portfolio/MIMIC/MIMIC-CXR-Anomaly-Preprocessing/step2_preprocessing/config/config.yaml",
+  "results": {
+    "train": {
+      "total_samples": 5,
+      "processed": 5,
+      "failed": 0,
+      "image_errors": 0,
+      "structured_errors": 0,
+      "text_errors": 5,
+      "processing_times": [
+        0.227349,
+        199.221926,
+        200.178314,
+        174.31814,
+        0.106157
+      ],
+      "avg_processing_time": 114.81037720000002,
+      "image_success_rate": 1.0,
+      "structured_success_rate": 1.0,
+      "text_success_rate": 0.0
+    },
+    "val": {
+      "total_samples": 5,
+      "processed": 5,
+      "failed": 0,
+      "image_errors": 0,
+      "structured_errors": 0,
+      "text_errors": 5,
+      "processing_times": [
+        1.005408,
+        0.10974,
+        0.104069,
+        0.138483,
+        0.113476
+      ],
+      "avg_processing_time": 0.2942352,
+      "image_success_rate": 1.0,
+      "structured_success_rate": 1.0,
+      "text_success_rate": 0.0
+    }
+  },
+  "arguments": {
+    "config": "/home/dev/Documents/Portfolio/MIMIC/MIMIC-CXR-Anomaly-Preprocessing/step2_preprocessing/config/config.yaml",
+    "output_dir": "test_output",
+    "anthropic_api_key": null,
+    "skip_images": false,
+    "skip_structured": false,
+    "skip_text": true,
+    "train_only": false,
+    "val_only": false,
+    "max_samples": 5,
+    "log_level": "INFO"
+  }
+}
