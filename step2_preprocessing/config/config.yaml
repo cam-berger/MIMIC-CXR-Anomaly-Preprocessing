@@ -93,7 +93,7 @@ text:
   # LangChain + Claude settings
   summarization:
     use_claude: true
-    model: "claude-3-5-sonnet-20241022"  # Or claude-3-opus for better quality
+    model: "claude-3-5-sonnet-latest"  # Latest Claude 3.5 Sonnet
     max_summary_length: 500  # tokens
     temperature: 0.0  # Deterministic
     system_prompt: "You are a medical expert summarizing clinical notes for chest X-ray interpretation."

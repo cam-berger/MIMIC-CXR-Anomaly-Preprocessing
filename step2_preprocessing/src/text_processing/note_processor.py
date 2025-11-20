@@ -152,9 +152,9 @@ Summary:"""
 
         entities = []
         for ent in doc.ents:
-            # Filter for medically relevant entity types
-            if ent.label_ in ['DISEASE', 'SYMPTOM', 'TREATMENT', 'TEST', 'ANATOMY']:
-                entities.append(ent.text.lower())
+            # en_core_sci_md labels all entities as "ENTITY"
+            # Accept all since the model already filters for medical/scientific relevance
+            entities.append(ent.text.lower())
 
         # Remove duplicates while preserving order
         seen = set()

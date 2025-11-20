@@ -1,121 +1,103 @@
-# MIMIC-CXR Anomaly Detection: Normal Cohort Identification (Step 1)
+# MIMIC-CXR Unsupervised Anomaly Detection Pipeline
 
-This codebase implements **Step 1** of the unsupervised multimodal anomaly detection pipeline for chest X-rays: **Identifying and Filtering "Normal" Cases across MIMIC datasets**.
+End-to-end pipeline for identifying and preprocessing "normal" chest X-ray cases from MIMIC datasets, enabling unsupervised multimodal anomaly detection.
 
-## Overview
+## Project Overview
 
-The goal of Step 1 is to create a high-quality cohort of "normal" cases from MIMIC datasets by:
+This repository implements a two-step pipeline for MIMIC-CXR anomaly detection:
 
-1. **Radiology Report Criteria**: Filtering chest X-ray studies with "No Finding" labels and no acute pathologies
-2. **Clinical Context Criteria**: Ensuring patients had benign ED courses with no critical outcomes
-3. **Data Integration**: Merging MIMIC-CXR-JPG, MIMIC-IV-ED, and MIMIC-IV data based on temporal and patient matching
+**Step 1: Normal Cohort Identification**
+- Filters chest X-rays with "No Finding" labels and benign clinical courses
+- Integrates MIMIC-CXR-JPG, MIMIC-IV-ED, and MIMIC-IV data
+- Produces high-quality normal cohorts for unsupervised learning
 
-The resulting cohort will be used to train an unsupervised anomaly detection model in subsequent steps.
+**Step 2: Multimodal Data Preprocessing**
+- Full-resolution image loading (~3000×2500 pixels)
+- Temporal feature engineering from labs and vitals
+- Clinical note summarization with NER and Claude LLM
+- Prepares model-ready multimodal features
 
-## Project Structure
-
-```
-MIMIC-CXR-Anomaly-Preprocessing/
-├── main.py                      # Main execution script
-├── requirements.txt             # Python dependencies
-├── README.md                    # This file
-│
-├── src/
-│   ├── config/
-│   │   ├── config.py           # Filter and processing configurations
-│   │   └── paths.py            # Data path configurations
-│   │
-│   ├── data_loaders/
-│   │   ├── cxr_loader.py       # MIMIC-CXR-JPG data loader
-│   │   ├── ed_loader.py        # MIMIC-IV-ED data loader
-│   │   └── iv_loader.py        # MIMIC-IV data loader
-│   │
-│   ├── filters/
-│   │   ├── radiology_filter.py # Radiology report filtering
-│   │   └── clinical_filter.py  # Clinical context filtering
-│   │
-│   ├── mergers/
-│   │   └── cohort_builder.py   # Cohort building and merging
-│   │
-│   ├── validators/
-│   │   ├── data_validator.py   # Data quality validation
-│   │   └── sample_checker.py   # Manual review sampling
-│   │
-│   └── utils/
-│       ├── logging_utils.py    # Logging utilities
-│       └── data_utils.py       # Data utility functions
-│
-└── output/                      # Generated output (created on run)
-    ├── cohorts/                 # Normal cohort CSV/Parquet files
-    ├── manual_review/           # Sample cases for manual review
-    ├── reports/                 # Validation and summary reports
-    └── logs/                    # Execution logs
-```
-
-## Installation
+## Quick Start
 
 ### Prerequisites
 
-- Python 3.8 or higher
-- Access to MIMIC datasets:
+- Python 3.8+
+- Access to MIMIC datasets (requires PhysioNet credentialing):
   - MIMIC-CXR-JPG v2.1.0
-  - MIMIC-IV-ED v2.2
   - MIMIC-IV v3.1
+  - MIMIC-IV-ED v2.2
 
-### Setup
+### Installation
 
-1. Clone or navigate to this directory:
 ```bash
-cd /home/dev/Documents/Portfolio/MIMIC/MIMIC-CXR-Anomaly-Preprocessing
-```
+# Clone/navigate to repository
+cd MIMIC-CXR-Anomaly-Preprocessing
 
-2. Install dependencies:
-```bash
+# Install Step 1 dependencies
 pip install -r requirements.txt
+
+# Install Step 2 dependencies
+cd step2_preprocessing
+pip install -r requirements.txt
+
+# Install scispacy model
+pip install scispacy
+pip install https://s3-us-west-2.amazonaws.com/ai2-s2-scispacy/releases/v0.5.1/en_core_sci_md-0.5.1.tar.gz
+
+# Optional: Set Claude API key for text summarization
+export ANTHROPIC_API_KEY='your-api-key-here'
 ```
-
-3. Verify data paths in `src/config/paths.py` match your local setup:
-   - MIMIC-CXR-JPG: `/media/dev/MIMIC_DATA/mimic-cxr-jpg`
-   - MIMIC-IV-ED: `/home/dev/Documents/Portfolio/MIMIC_Data/physionet.org/files/mimic-iv-ed/2.2`
-   - MIMIC-IV: `/home/dev/Documents/Portfolio/MIMIC_Data/physionet.org/files/mimiciv/3.1`
-
-## Usage
 
 ### Basic Usage
 
-Run the main script to identify normal cases:
-
 ```bash
+# Step 1: Identify normal cohort
+python main.py
+
+# Step 2: Preprocess data (from step2_preprocessing directory)
+cd step2_preprocessing
 python main.py
 ```
 
-This will:
-- Load and filter MIMIC datasets
-- Build a cohort of normal cases
-- Split into training and validation sets
-- Save results to `output/` directory
-- Generate validation reports and samples for manual review
+---
 
-### Advanced Options
+## Step 1: Normal Cohort Identification
+
+### Overview
+
+Identifies "normal" cases by applying strict radiology and clinical filters across MIMIC datasets.
+
+### Normal Case Definition
+
+A case is considered "normal" if it meets ALL criteria:
+
+**Radiology Criteria:**
+- CheXpert "No Finding" label = 1.0
+- All pathology labels (Pneumonia, Effusion, etc.) NOT positive
+- No acute/significant abnormalities in report
+
+**Clinical Context Criteria:**
+- ED disposition: Discharged home (not admitted)
+- No critical diagnoses (sepsis, MI, respiratory failure, etc.)
+- No ICU admission if hospitalized
+- No in-hospital death if hospitalized
+- CXR performed during/near ED visit (24-hour window)
+- Patient age ≥ 18 years
+
+### Usage
 
 ```bash
-# Specify custom output directory
-python main.py --output-dir my_output
+# Basic usage
+python main.py
 
-# Skip hospital admission outcome filtering (faster, less strict)
+# Custom options
+python main.py --output-dir my_output --validation-samples 200
+
+# Fast mode (skip hospital filtering)
 python main.py --no-hospital-filter
 
-# Adjust number of validation samples
-python main.py --validation-samples 200
-
-# Enable debug logging
+# Debug mode
 python main.py --log-level DEBUG
-
-# Skip validation step
-python main.py --skip-validation
-
-# Optimize memory usage
-python main.py --optimize-memory
 ```
 
 ### Command-Line Arguments
@@ -123,155 +105,399 @@ python main.py --optimize-memory
 | Argument | Description | Default |
 |----------|-------------|---------|
 | `--output-dir` | Output directory for results | `output` |
-| `--no-hospital-filter` | Skip hospital outcome filtering | False |
+| `--no-hospital-filter` | Skip hospital outcome filtering (faster) | False |
 | `--validation-samples` | Number of samples for manual review | 100 |
 | `--log-level` | Logging level (DEBUG/INFO/WARNING/ERROR) | INFO |
 | `--skip-validation` | Skip data validation | False |
 | `--optimize-memory` | Optimize memory usage | False |
 
-## Configuration
+### Output Files
 
-### Filter Configuration
+```
+output/
+├── cohorts/
+│   ├── normal_cohort_full.csv           # Complete normal cohort
+│   ├── normal_cohort_train.csv          # Training set (85%)
+│   └── normal_cohort_validation.csv     # Validation set (15%)
+├── manual_review/
+│   ├── sample_for_review.csv            # Random sample for verification
+│   └── edge_cases_*.csv                 # Edge cases
+├── reports/
+│   ├── validation_report.txt            # Data quality report
+│   └── summary_statistics.json          # Cohort statistics
+└── logs/
+    └── cohort_building_*.log            # Execution log
+```
 
-Edit `src/config/config.py` to customize filtering criteria:
+### Expected Results
 
-**Radiology Report Criteria:**
-- `require_no_finding`: Require "No Finding" = 1.0
-- `exclude_pathology_labels`: List of pathologies to exclude
+- Normal cases identified: ~20,000-40,000 studies (10-20% of MIMIC-CXR)
+- Unique subjects: ~15,000-25,000 patients
+- Processing time: 5-15 minutes
+- Memory usage: 4-8 GB peak
 
-**Clinical Context Criteria:**
-- `acceptable_dispositions`: ED dispositions to include (e.g., "HOME", "DISCHARGED")
-- `excluded_dispositions`: ED dispositions to exclude (e.g., "ADMITTED", "EXPIRED")
-- `critical_diagnosis_patterns`: ICD code patterns for critical diagnoses to exclude
-- `time_window_hours`: Time window for matching CXR with ED stays (default: 24 hours)
-- `min_age`: Minimum patient age (default: 18)
+### Configuration
 
-**Data Split:**
-- `validation_fraction`: Fraction for validation set (default: 0.15)
-- `random_seed`: Random seed for reproducibility (default: 42)
+Edit `src/config/config.py` and `src/config/paths.py` to customize:
 
-## Output Files
+- Filter criteria (dispositions, diagnoses, time windows)
+- Data paths
+- Validation parameters
+- Train/val split ratio
 
-After running, the following files are generated in the `output/` directory:
+---
 
-### Cohorts
-- `cohorts/normal_cohort_full.csv` - Complete normal cohort
-- `cohorts/normal_cohort_full.parquet` - Complete cohort (Parquet format)
-- `cohorts/normal_cohort_train.csv` - Training set
-- `cohorts/normal_cohort_validation.csv` - Validation set
+## Step 2: Multimodal Data Preprocessing
 
-### Manual Review
-- `manual_review/sample_for_review.csv` - Random sample for manual verification
-- `manual_review/edge_cases_*.csv` - Edge cases requiring special attention
+### Overview
 
-### Reports
-- `reports/validation_report.txt` - Data quality validation report
-- `reports/summary_statistics.json` - Comprehensive cohort statistics
-- `reports/data_dictionary.csv` - Data dictionary of all columns
+Processes the normal cohort from Step 1 to extract three modalities with advanced feature engineering.
 
-### Logs
-- `logs/cohort_building_YYYYMMDD_HHMMSS.log` - Detailed execution log
+### Key Features
 
-## Normal Case Definition
+**Image Processing:**
+- Full-resolution preservation (~3000×2500 pixels, no downsampling)
+- MinMax [0,1] or z-score normalization
+- Optional augmentation at full resolution
+- Memory-efficient (~30MB per image)
 
-A case is considered "normal" if it meets **ALL** of the following criteria:
+**Structured Data:**
+- NOT_DONE token for missing values (no imputation)
+- Temporal features with trend analysis
+- Time-aware aggregations
+- Priority labs: Hemoglobin, WBC, creatinine, electrolytes
+- Priority vitals: HR, BP, SpO2, temperature, RR
 
-### Radiology Criteria
-1. CheXpert "No Finding" label = 1.0
-2. All pathology labels (Pneumonia, Effusion, etc.) are NOT positive (1.0)
-3. No acute or significant abnormalities mentioned in report
+**Text Processing:**
+- Medical NER with scispacy
+- Entity-based + semantic retrieval
+- Claude-3.5-Sonnet summarization via LangChain
+- ClinicalBERT tokenization
 
-### Clinical Context Criteria
-1. **ED Disposition**: Patient was discharged home (not admitted to hospital)
-2. **No Critical Diagnoses**: No ICD codes for critical conditions like:
-   - Sepsis, pneumonia, acute MI
-   - Heart failure, respiratory failure
-   - Pulmonary embolism, pneumothorax
-   - ARDS, severe infections
-3. **No ICU Admission**: If admitted, no ICU stay
-4. **No In-Hospital Death**: If admitted, patient survived
-5. **Temporal Consistency**: CXR performed during or near ED visit (within 24-hour window)
-6. **Age**: Patient age ≥ 18 years
+### Configuration
 
-## Expected Results
+Edit `step2_preprocessing/config/config.yaml`:
 
-Based on the MIMIC-CXR dataset (>200,000 studies), you can expect:
+```yaml
+# Image settings
+image:
+  preserve_full_resolution: true
+  normalize_method: "minmax"      # or "standardize"
+  augmentation:
+    enabled: true
+    rotation_range: 5
 
-- **Normal cases identified**: ~20,000-40,000 studies (10-20% of total)
-- **Unique subjects**: ~15,000-25,000 patients
-- **Processing time**: 5-15 minutes (depending on system)
-- **Memory usage**: 4-8 GB peak
+# Structured data
+structured:
+  missing_token: "NOT_DONE"
+  encoding_method: "aggregated"   # or "sequential"
 
-## Validation and Quality Assurance
+# Text processing
+text:
+  summarization:
+    use_claude: true
+    model: "claude-3-5-sonnet-latest"
+    max_summary_length: 500
 
-The pipeline includes multiple validation steps:
+# Data paths
+data:
+  step1_cohort_train: "../output/cohorts/normal_cohort_train.csv"
+  step1_cohort_val: "../output/cohorts/normal_cohort_validation.csv"
+  mimic_cxr_base: "/media/dev/MIMIC_DATA/mimic-cxr-jpg"
+  mimic_iv_base: "/path/to/mimiciv/3.1"
+  mimic_ed_base: "/path/to/mimic-iv-ed/2.2"
+```
 
-1. **Automatic Data Validation**
-   - Checks for required columns
-   - Identifies missing values
-   - Detects duplicates
-   - Validates data types and value ranges
-   - Verifies temporal consistency
+### Usage
 
-2. **Manual Review Samples**
-   - Random sample of 100 cases for manual verification
-   - Edge cases identified for special review
-   - Stratified sampling by demographics
+```bash
+cd step2_preprocessing
 
-3. **Statistical Summaries**
-   - Cohort characteristics (age, gender distribution)
-   - Filtering statistics at each step
-   - Data completeness metrics
+# Test on small subset
+python main.py --max-samples 10
 
-## Next Steps
+# Process full dataset
+python main.py
 
-After generating the normal cohort:
+# Skip specific modalities
+python main.py --skip-text          # No Claude API key
+python main.py --skip-images        # Structured + text only
+python main.py --skip-structured    # Images + text only
 
-1. **Manual Review**: Review `manual_review/sample_for_review.csv` to verify quality
-2. **Check Edge Cases**: Examine `manual_review/edge_cases_*.csv` files
-3. **Review Reports**: Check `reports/validation_report.txt` for data quality issues
-4. **Proceed to Step 2**: Use the generated cohorts for data preprocessing (image and clinical data extraction)
+# Process specific split
+python main.py --train-only
+python main.py --val-only
+
+# Custom output
+python main.py --output-dir /path/to/output
+```
+
+### Output Structure
+
+```
+step2_preprocessing/output/
+├── preprocessing.log
+├── preprocessing_summary.json
+│
+├── train/
+│   ├── images/
+│   │   └── s10000032_study50414267.pt     # [C, H, W] FloatTensor
+│   ├── structured_features/
+│   │   └── s10000032_study50414267.json   # Temporal features
+│   ├── text_features/
+│   │   └── s10000032_study50414267.pt     # Summary + tokens
+│   ├── metadata/
+│   │   └── s10000032_study50414267.json   # Sample metadata
+│   └── processing_stats.json
+│
+└── val/
+    └── [same structure]
+```
+
+### Output Formats
+
+**Images** (.pt):
+```python
+import torch
+image = torch.load('image.pt')
+# Shape: [1, 3056, 2544] (C, H, W)
+# Type: torch.FloatTensor
+# Range: [0.0, 1.0] with minmax normalization
+```
+
+**Structured Features** (.json):
+```json
+{
+  "vital_heartrate": {
+    "is_missing": false,
+    "last_value": 78.0,
+    "trend_slope": -2.0,
+    "mean_value": 80.0,
+    "measurement_count": 3
+  },
+  "lab_hemoglobin": {
+    "is_missing": true,
+    "last_value": "NOT_DONE"
+  }
+}
+```
+
+**Text Features** (.pt):
+```python
+text_data = torch.load('text.pt')
+# Keys: 'summary', 'tokens', 'num_entities', 'entities'
+# text_data['tokens']['input_ids']: ClinicalBERT tokens
+# text_data['summary']: Claude summary
+```
+
+### Performance
+
+**Processing time (per sample):**
+- Image loading: 0.1-0.5s
+- Structured data: 0.2-1.0s
+- Text processing: 1-5s (with Claude API)
+
+**Full dataset (~23k samples):**
+- Without Claude: 2-4 hours
+- With Claude: 8-12 hours (rate limits)
+
+**Memory requirements:**
+- RAM: 16+ GB recommended
+- GPU: Optional (8+ GB VRAM for faster processing)
+- Disk: ~50 GB for processed data
+
+---
+
+## Project Structure
+
+```
+MIMIC-CXR-Anomaly-Preprocessing/
+├── main.py                          # Step 1 main script
+├── requirements.txt                 # Step 1 dependencies
+├── README.md                        # This file
+│
+├── src/                             # Step 1 source code
+│   ├── config/
+│   ├── data_loaders/
+│   ├── filters/
+│   ├── mergers/
+│   ├── validators/
+│   └── utils/
+│
+├── output/                          # Step 1 outputs
+│   ├── cohorts/
+│   ├── manual_review/
+│   ├── reports/
+│   └── logs/
+│
+└── step2_preprocessing/             # Step 2 pipeline
+    ├── main.py
+    ├── requirements.txt
+    ├── config/config.yaml
+    ├── src/
+    │   ├── image_processing/
+    │   ├── structured_data/
+    │   ├── text_processing/
+    │   └── multimodal_dataset.py
+    ├── output/
+    │   ├── train/
+    │   └── val/
+    └── analyze_test_results.ipynb  # Analysis notebook
+```
+
+---
+
+## Complete Workflow
+
+### 1. Identify Normal Cohort (Step 1)
+
+```bash
+# Run Step 1 to create normal cohort
+python main.py
+
+# Review validation report
+cat output/reports/validation_report.txt
+
+# Manual review (optional)
+cat output/manual_review/sample_for_review.csv
+```
+
+**Output**: `output/cohorts/normal_cohort_train.csv` and `normal_cohort_validation.csv`
+
+### 2. Preprocess Data (Step 2)
+
+```bash
+cd step2_preprocessing
+
+# Test on small subset first
+python main.py --max-samples 5 --skip-text --output-dir test_output
+
+# Analyze test results
+jupyter notebook analyze_test_results.ipynb
+
+# Process full dataset with Claude
+export ANTHROPIC_API_KEY='your-key'
+python main.py
+```
+
+**Output**: Preprocessed multimodal features in `output/train/` and `output/val/`
+
+### 3. Load Preprocessed Data
+
+```python
+import torch
+import json
+from pathlib import Path
+
+# Load one sample
+sample_id = "s10000032_study50414267"
+output_dir = Path("step2_preprocessing/output/train")
+
+# Image
+image = torch.load(output_dir / "images" / f"{sample_id}.pt")
+
+# Structured data
+with open(output_dir / "structured_features" / f"{sample_id}.json") as f:
+    structured = json.load(f)
+
+# Text
+text = torch.load(output_dir / "text_features" / f"{sample_id}.pt")
+
+print(f"Image shape: {image.shape}")
+print(f"Structured features: {len(structured)}")
+print(f"Summary: {text['summary'][:100]}...")
+```
+
+---
 
 ## Troubleshooting
 
-### Common Issues
+### Step 1 Issues
 
-**"Path not found" errors:**
-- Verify data paths in `src/config/paths.py` match your local setup
-- Ensure you have proper permissions to access the data directories
+**"Path not found":**
+- Verify paths in `src/config/paths.py`
+- Ensure proper permissions to MIMIC data
 
 **"No normal cases found":**
-- Check filtering criteria in `src/config/config.py` (may be too strict)
-- Verify input data is properly formatted
-- Check logs for specific filtering statistics
+- Check filter criteria in `src/config/config.py` (may be too strict)
+- Review logs for filtering statistics
 
 **Memory errors:**
 - Use `--optimize-memory` flag
-- Use `--no-hospital-filter` to skip hospital data loading
-- Process on a machine with more RAM (>8GB recommended)
+- Use `--no-hospital-filter` to skip hospital data
+- Increase system RAM (>8GB recommended)
 
-**Slow execution:**
-- Use `--no-hospital-filter` for faster processing
-- Consider using SSD for data storage
-- Reduce `--validation-samples` count
+### Step 2 Issues
+
+**"scispacy model not found":**
+```bash
+pip install https://s3-us-west-2.amazonaws.com/ai2-s2-scispacy/releases/v0.5.1/en_core_sci_md-0.5.1.tar.gz
+```
+
+**"LangChain not available":**
+```bash
+pip install langchain langchain-anthropic anthropic
+export ANTHROPIC_API_KEY='your-key'
+```
+
+**Claude API 404 errors:**
+- Model name changed - use `claude-3-5-sonnet-latest` in config.yaml
+- Verify API key has correct permissions
+
+**"Lab events file too large":**
+- Code loads labs in 100k row chunks to handle ~120M row file
+- Ensure sufficient RAM (16+ GB)
+
+**CUDA out of memory:**
+- Reduce batch size in DataLoader
+- Process on CPU: `CUDA_VISIBLE_DEVICES="" python main.py`
+
+---
 
 ## Data Requirements
 
-This pipeline requires the following MIMIC data files:
-
-**MIMIC-CXR-JPG:**
+**MIMIC-CXR-JPG v2.1.0:**
 - `mimic-cxr-2.0.0-chexpert.csv.gz` (CheXpert labels)
 - `mimic-cxr-2.0.0-metadata.csv.gz` (Image metadata)
+- `files/` (JPEG images organized by patient/study)
 
-**MIMIC-IV-ED:**
-- `edstays.csv` (ED stay information)
-- `diagnosis.csv` (ED diagnoses)
-- `triage.csv` (Triage data)
+**MIMIC-IV-ED v2.2:**
+- `ed/edstays.csv` (ED stay information)
+- `ed/diagnosis.csv` (ED diagnoses)
+- `ed/triage.csv` (Triage vitals and chief complaints)
+- `ed/vitalsign.csv` (ED vital signs)
 
-**MIMIC-IV:**
-- `patients.csv` (Patient demographics)
-- `admissions.csv` (Hospital admissions)
-- `transfers.csv` (Transfer events)
+**MIMIC-IV v3.1:**
+- `hosp/patients.csv` (Demographics)
+- `hosp/admissions.csv` (Hospital admissions)
+- `hosp/transfers.csv` (Transfer events)
+- `hosp/labevents.csv.gz` (Lab results, ~120M rows)
+
+---
+
+## Next Steps
+
+After completing both steps, you can:
+
+1. **Train Models**: Use preprocessed data for multimodal anomaly detection
+2. **Exploratory Analysis**: Analyze feature distributions, missing patterns
+3. **Quality Validation**: Review image quality and text summaries
+4. **Model Development**: Build and train unsupervised anomaly detection models
+
+Example PyTorch Dataset:
+```python
+from step2_preprocessing.src.multimodal_dataset import MultimodalMIMICDataset
+
+dataset = MultimodalMIMICDataset(
+    cohort_path="step2_preprocessing/output/train",
+    config=config
+)
+
+sample = dataset[0]
+# Returns: {'image': tensor, 'structured': dict, 'text': dict, 'metadata': dict}
+```
+
+---
 
 ## License
 
@@ -279,10 +505,31 @@ This code is provided for research and educational purposes. Please ensure you h
 
 ## References
 
+**MIMIC Datasets:**
 - Johnson, A., Pollard, T., Mark, R. et al. MIMIC-CXR-JPG, a large publicly available database of labeled chest radiographs. *Sci Data* 6, 317 (2019).
 - Johnson, A., Bulgarelli, L., Pollard, T. et al. MIMIC-IV-ED. PhysioNet (2023).
 - Johnson, A., Bulgarelli, L., Shen, L. et al. MIMIC-IV. PhysioNet (2024).
 
+**NLP/ML Tools:**
+- scispacy: https://allenai.github.io/scispacy/
+- ClinicalBERT: https://huggingface.co/emilyalsentzer/Bio_ClinicalBERT
+- Claude: https://www.anthropic.com/claude
+- LangChain: https://python.langchain.com/
+
+## Citation
+
+If you use this pipeline in your research, please cite:
+
+```bibtex
+@misc{mimic-cxr-anomaly-pipeline,
+  title={MIMIC-CXR Unsupervised Anomaly Detection Pipeline},
+  year={2024},
+  note={Two-step pipeline for normal cohort identification and multimodal preprocessing.
+        Implements full-resolution image loading, temporal feature engineering,
+        and clinical note summarization with Claude LLM}
+}
+```
+
 ## Contact
 
-For issues or questions about this pipeline, please open an issue in the project repository.
+For issues or questions, please open an issue in the project repository.
