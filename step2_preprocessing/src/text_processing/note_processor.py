@@ -74,12 +74,14 @@ class ClinicalNoteProcessor:
         """Setup LangChain with Claude for summarization"""
         model_config = self.config['text']['summarization']
 
-        # Initialize Claude model
+        # Initialize Claude model with retry and timeout settings
         self.llm = ChatAnthropic(
             model=model_config['model'],
             anthropic_api_key=api_key,
             temperature=model_config['temperature'],
-            max_tokens=model_config['max_summary_length']
+            max_tokens=model_config['max_summary_length'],
+            timeout=60,  # 60 second timeout
+            max_retries=2  # Retry up to 2 times on failure
         )
 
         # Create summarization prompt using new ChatPromptTemplate
@@ -282,6 +284,10 @@ Summary:"""
             logger.warning("Claude summarization not available")
             return " ".join(context_sentences[:3])
 
+        if not context_sentences or len(context_sentences) == 0:
+            logger.warning("No context sentences provided for summarization")
+            return ""
+
         # Concatenate context
         context = "\n\n".join(context_sentences)
 
@@ -299,9 +305,17 @@ Summary:"""
             return summary.strip()
 
         except Exception as e:
-            logger.error(f"Error in Claude summarization: {e}")
-            # Fallback to concatenation
-            return " ".join(context_sentences[:3])
+            # Provide detailed error information
+            error_type = type(e).__name__
+            error_msg = str(e)
+
+            logger.error(f"Claude summarization failed ({error_type}): {error_msg}")
+            logger.debug(f"Context length: {len(context)} characters, {len(context_sentences)} sentences")
+
+            # Fallback to simple concatenation
+            fallback_summary = " ".join(context_sentences[:3])
+            logger.info(f"Using fallback summary ({len(fallback_summary)} chars)")
+            return fallback_summary
 
     def tokenize(self, text: str) -> Dict:
         """
