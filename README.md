@@ -315,6 +315,7 @@ MIMIC-CXR-Anomaly-Preprocessing/
 ├── main.py                          # Step 1 main script
 ├── requirements.txt                 # Step 1 dependencies
 ├── README.md                        # This file
+├── .gitignore
 │
 ├── src/                             # Step 1 source code
 │   ├── config/
@@ -324,7 +325,7 @@ MIMIC-CXR-Anomaly-Preprocessing/
 │   ├── validators/
 │   └── utils/
 │
-├── output/                          # Step 1 outputs
+├── output/                          # Step 1 outputs (gitignored)
 │   ├── cohorts/
 │   ├── manual_review/
 │   ├── reports/
@@ -333,16 +334,32 @@ MIMIC-CXR-Anomaly-Preprocessing/
 └── step2_preprocessing/             # Step 2 pipeline
     ├── main.py
     ├── requirements.txt
-    ├── config/config.yaml
+    ├── setup.sh
+    ├── config/
+    │   └── config.yaml
+    │
     ├── src/
     │   ├── image_processing/
     │   ├── structured_data/
     │   ├── text_processing/
-    │   └── multimodal_dataset.py
-    ├── output/
-    │   ├── train/
-    │   └── val/
-    └── analyze_test_results.ipynb  # Analysis notebook
+    │   ├── integration/
+    │   └── utils/
+    │
+    ├── tests/                       # Test scripts
+    │   ├── README.md
+    │   ├── test_setup.py
+    │   ├── test_claude.py
+    │   └── test_sample.py
+    │
+    ├── notebooks/                   # Jupyter notebooks
+    │   ├── README.md
+    │   ├── RAG_Implementation.ipynb
+    │   ├── analyze_test_results.ipynb
+    │   └── explore_cohort_outputs.ipynb
+    │
+    └── output/                      # Step 2 outputs (gitignored)
+        ├── train/
+        └── val/
 ```
 
 ---
@@ -373,7 +390,7 @@ cd step2_preprocessing
 python main.py --max-samples 5 --skip-text --output-dir test_output
 
 # Analyze test results
-jupyter notebook analyze_test_results.ipynb
+jupyter notebook notebooks/analyze_test_results.ipynb
 
 # Process full dataset with Claude
 export ANTHROPIC_API_KEY='your-key'
