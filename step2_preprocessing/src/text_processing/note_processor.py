@@ -13,8 +13,7 @@ import re
 # LangChain and Anthropic imports
 try:
     from langchain_anthropic import ChatAnthropic
-    from langchain.prompts import PromptTemplate
-    from langchain.chains import LLMChain
+    from langchain_core.prompts import ChatPromptTemplate
     LANGCHAIN_AVAILABLE = True
 except ImportError:
     LANGCHAIN_AVAILABLE = False
@@ -83,7 +82,7 @@ class ClinicalNoteProcessor:
             max_tokens=model_config['max_summary_length']
         )
 
-        # Create summarization prompt
+        # Create summarization prompt using new ChatPromptTemplate
         prompt_template = """You are a medical expert analyzing clinical notes for chest X-ray interpretation.
 
 Your task is to create a concise summary of the clinical note that captures:
@@ -99,12 +98,10 @@ CLINICAL NOTE EXCERPTS:
 Provide a clear, concise summary in 3-5 sentences focusing on information relevant to interpreting the chest X-ray.
 Summary:"""
 
-        prompt = PromptTemplate(
-            input_variables=["context"],
-            template=prompt_template
-        )
+        self.prompt = ChatPromptTemplate.from_template(prompt_template)
 
-        self.summarization_chain = LLMChain(llm=self.llm, prompt=prompt)
+        # Create chain using LCEL (pipe operator)
+        self.summarization_chain = self.prompt | self.llm
         logger.info("Claude summarization chain initialized")
 
     def process_note(self, note_text: str) -> Dict:
@@ -289,12 +286,12 @@ Summary:"""
         context = "\n\n".join(context_sentences)
 
         try:
-            # Run summarization
+            # Run summarization with new LCEL API
             result = self.summarization_chain.invoke({"context": context})
 
-            # Extract summary text (LangChain returns dict)
-            if isinstance(result, dict):
-                summary = result.get('text', '')
+            # Extract summary text (LCEL returns AIMessage object)
+            if hasattr(result, 'content'):
+                summary = result.content
             else:
                 summary = str(result)
 
