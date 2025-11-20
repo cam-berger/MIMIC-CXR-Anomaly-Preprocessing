@@ -63,6 +63,22 @@ class ClinicalNoteProcessor:
         else:
             self.summarization_chain = None
 
+        # Setup Claude note rewriting (optional preprocessing)
+        if config['text'].get('note_rewriting', {}).get('use_claude', False):
+            if not LANGCHAIN_AVAILABLE:
+                raise ImportError("LangChain required for note rewriting")
+
+            if anthropic_api_key is None:
+                logger.warning("No Anthropic API key provided. Note rewriting will be disabled.")
+                self.rewriting_chain = None
+            else:
+                if config['text']['note_rewriting'].get('enabled', False):
+                    self._setup_note_rewriting(anthropic_api_key)
+                else:
+                    self.rewriting_chain = None
+        else:
+            self.rewriting_chain = None
+
         # Load ClinicalBERT tokenizer
         logger.info("Loading ClinicalBERT tokenizer...")
         self.tokenizer = AutoTokenizer.from_pretrained(
@@ -106,6 +122,84 @@ Summary:"""
         self.summarization_chain = self.prompt | self.llm
         logger.info("Claude summarization chain initialized")
 
+    def _setup_note_rewriting(self, api_key: str):
+        """Setup LangChain with Claude for clinical note rewriting"""
+        config = self.config['text']['note_rewriting']
+
+        # Initialize Claude model for rewriting
+        self.rewriting_llm = ChatAnthropic(
+            model=config['model'],
+            anthropic_api_key=api_key,
+            temperature=config['temperature'],
+            max_tokens=config['max_rewrite_length'],
+            timeout=60,
+            max_retries=2
+        )
+
+        # Create rewriting prompt template (from notebook implementation)
+        rewriting_prompt_template = """You are a senior medical documentation assistant. Your job is to rewrite an unstructured clinical note into a complete, well-formatted form. Please preserve all factual details from the original note, without adding any new information. Follow these requirements when rewriting:
+
+1. Expand all abbreviations and shorthand to their full meaning (e.g. convert abbreviations like "c/o" to "complains of", "c/p" to "chest pain", medication names to full generic names, etc.).
+2. Normalize/Standardize the format: use complete sentences and a logical clinical narrative. If vital signs or measurements are present, format them consistently with units (e.g. blood pressure as "120/80 mmHg"). Use standard punctuation and grammar.
+3. Use a professional clinical tone: write as if this is an official medical record. The tone should be formal and factual, using medical terminology appropriately (for example, use "hyperglycemia" instead of "high blood sugar" if needed).
+4. Do NOT omit any information from the original note. Also, do NOT fabricate or infer facts that aren't in the note. If something is unclear or not provided, you may state it is unknown or leave it as is, but do not guess. (It's okay to add clarifying context in phrasing, but only if it's a standard interpretation of the given info.)
+5. Maintain all numerical values exactly as written from the original note, do not change the numerical data.
+
+Ensure the final output reads like a polished clinical note.
+
+Clinical Note to Rewrite:
+{note}"""
+
+        self.rewriting_prompt = ChatPromptTemplate.from_template(rewriting_prompt_template)
+
+        # Create chain using LCEL (pipe operator)
+        self.rewriting_chain = self.rewriting_prompt | self.rewriting_llm
+        logger.info("Claude note rewriting chain initialized")
+
+    def rewrite_note(self, note_text: str) -> str:
+        """
+        Rewrite clinical note using Claude for standardization.
+        Expands abbreviations and normalizes format.
+
+        Args:
+            note_text: Raw clinical note text
+
+        Returns:
+            Rewritten, standardized clinical note text
+        """
+        if self.rewriting_chain is None:
+            logger.debug("Note rewriting not available, using original text")
+            return note_text
+
+        if not note_text or len(note_text.strip()) == 0:
+            logger.warning("Empty note provided for rewriting")
+            return ""
+
+        try:
+            # Run rewriting with LCEL API
+            logger.debug(f"Rewriting note ({len(note_text)} chars)")
+            result = self.rewriting_chain.invoke({"note": note_text})
+
+            # Extract rewritten text (LCEL returns AIMessage object)
+            if hasattr(result, 'content'):
+                rewritten = result.content
+            else:
+                rewritten = str(result)
+
+            logger.debug(f"Rewritten note: {len(note_text)} chars -> {len(rewritten)} chars")
+            return rewritten.strip()
+
+        except Exception as e:
+            error_type = type(e).__name__
+            error_msg = str(e)
+
+            logger.error(f"Note rewriting failed ({error_type}): {error_msg}")
+            logger.debug(f"Original note length: {len(note_text)} characters")
+            logger.info("Using original note (rewriting fallback)")
+
+            # Fallback to original text
+            return note_text
+
     def process_note(self, note_text: str) -> Dict:
         """
         Complete note processing pipeline.
@@ -118,6 +212,11 @@ Summary:"""
         """
         if not note_text or len(note_text.strip()) == 0:
             return self._empty_note_result()
+
+        # Step 0: Optional note rewriting (if enabled)
+        if self.config['text'].get('note_rewriting', {}).get('enabled', False):
+            note_text = self.rewrite_note(note_text)
+            logger.debug(f"Using rewritten note ({len(note_text)} chars) for processing")
 
         # Step 1: Extract medical entities
         entities = self.extract_entities(note_text)

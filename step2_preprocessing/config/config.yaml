@@ -105,6 +105,14 @@ text:
     padding: "max_length"
     truncation: true
 
+  # Note rewriting settings (optional preprocessing step)
+  note_rewriting:
+    enabled: false  # Disabled by default to avoid extra API calls
+    use_claude: true
+    model: "claude-sonnet-4-5-20250929"
+    max_rewrite_length: 2000  # Maximum tokens for rewritten note
+    temperature: 0.0  # Deterministic output
+
 # Processing settings
 processing:
   batch_size: 1  # For full resolution images
