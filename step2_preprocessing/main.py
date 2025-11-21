@@ -277,6 +277,12 @@ def main():
         help='Logging level'
     )
 
+    parser.add_argument(
+        '--skip-on-error',
+        action='store_true',
+        help='Continue processing even if individual samples fail'
+    )
+
     args = parser.parse_args()
 
     # Load configuration

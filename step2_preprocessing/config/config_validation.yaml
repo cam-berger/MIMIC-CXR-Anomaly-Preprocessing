@@ -1,0 +1,131 @@
+# Step 2: Data Preprocessing Configuration - VALIDATION (200 samples)
+
+# Data paths
+data:
+  # Validation subset (200 samples)
+  step1_cohort_train: "./cohorts/validation_subset_200.csv"
+  step1_cohort_val: "./cohorts/validation_subset_200.csv"  # Same for validation run
+
+  # MIMIC data locations
+  mimic_cxr_base: "/media/dev/MIMIC_DATA/mimic-cxr-jpg"
+  mimic_iv_base: "/home/dev/Documents/Portfolio/MIMIC_Data/physionet.org/files/mimiciv/3.1"
+  mimic_ed_base: "/home/dev/Documents/Portfolio/MIMIC_Data/physionet.org/files/mimic-iv-ed/2.2"
+
+  # Output locations
+  output_base: "./output/validation_200"
+
+# Image processing settings
+image:
+  # Maintain full resolution - NO downsampling!
+  preserve_full_resolution: true
+  target_size: null  # null means keep original size
+
+  # Normalization method
+  normalize_method: "minmax"  # Options: "minmax" (0-1), "standardize" (z-score), "none"
+
+  # Augmentation settings - DISABLED for validation
+  augmentation:
+    enabled: false  # No augmentation for validation
+    rotation_range: 0
+    horizontal_flip: false
+    vertical_flip: false
+    brightness_range: 0.0
+    contrast_range: 0.0
+
+  # Memory management
+  use_memory_mapping: true
+  cache_processed: false
+
+# Structured data settings
+structured:
+  # Missing value handling
+  missing_token: "NOT_DONE"
+  use_missing_flags: true
+
+  # Temporal feature settings
+  temporal_features:
+    enabled: true
+    include_time_since_admission: true
+    include_measurement_count: true
+    include_ordinal_index: true
+    include_time_between_measurements: true
+
+  # Feature encoding
+  encoding_method: "aggregated"  # Options: "sequential", "aggregated"
+
+  # Labs to extract
+  priority_labs:
+    - "wbc"  # White blood cell count
+    - "hemoglobin"
+    - "hematocrit"
+    - "platelets"
+    - "sodium"
+    - "potassium"
+    - "chloride"
+    - "bicarbonate"
+    - "bun"  # Blood urea nitrogen
+    - "creatinine"
+    - "glucose"
+
+  # Vitals to extract
+  priority_vitals:
+    - "temperature"
+    - "heartrate"
+    - "resprate"
+    - "o2sat"
+    - "sbp"  # Systolic BP
+    - "dbp"  # Diastolic BP
+
+# Text processing settings
+text:
+  # NER settings
+  ner:
+    model: "en_core_sci_md"  # scispacy model
+    extract_entities: true
+
+  # Retrieval settings
+  retrieval:
+    use_entity_based: true
+    use_semantic_fallback: true
+    max_sentences: 20
+    similarity_threshold: 0.3
+
+  # LangChain + Claude settings
+  summarization:
+    use_claude: true
+    model: "claude-sonnet-4-5-20250929"  # Claude Sonnet 4.5 (latest, Sept 2024)
+    max_summary_length: 500  # tokens
+    temperature: 0.0  # Deterministic
+    system_prompt: "You are a medical expert summarizing clinical notes for chest X-ray interpretation."
+
+  # Tokenization
+  tokenizer:
+    model: "emilyalsentzer/Bio_ClinicalBERT"
+    max_length: 512
+    padding: "max_length"
+    truncation: true
+
+  # Note rewriting settings - DISABLED for validation (save API costs)
+  note_rewriting:
+    enabled: false  # Disabled to save API costs
+    use_claude: false
+    model: "claude-sonnet-4-5-20250929"
+    max_rewrite_length: 2000
+    temperature: 0.0
+
+# Processing settings
+processing:
+  batch_size: 1  # For full resolution images
+  num_workers: 4
+  use_gpu: true
+  device: "cuda"  # or "cpu"
+
+  # Logging
+  verbose: true
+  log_every_n: 10
+
+# Testing/debugging
+debug:
+  enabled: false
+  max_samples: 200  # Validation on 200 samples
+  save_intermediate: true
