@@ -6,12 +6,18 @@ import pandas as pd
 import numpy as np
 from typing import Dict, List, Optional, Tuple
 from datetime import datetime, timedelta
+from pathlib import Path
 import logging
+import sys
+
+# Add parent directory to path for base imports
+sys.path.insert(0, str(Path(__file__).parent.parent))
+from base.processor import StructuredProcessor
 
 logger = logging.getLogger(__name__)
 
 
-class TemporalFeatureExtractor:
+class TemporalFeatureExtractor(StructuredProcessor):
     """
     Extract structured clinical data with temporal awareness.
     Implements missing value tokens and time-series features as specified in Step 2.
@@ -20,7 +26,7 @@ class TemporalFeatureExtractor:
     MISSING_TOKEN = "NOT_DONE"
 
     def __init__(self, config: Dict, paths):
-        self.config = config
+        super().__init__(config)
         self.paths = paths
 
         # Load configuration
@@ -37,6 +43,29 @@ class TemporalFeatureExtractor:
         logger.info(f"  Vitals to extract: {len(self.priority_vitals)}")
         logger.info(f"  Temporal features: {self.temporal_enabled}")
         logger.info(f"  Encoding method: {self.encoding_method}")
+
+    def validate_config(self) -> None:
+        """Validate structured data configuration"""
+        # Check required keys
+        self.get_config_value('structured', 'priority_labs', required=True)
+        self.get_config_value('structured', 'priority_vitals', required=True)
+        self.get_config_value('structured', 'temporal_features', 'enabled', required=True)
+        self.get_config_value('structured', 'encoding_method', required=True)
+
+        # Validate encoding method
+        valid_methods = ['aggregated', 'sequential']
+        encoding = self.get_config_value('structured', 'encoding_method')
+        if encoding not in valid_methods:
+            raise ValueError(f"encoding_method must be one of {valid_methods}, got '{encoding}'")
+
+    def process(self, subject_id: int, hadm_id: Optional[int],
+                ed_intime: datetime, study_datetime: datetime, **kwargs) -> Optional[Dict]:
+        """Process structured data (implements BaseProcessor.process)"""
+        try:
+            return self.extract_features(subject_id, hadm_id, ed_intime, study_datetime)
+        except Exception as e:
+            self._handle_error(e, f"subject {subject_id}")
+            return None
 
     def _load_mimic_data(self):
         """Load MIMIC-IV data tables"""

@@ -590,6 +590,56 @@ This code is provided for research and educational purposes. Please ensure you h
 - Claude: https://www.anthropic.com/claude
 - LangChain: https://python.langchain.com/
 
+## Code Architecture and Testing
+
+### Recent Refactoring (November 2025)
+
+The Step 2 preprocessing pipeline has been refactored to improve maintainability, testability, and extensibility:
+
+**Base Processor Architecture:**
+- All data processors now inherit from abstract base classes:
+  - `ImageProcessor` → `FullResolutionImageLoader`
+  - `StructuredProcessor` → `TemporalFeatureExtractor`
+  - `TextProcessor` → `ClinicalNoteProcessor`
+- Common interface provides consistent configuration validation and error handling
+- Enables dependency injection for easier testing and modular design
+
+**Testing Infrastructure:**
+- Comprehensive unit test suite with 60+ tests
+- Test coverage for all processor modules:
+  - `test_image_loader.py`: Image loading, normalization, augmentation (13 tests)
+  - `test_temporal_processor.py`: Feature extraction, temporal aggregation (15 tests)
+  - `test_note_processor.py`: NER, retrieval, rewriting (21 tests)
+  - `test_multimodal_dataset.py`: Dataset integration (10 tests)
+- Shared fixtures in `conftest.py` for consistent test data
+- Run tests: `pytest tests/unit/ -v`
+
+**Code Organization:**
+```
+step2_preprocessing/
+├── src/
+│   ├── base/                    # Abstract base classes
+│   │   ├── __init__.py
+│   │   └── processor.py         # BaseProcessor, ImageProcessor, etc.
+│   ├── image_processing/
+│   │   └── image_loader.py      # Inherits from ImageProcessor
+│   ├── structured_data/
+│   │   └── temporal_processor.py # Inherits from StructuredProcessor
+│   └── text_processing/
+│       └── note_processor.py     # Inherits from TextProcessor
+├── tests/
+│   ├── conftest.py              # Shared fixtures
+│   └── unit/                    # Unit tests
+└── requirements/
+    └── dev.txt                  # Development dependencies
+```
+
+**Benefits:**
+- Improved testability through dependency injection
+- Consistent error handling across all processors
+- Easier to extend with new processor types
+- Better code reuse with shared base functionality
+
 ## Citation
 
 If you use this pipeline in your research, please cite:

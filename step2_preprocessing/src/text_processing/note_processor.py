@@ -7,8 +7,14 @@ import numpy as np
 from typing import List, Dict, Optional
 from sentence_transformers import SentenceTransformer
 from transformers import AutoTokenizer
+from pathlib import Path
 import logging
 import re
+import sys
+
+# Add parent directory to path for base imports
+sys.path.insert(0, str(Path(__file__).parent.parent))
+from base.processor import TextProcessor
 
 # LangChain and Anthropic imports
 try:
@@ -22,7 +28,7 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 
-class ClinicalNoteProcessor:
+class ClinicalNoteProcessor(TextProcessor):
     """
     Process clinical notes using:
     1. Medical NER (scispacy)
@@ -33,7 +39,7 @@ class ClinicalNoteProcessor:
     """
 
     def __init__(self, config: Dict, anthropic_api_key: Optional[str] = None):
-        self.config = config
+        super().__init__(config)
 
         # Load NER model
         logger.info("Loading scispacy NER model...")
@@ -85,6 +91,21 @@ class ClinicalNoteProcessor:
             config['text']['tokenizer']['model']
         )
         logger.info(f"  Loaded: {config['text']['tokenizer']['model']}")
+
+    def validate_config(self) -> None:
+        """Validate text processing configuration"""
+        # Check required keys
+        self.get_config_value('text', 'ner', 'model', required=True)
+        self.get_config_value('text', 'tokenizer', 'model', required=True)
+        self.get_config_value('text', 'retrieval', 'use_entity_based', required=True)
+
+    def process(self, note_text: str, **kwargs) -> Optional[Dict]:
+        """Process clinical note (implements BaseProcessor.process)"""
+        try:
+            return self.process_note(note_text)
+        except Exception as e:
+            self._handle_error(e, "processing note")
+            return None
 
     def _setup_claude_summarization(self, api_key: str):
         """Setup LangChain with Claude for summarization"""

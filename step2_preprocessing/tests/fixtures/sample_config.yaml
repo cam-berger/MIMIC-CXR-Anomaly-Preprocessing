@@ -1,0 +1,66 @@
+# Sample configuration for testing
+# This is a minimal valid configuration
+
+version: "1.0"
+
+image:
+  preserve_full_resolution: true
+  normalize_method: "minmax"
+  augmentation:
+    enabled: false
+    rotation_range: 0
+    horizontal_flip: false
+
+structured:
+  missing_token: "NOT_DONE"
+  encoding_method: "aggregated"
+  priority_labs:
+    - hemoglobin
+    - wbc
+    - creatinine
+  priority_vitals:
+    - heartrate
+    - sbp
+    - dbp
+    - o2sat
+
+text:
+  ner:
+    model: "en_core_sci_md"
+    extract_entities: true
+
+  summarization:
+    use_claude: false
+    model: "claude-sonnet-4-5-20250929"
+    temperature: 0.0
+    max_summary_length: 500
+
+  note_rewriting:
+    enabled: false
+    use_claude: false
+    model: "claude-sonnet-4-5-20250929"
+    temperature: 0.0
+    max_rewrite_length: 2000
+
+  retrieval:
+    use_entity_based: true
+    use_semantic_fallback: true
+    max_sentences: 20
+    similarity_threshold: 0.3
+
+  tokenizer:
+    model: "emilyalsentzer/Bio_ClinicalBERT"
+    max_length: 512
+    padding: "max_length"
+    truncation: true
+
+processing:
+  batch_size: 1
+  num_workers: 0
+
+data:
+  step1_cohort_train: "test_data/cohort_train.csv"
+  step1_cohort_val: "test_data/cohort_val.csv"
+  mimic_cxr_base: "test_data/mimic-cxr"
+  mimic_iv_base: "test_data/mimic-iv"
+  mimic_ed_base: "test_data/mimic-ed"

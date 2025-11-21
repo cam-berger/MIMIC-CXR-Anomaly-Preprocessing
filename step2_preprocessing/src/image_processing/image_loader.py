@@ -8,24 +8,58 @@ from pathlib import Path
 import torch
 from typing import Optional, Tuple, Dict
 import logging
+import sys
+
+# Add parent directory to path for base imports
+sys.path.insert(0, str(Path(__file__).parent.parent))
+from base.processor import ImageProcessor
 
 logger = logging.getLogger(__name__)
 
 
-class FullResolutionImageLoader:
+class FullResolutionImageLoader(ImageProcessor):
     """
     Load and preprocess MIMIC-CXR images at full resolution.
     NO downsampling to preserve fine-grained details.
     """
 
     def __init__(self, config: Dict):
-        self.config = config
+        super().__init__(config)
         self.normalize_method = config['image']['normalize_method']
         self.use_augmentation = config['image']['augmentation']['enabled']
 
         logger.info(f"Initialized FullResolutionImageLoader")
         logger.info(f"  Normalization: {self.normalize_method}")
         logger.info(f"  Augmentation: {self.use_augmentation}")
+
+    def validate_config(self) -> None:
+        """Validate image processing configuration"""
+        # Check required keys exist
+        self.get_config_value('image', 'normalize_method', required=True)
+        self.get_config_value('image', 'augmentation', 'enabled', required=True)
+
+        # Validate normalization method
+        valid_methods = ['minmax', 'standardize', 'none']
+        norm_method = self.get_config_value('image', 'normalize_method')
+        if norm_method not in valid_methods:
+            raise ValueError(f"normalize_method must be one of {valid_methods}, got '{norm_method}'")
+
+    def process(self, image_path: Path, **kwargs) -> Optional[Dict]:
+        """Process a single image (implements BaseProcessor.process)"""
+        try:
+            image_tensor = self.load_image(image_path)
+            return {
+                'image': image_tensor,
+                'path': str(image_path),
+                'stats': self.get_image_stats(image_tensor)
+            }
+        except Exception as e:
+            self._handle_error(e, f"processing {image_path}")
+            return None
+
+    def load_and_process(self, image_path: Path, **kwargs) -> Optional[torch.Tensor]:
+        """Load and process an image (implements ImageProcessor.load_and_process)"""
+        return self.load_image(image_path)
 
     def load_image(self, image_path: Path) -> torch.Tensor:
         """
