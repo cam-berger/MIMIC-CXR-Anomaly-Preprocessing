@@ -199,16 +199,44 @@ cd step2_preprocessing
 python3 -m venv venv
 source venv/bin/activate
 
-# Install dependencies
+# Install dependencies (order matters to avoid numpy conflicts)
 pip install --upgrade pip
+
+# 1. Install PyTorch with CUDA 12.6 support (CRITICAL: use cu126 for Lambda GPU)
 pip3 install torch torchvision --index-url https://download.pytorch.org/whl/cu126
+
+# 2. Install main requirements (includes langchain, anthropic, transformers)
 pip install -r requirements.txt
+
+# 3. Install scispacy and medical NER model (has specific numpy requirements)
 pip install scispacy
 pip install https://s3-us-west-2.amazonaws.com/ai2-s2-scispacy/releases/v0.5.1/en_core_sci_md-0.5.1.tar.gz
 
-# Verify GPU
-python3 -c "import torch; print(f'CUDA: {torch.cuda.is_available()}, GPU: {torch.cuda.get_device_name(0)}')"
-# Expected: CUDA: True, GPU: NVIDIA GH200
+# 4. Fix numpy compatibility if needed (scispacy may downgrade numpy)
+pip uninstall -y numpy
+pip install numpy==1.26.4
+
+# 5. Reinstall spacy/scispacy against correct numpy
+pip uninstall -y spacy thinc -y
+pip install spacy==3.4.4
+pip install scispacy
+
+# 6. Reinstall scispacy model
+pip install https://s3-us-west-2.amazonaws.com/ai2-s2-scispacy/releases/v0.5.1/en_core_sci_md-0.5.1.tar.gz
+
+# Verify installations
+echo ""
+echo "Verifying installations..."
+python3 -c "import torch; print(f'✓ PyTorch CUDA: {torch.cuda.is_available()}, GPU: {torch.cuda.get_device_name(0) if torch.cuda.is_available() else \"N/A\"}')"
+python3 -c "import numpy; import spacy; import scispacy; print(f'✓ Numpy: {numpy.__version__}, Spacy: {spacy.__version__}')"
+python3 -c "import langchain; from langchain_anthropic import ChatAnthropic; import anthropic; print('✓ LangChain & Anthropic installed')"
+python3 -c "from src.integration.multimodal_dataset import MultimodalMIMICDataset; print('✓ Main imports successful')"
+
+# Expected output:
+# ✓ PyTorch CUDA: True, GPU: NVIDIA GH200 120GB
+# ✓ Numpy: 1.26.4, Spacy: 3.4.4
+# ✓ LangChain & Anthropic installed
+# ✓ Main imports successful
 ```
 
 ### 5. Configure Data Paths (5 min)
