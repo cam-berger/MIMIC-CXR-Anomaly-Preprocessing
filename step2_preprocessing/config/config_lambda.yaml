@@ -1,0 +1,171 @@
+# Step 2: Data Preprocessing Configuration - Lambda GPU Deployment
+# Updated for 200-sample validation deployment on Lambda instance
+
+# Data paths - Lambda instance locations
+data:
+  # From Step 1 - using validation subset
+  step1_cohort_train: "/home/ubuntu/code/step2_preprocessing/cohorts/normal_cohort_train.csv"
+  step1_cohort_val: "/home/ubuntu/code/step2_preprocessing/cohorts/validation_subset_200.csv"
+
+  # MIMIC data locations on Lambda instance
+  mimic_cxr_base: "/home/ubuntu/data/cxr"
+  mimic_iv_base: "/home/ubuntu/data/mimic-iv"
+  mimic_ed_base: "/home/ubuntu/data/mimic-ed"
+  cxr_pro_base: "/home/ubuntu/data/cxr-pro"
+
+  # Output locations
+  output_base: "/home/ubuntu/output"
+
+# Image processing settings
+image:
+  # Maintain full resolution - NO downsampling!
+  preserve_full_resolution: true
+  target_size: null  # null means keep original size
+
+  # Normalization method
+  normalize_method: "minmax"  # Options: "minmax" (0-1), "standardize" (z-score), "none"
+
+  # Augmentation settings - DISABLED for validation deployment
+  augmentation:
+    enabled: false  # User did not select augmentation
+    rotation_range: 5  # degrees
+    horizontal_flip: false  # CXR should not be flipped
+    vertical_flip: false
+    brightness_range: 0.1
+    contrast_range: 0.1
+
+  # Memory management
+  use_memory_mapping: true
+  cache_processed: false
+
+# Structured data settings
+structured:
+  # Missing value handling
+  missing_token: "NOT_DONE"
+  use_missing_flags: true
+
+  # Temporal feature settings
+  temporal_features:
+    enabled: true
+    include_time_since_admission: true
+    include_measurement_count: true
+    include_ordinal_index: true
+    include_time_between_measurements: true
+
+  # Feature encoding
+  encoding_method: "aggregated"  # Options: "sequential", "aggregated"
+
+  # Labs to extract
+  priority_labs:
+    - "wbc"  # White blood cell count
+    - "hemoglobin"
+    - "hematocrit"
+    - "platelets"
+    - "sodium"
+    - "potassium"
+    - "chloride"
+    - "bicarbonate"
+    - "bun"  # Blood urea nitrogen
+    - "creatinine"
+    - "glucose"
+
+  # Vitals to extract
+  priority_vitals:
+    - "temperature"
+    - "heartrate"
+    - "resprate"
+    - "o2sat"
+    - "sbp"  # Systolic BP
+    - "dbp"  # Diastolic BP
+
+# Text processing settings
+text:
+  # NER settings
+  ner:
+    model: "en_core_sci_md"  # scispacy model
+    extract_entities: true
+
+  # Retrieval settings
+  retrieval:
+    use_entity_based: true
+    use_semantic_fallback: true
+    max_sentences: 20
+    similarity_threshold: 0.3
+
+  # LangChain + Claude settings - ENABLED per user selection
+  summarization:
+    use_claude: true
+    model: "claude-sonnet-4-5-20250929"  # Claude Sonnet 4.5 (latest, Sept 2024)
+    max_summary_length: 500  # tokens
+    temperature: 0.0  # Deterministic
+    system_prompt: "You are a medical expert summarizing clinical notes for chest X-ray interpretation."
+
+  # Tokenization
+  tokenizer:
+    model: "emilyalsentzer/Bio_ClinicalBERT"
+    max_length: 512
+    padding: "max_length"
+    truncation: true
+
+  # Note rewriting settings - DISABLED to reduce API costs
+  note_rewriting:
+    enabled: false  # Disabled by default to avoid extra API calls
+    use_claude: true
+    model: "claude-sonnet-4-5-20250929"
+    max_rewrite_length: 2000  # Maximum tokens for rewritten note
+    temperature: 0.0  # Deterministic output
+
+# Processing settings
+processing:
+  batch_size: 1  # For full resolution images
+  num_workers: 4
+  use_gpu: true
+  device: "cuda"  # Lambda GH200 GPU
+
+  # Logging
+  verbose: true
+  log_every_n: 10
+
+# Pre-compilation settings - ENABLED for Lambda deployment
+precompilation:
+  enabled: true  # Pre-compilation mode for fast training
+  batch_size: 200  # Single batch with all 200 samples
+  output_dir: "/home/ubuntu/output/val"
+
+  # Storage configuration
+  storage:
+    image_format: "hdf5"  # HDF5 for images (memory-mapped, chunked)
+    structured_format: "parquet"  # Parquet for structured/text (columnar, queryable)
+    compression: "gzip"  # Options: "gzip", "snappy", "lz4", "zstd"
+    chunk_size: 100  # Samples per HDF5 chunk (for memory-mapped loading)
+
+  # Data source toggles - ALL ENABLED per user selection
+  data_sources:
+    mimic_cxr_jpg: true  # Use MIMIC-CXR-JPG for images
+    mimic_iv: true  # Use MIMIC-IV for demographics, admissions, labs
+    mimic_ed: true  # Use MIMIC-IV-ED for vitals, triage
+    cxr_pro: true  # Use CXR-PRO for radiology reports (USER SELECTED)
+    mimic_iv_note: "auto"  # "auto" = detect availability
+    mimic_iv_med: "auto"  # "auto" = detect availability
+
+  # Temporal aggregation window
+  temporal_window:
+    before_study_hours: 48  # Extract data from 48 hours before CXR
+    after_study_hours: 24  # Extract data up to 24 hours after CXR
+
+  # Checkpoint settings (for resuming failed builds)
+  checkpoint:
+    enabled: true
+    save_every_n_samples: 50  # Save checkpoint every 50 samples (more frequent for 200 total)
+    checkpoint_dir: "/home/ubuntu/output/checkpoints"
+
+  # Batch manifest settings
+  manifest:
+    include_checksums: true  # Compute SHA256 checksums for integrity
+    include_stats: true  # Include per-batch statistics (completeness, sizes)
+
+# Testing/debugging
+debug:
+  enabled: false
+  max_samples: null  # Process all 200 samples
+  save_intermediate: false

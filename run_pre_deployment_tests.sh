@@ -45,7 +45,7 @@ echo "PHASE 1: DEPENDENCY CHECK"
 echo "========================================================================"
 echo ""
 
-run_test "Check Python version (>=3.8)" "python --version | grep -E 'Python 3\.(8|9|10|11|12)'"
+run_test "Check Python version (>=3.8)" "python --version | grep -E 'Python 3\.([8-9]|1[0-9])'"
 run_test "Check PyTorch installed" "python -c 'import torch; print(f\"PyTorch {torch.__version__}\")'"
 run_test "Check h5py installed" "python -c 'import h5py; print(f\"h5py {h5py.__version__}\")'"
 run_test "Check pyarrow installed" "python -c 'import pyarrow; print(f\"pyarrow {pyarrow.__version__}\")'"
