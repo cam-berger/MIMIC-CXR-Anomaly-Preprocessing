@@ -172,21 +172,25 @@ ls -lh *.tar.gz
 # Replace <LAMBDA_IP> with your instance IP
 export LAMBDA_IP=xxx.xxx.xxx.xxx
 
-# Transfer compressed archives
-rsync -avz --progress validation_data_subset.tar.gz ubuntu@$LAMBDA_IP:~/
-rsync -avz --progress step2_preprocessing.tar.gz ubuntu@$LAMBDA_IP:~/
+# Set PEM key path (adjust if different)
+export PEM_KEY=/home/dev/Downloads/berger-cm.pem
+
+# Transfer compressed archives and validation script
+rsync -avz --progress -e "ssh -i $PEM_KEY -o StrictHostKeyChecking=no" validation_data_subset.tar.gz ubuntu@$LAMBDA_IP:~/
+rsync -avz --progress -e "ssh -i $PEM_KEY -o StrictHostKeyChecking=no" step2_preprocessing.tar.gz ubuntu@$LAMBDA_IP:~/
+rsync -avz -e "ssh -i $PEM_KEY -o StrictHostKeyChecking=no" validate_deployment_paths.sh ubuntu@$LAMBDA_IP:~/
 ```
 
 ### 4. Setup Environment on Lambda GPU (15 min)
 
 ```bash
-# SSH into Lambda GPU
-ssh ubuntu@$LAMBDA_IP
+# SSH into Lambda GPU (use PEM key from step 3)
+ssh -i $PEM_KEY ubuntu@$LAMBDA_IP
 
 # Create workspace and extract
 mkdir -p ~/mimic-cxr-validation
 cd ~/mimic-cxr-validation
-mv ~/validation_data_subset.tar.gz ~/step2_preprocessing.tar.gz .
+mv ~/validation_data_subset.tar.gz ~/step2_preprocessing.tar.gz ~/validate_deployment_paths.sh .
 tar -xzf validation_data_subset.tar.gz
 tar -xzf step2_preprocessing.tar.gz
 
