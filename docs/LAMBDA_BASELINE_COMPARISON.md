@@ -367,11 +367,29 @@ sed -i 's|cxr_pro_reports:.*|cxr_pro_reports: "/home/ubuntu/mimic-cxr-validation
 5. **Poor Sampling**: Simple head -201 not representative
 
 ### What's Fixed (New Run)
-1. ✅ **CXR-PRO Path Configured**: 4th sed command + validation script
-2. ✅ **Path Validation**: `validate_deployment_paths.sh` catches errors early
-3. ✅ **DICOM Integration**: 10 acquisition context features per sample
-4. ✅ **Stratified Sampling**: Gender/age balanced cohort
-5. ✅ **Comprehensive Docs**: Pre-deployment checklist + comparison guide
+1. ✅ **CXR-PRO Loading Bug Fixed**: Reports now properly joined to cohort before processing
+2. ✅ **CXR-PRO Path Configured**: 5th sed command + validation script
+3. ✅ **Path Validation**: `validate_deployment_paths.sh` catches errors early
+4. ✅ **DICOM Integration**: 10 acquisition context features per sample
+5. ✅ **Stratified Sampling**: Gender/age balanced cohort
+6. ✅ **Comprehensive Docs**: Pre-deployment checklist + comparison guide
+
+#### Technical Implementation of CXR-PRO Fix
+**Root Cause**: The `CXRProLoader.join_with_cohort()` method existed but was never called during preprocessing, causing the cohort DataFrame to lack the `radiology_report` column that `multimodal_dataset.py` expected.
+
+**Solution** (Commit f1e44c6):
+- Added `prepare_cohort_with_reports()` function in `main.py`
+- Loads cohort CSV and initializes `CXRProLoader`
+- Calls `join_with_cohort()` to merge 371k CXR-PRO reports with cohort
+- Saves merged cohort with `radiology_report` column
+- Passes merged cohort path to `MultimodalMIMICDataset` initialization
+- Now called for both training and validation splits
+
+**Verification**:
+- Local testing: `validation_subset_200_with_reports.csv` created with actual report text
+- Lambda deployment: Reports found 199/200 (99.5%), up from 0/200 (0%)
+- Claude API calls succeeding: `HTTP/1.1 200 OK`
+- Text tokenization producing 50-200 tokens instead of 2
 
 ### Expected Outcomes
 - **95%+ success rate** (vs 6.5%)
