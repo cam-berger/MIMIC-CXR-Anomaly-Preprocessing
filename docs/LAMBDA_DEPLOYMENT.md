@@ -266,18 +266,36 @@ export ANTHROPIC_API_KEY='your-anthropic-api-key-here'
 
 ```bash
 cd ~/mimic-cxr-validation/step2_preprocessing
-source venv/bin/activate
 
-# Run preprocessing with validation config
-python3 main.py \
+# CRITICAL: Use explicit venv python path for background/nohup processes
+# Using 'python3' after 'source venv/bin/activate' doesn't work reliably with nohup
+# This prevents "LangChain/Anthropic not available" import errors
+
+# Option A: Interactive (recommended for first run to see real-time output)
+./venv/bin/python3 main.py \
   --config config/config_validation.yaml \
   --anthropic-api-key $ANTHROPIC_API_KEY \
   --train-only \
   --skip-on-error \
   2>&1 | tee preprocessing_validation.log
 
+# Option B: Background (for long-running unattended execution)
+nohup ./venv/bin/python3 main.py \
+  --config config/config_validation.yaml \
+  --anthropic-api-key $ANTHROPIC_API_KEY \
+  --train-only \
+  --skip-on-error \
+  > preprocessing_validation.log 2>&1 &
+
+# Get process ID
+PROC_PID=$!
+echo "Preprocessing started (PID: $PROC_PID)"
+
 # Monitor progress in separate terminal
 tail -f preprocessing_validation.log
+
+# Check if process is still running
+ps aux | grep $PROC_PID
 
 # Monitor GPU usage
 watch -n 2 nvidia-smi
