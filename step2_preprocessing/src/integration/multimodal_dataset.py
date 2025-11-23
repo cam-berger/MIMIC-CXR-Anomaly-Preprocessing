@@ -80,8 +80,20 @@ class MultimodalMIMICDataset(Dataset):
         if self.load_structured:
             logger.info("Initializing structured data processor...")
             self.structured_processor = TemporalFeatureExtractor(config, paths)
+
+            # Initialize DICOM metadata loader for image acquisition context
+            dicom_metadata_path = config.get('data', {}).get('dicom_metadata_path')
+            if dicom_metadata_path:
+                logger.info("Initializing DICOM metadata loader...")
+                from ..data_loaders import DICOMMetadataLoader
+                self.dicom_metadata_loader = DICOMMetadataLoader(dicom_metadata_path)
+                logger.info(f"  DICOM metadata coverage: {self.dicom_metadata_loader.get_coverage_stats()['total_studies']} studies")
+            else:
+                logger.warning("DICOM metadata path not configured - image acquisition context will not be included")
+                self.dicom_metadata_loader = None
         else:
             self.structured_processor = None
+            self.dicom_metadata_loader = None
 
         if self.load_text:
             logger.info("Initializing text processor...")
@@ -172,9 +184,10 @@ class MultimodalMIMICDataset(Dataset):
             return None
 
     def _load_structured(self, row: pd.Series, errors: List[str]) -> Optional[Dict]:
-        """Load temporal structured features (labs/vitals)"""
+        """Load temporal structured features (labs/vitals) with DICOM acquisition context"""
         try:
             subject_id = int(row['subject_id'])
+            study_id = int(row['study_id'])
             hadm_id = row.get('hadm_id')
 
             # Handle NaN hadm_id
@@ -186,12 +199,18 @@ class MultimodalMIMICDataset(Dataset):
             ed_intime = row['ed_intime']
             study_datetime = row['study_datetime']
 
-            # Extract features
+            # Get DICOM metadata features (view position, orientation, etc.)
+            dicom_metadata = None
+            if self.dicom_metadata_loader is not None:
+                dicom_metadata = self.dicom_metadata_loader.get_metadata_features(study_id)
+
+            # Extract features (includes DICOM metadata, vitals, labs)
             features = self.structured_processor.extract_features(
                 subject_id=subject_id,
                 hadm_id=hadm_id,
                 ed_intime=ed_intime,
-                study_datetime=study_datetime
+                study_datetime=study_datetime,
+                dicom_metadata=dicom_metadata
             )
 
             return features

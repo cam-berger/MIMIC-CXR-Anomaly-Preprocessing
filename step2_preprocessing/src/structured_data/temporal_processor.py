@@ -120,7 +120,8 @@ class TemporalFeatureExtractor(StructuredProcessor):
         subject_id: int,
         hadm_id: Optional[int],
         ed_intime: datetime,
-        study_datetime: datetime
+        study_datetime: datetime,
+        dicom_metadata: Optional[Dict[str, float]] = None
     ) -> Dict:
         """
         Extract all structured features for a patient case.
@@ -130,11 +131,17 @@ class TemporalFeatureExtractor(StructuredProcessor):
             hadm_id: Hospital admission ID (may be None for ED-only visits)
             ed_intime: ED admission time
             study_datetime: CXR study datetime
+            dicom_metadata: DICOM acquisition metadata features (view position, orientation, etc.)
 
         Returns:
-            Dictionary of features with temporal metadata
+            Dictionary of features with temporal metadata and DICOM acquisition context
         """
         features = {}
+
+        # Add DICOM metadata features (image acquisition context)
+        # This helps model account for view-dependent anatomy (AP vs PA, Erect vs Recumbent)
+        if dicom_metadata is not None:
+            features.update(dicom_metadata)
 
         # Extract vitals
         vital_features = self._extract_vitals(subject_id, ed_intime, study_datetime)

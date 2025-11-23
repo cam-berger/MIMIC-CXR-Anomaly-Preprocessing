@@ -1,0 +1,111 @@
+# DICOM Metadata Integration Test - 5 samples
+# Purpose: Verify DICOM features are properly extracted and included in structured features
+# Test cases: PA+LAT, AP portable, LAT+AP, Recumbent (if available), PA only
+
+# Data paths
+data:
+  # 5-sample test cohort with diverse DICOM metadata
+  step1_cohort_train: "./cohorts/dicom_test_5.csv"
+  step1_cohort_val: "./cohorts/dicom_test_5.csv"
+
+  # Full dataset paths (not validation_data_subset)
+  mimic_cxr_base: "/media/dev/MIMIC_DATA/mimic-cxr-jpg"
+  mimic_iv_base: "/home/dev/Documents/Portfolio/MIMIC_Data/physionet.org/files/mimiciv/3.1"
+  mimic_ed_base: "/home/dev/Documents/Portfolio/MIMIC_Data/physionet.org/files/mimic-iv-ed/2.2"
+
+  # CXR-PRO reports (371k reports)
+  cxr_pro_reports: "../validation_data_subset/cxr-pro/mimic_train_impressions.csv"
+
+  # DICOM metadata (view position, orientation, dimensions)
+  dicom_metadata_path: "/media/dev/MIMIC_DATA/mimic-cxr-jpg/mimic-cxr-2.0.0-metadata.csv.gz"
+
+  # Output
+  output_base: "./output/dicom_test_5"
+
+# Image processing
+image:
+  preserve_full_resolution: true
+  target_size: null
+  normalize_method: "minmax"
+  augmentation:
+    enabled: false
+  use_memory_mapping: true
+  cache_processed: false
+
+# Structured data
+structured:
+  missing_token: "NOT_DONE"
+  use_missing_flags: true
+  temporal_features:
+    enabled: true
+    include_time_since_admission: true
+    include_measurement_count: true
+    include_ordinal_index: true
+    include_time_between_measurements: true
+  encoding_method: "aggregated"
+
+  priority_labs:
+    - "wbc"
+    - "hemoglobin"
+    - "hematocrit"
+    - "platelets"
+    - "sodium"
+    - "potassium"
+    - "chloride"
+    - "bicarbonate"
+    - "bun"
+    - "creatinine"
+    - "glucose"
+
+  priority_vitals:
+    - "temperature"
+    - "heartrate"
+    - "resprate"
+    - "o2sat"
+    - "sbp"
+    - "dbp"
+
+# Text processing - NO CLAUDE SUMMARIZATION, NO NER (skip for quick test)
+text:
+  ner:
+    model: "en_core_sci_md"
+    extract_entities: false  # Disabled to skip scispacy dependency
+
+  retrieval:
+    use_entity_based: true
+    use_semantic_fallback: true
+    max_sentences: 20
+    similarity_threshold: 0.3
+
+  # DISABLED: Skip Claude summarization to save cost/time
+  summarization:
+    use_claude: false
+    model: "claude-sonnet-4-5-20250929"
+    max_summary_length: 500
+    temperature: 0.0
+    system_prompt: "You are a medical expert summarizing clinical notes for chest X-ray interpretation."
+
+  tokenizer:
+    model: "emilyalsentzer/Bio_ClinicalBERT"
+    max_length: 512
+    padding: "max_length"
+    truncation: true
+
+  note_rewriting:
+    enabled: false
+
+# Processing
+processing:
+  batch_size: 1
+  num_workers: 0  # Single-threaded for debugging
+  use_gpu: false
+  device: "cpu"
+  verbose: true
+  log_every_n: 1
+
+# Debug
+debug:
+  enabled: true
+  max_samples: 5
+  save_intermediate: true
+  skip_on_error: false  # Fail loudly to see errors

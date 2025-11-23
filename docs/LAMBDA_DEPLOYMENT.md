@@ -87,6 +87,15 @@ cd ~/mimic-cxr-validation/step2_preprocessing
 sed -i 's|/media/dev/MIMIC_DATA/mimic-cxr-jpg|/home/ubuntu/mimic-cxr-validation/validation_data_subset/cxr|g' config/config_validation.yaml
 sed -i 's|/home/dev/Documents/Portfolio/MIMIC_Data/physionet.org/files/mimiciv/3.1|/home/ubuntu/mimic-cxr-validation/validation_data_subset/mimic-iv|g' config/config_validation.yaml
 sed -i 's|/home/dev/Documents/Portfolio/MIMIC_Data/physionet.org/files/mimic-iv-ed/2.2|/home/ubuntu/mimic-cxr-validation/validation_data_subset/mimic-ed|g' config/config_validation.yaml
+sed -i 's|cxr_pro_reports:.*|cxr_pro_reports: "/home/ubuntu/mimic-cxr-validation/validation_data_subset/cxr-pro/mimic_train_impressions.csv"|g' config/config_validation.yaml
+sed -i 's|dicom_metadata_path:.*|dicom_metadata_path: "/home/ubuntu/mimic-cxr-validation/validation_data_subset/mimic-cxr-2.0.0-metadata.csv.gz"|g' config/config_validation.yaml
+
+# IMPORTANT: Validate all paths before proceeding
+cd ~/mimic-cxr-validation
+./validate_deployment_paths.sh step2_preprocessing/config/config_validation.yaml
+
+# If validation fails, DO NOT proceed - fix paths first!
+# This prevents 93.5% failure rate from missing CXR-PRO configuration
 
 # Set Anthropic API key
 export ANTHROPIC_API_KEY='your-anthropic-api-key-here'
@@ -295,7 +304,8 @@ Before running:
 - [ ] Lambda GPU instance launched (1xGH200)
 - [ ] Data extracted and transferred (~5-15GB)
 - [ ] Dependencies installed (PyTorch, scispacy, LangChain)
-- [ ] Config paths updated for Lambda filesystem
+- [ ] Config paths updated for Lambda filesystem (all 4: CXR, MIMIC-IV, MIMIC-ED, **CXR-PRO**)
+- [ ] **Path validation passed** (`./validate_deployment_paths.sh config/config_validation.yaml`)
 - [ ] Anthropic API key set
 - [ ] GPU verified (`nvidia-smi`)
 
@@ -306,6 +316,147 @@ After running:
 - [ ] Success rate ≥95%
 - [ ] Results downloaded to local machine
 - [ ] **Lambda GPU instance terminated**
+
+---
+
+## Troubleshooting
+
+### Issue 1: Text Processing Produces Empty Sequences (2 tokens)
+
+**Symptoms**:
+- `text_seq_length_stats` shows mean=2.0, median=2.0 (empty sequences)
+- All samples have minimal text tokens instead of expected 50-200 tokens
+- Text appears valid in cohort CSV but not loaded by processor
+
+**Root Cause**: CXR-PRO reports path not configured or incorrect in `config_validation.yaml`
+
+**Diagnosis**:
+```bash
+# Check if CXR-PRO path exists in config
+grep "cxr_pro_reports" config/config_validation.yaml
+
+# Should output something like:
+# cxr_pro_reports: "/home/ubuntu/mimic-cxr-validation/validation_data_subset/cxr-pro/mimic_train_impressions.csv"
+
+# If empty, the field is missing!
+```
+
+**Fix**:
+```bash
+# Add CXR-PRO path to config if missing
+echo '  cxr_pro_reports: "/home/ubuntu/mimic-cxr-validation/validation_data_subset/cxr-pro/mimic_train_impressions.csv"' >> config/config_validation.yaml
+
+# Or use sed to update existing path
+sed -i 's|cxr_pro_reports:.*|cxr_pro_reports: "/home/ubuntu/mimic-cxr-validation/validation_data_subset/cxr-pro/mimic_train_impressions.csv"|g' config/config_validation.yaml
+```
+
+**Prevention**: Run `validate_deployment_paths.sh` before preprocessing (see below)
+
+---
+
+### Issue 2: Structured Features Show "NOT_DONE" (Empty)
+
+**Symptoms**:
+- 93.5% of samples have `structured_status: "Empty"` in validation report
+- All vital signs show `is_missing: true` and value `NOT_DONE`
+- ED vitals exist in raw data but not extracted
+
+**Root Cause**: MIMIC-IV-ED path not configured correctly
+
+**Diagnosis**:
+```bash
+# Check if ED vitals file exists
+ls -lh /home/ubuntu/mimic-cxr-validation/validation_data_subset/mimic-ed/ed/vitalsign.csv
+
+# If missing, check config path
+grep "mimic_ed_base" config/config_validation.yaml
+```
+
+**Fix**:
+```bash
+# Update MIMIC-ED path
+sed -i 's|/home/dev/Documents/Portfolio/MIMIC_Data/physionet.org/files/mimic-iv-ed/2.2|/home/ubuntu/mimic-cxr-validation/validation_data_subset/mimic-ed|g' config/config_validation.yaml
+```
+
+---
+
+### Validation Script (Recommended)
+
+**Before running preprocessing**, validate all data paths:
+
+```bash
+# Run path validation script
+./validate_deployment_paths.sh step2_preprocessing/config/config_validation.yaml
+
+# Expected output:
+# ✅ All paths validated successfully!
+# 1. MIMIC-CXR Images: ✅ PASS (434 JPG files)
+# 2. MIMIC-IV Structured Data: ✅ PASS
+# 3. MIMIC-IV-ED Data: ✅ PASS
+# 4. CXR-PRO Radiology Reports: ✅ PASS (371,951 reports, 66MB)
+# 5. DICOM Metadata: ✅ PASS (377k images, view position & orientation)
+```
+
+**If validation fails**, fix paths before preprocessing to avoid 93.5% failure rate!
+
+---
+
+### DICOM Metadata Integration (NEW)
+
+**Purpose**: Provides image acquisition context to prevent misclassifications due to imaging technique.
+
+**Features extracted from DICOM metadata**:
+- **View Position**: PA, AP, LATERAL (one-hot encoded)
+- **Patient Orientation**: Erect vs. Recumbent (binary)
+- **Portable indicator**: Detects "CHEST (PORTABLE AP)" procedures
+- **Image dimensions**: Normalized pixel dimensions (proxy for field of view)
+- **Number of views**: Indicates study comprehensiveness
+
+**Why this matters**:
+- AP portable (patient supine) shows enlarged cardiac silhouette → prevents false cardiomegaly detections
+- LATERAL views show different anatomy → model knows view type
+- Recumbent position affects fluid distribution → prevents false edema detections
+
+**Configuration**: Already included in `config_validation.yaml`:
+```yaml
+data:
+  dicom_metadata_path: "/path/to/mimic-cxr-2.0.0-metadata.csv.gz"
+```
+
+**Coverage**:
+- 227,835 studies (96.8% have view position, 90.0% have orientation)
+- 58.2% AP, 37.7% PA, 47.2% LATERAL
+- 81.3% Erect, 10.1% Recumbent
+- 49.7% Portable procedures
+
+---
+
+### Issue 3: Missing Dependencies
+
+**Symptoms**: `ModuleNotFoundError` during preprocessing
+
+**Common missing packages**:
+```bash
+pip install sentence-transformers  # For text embeddings
+pip install scispacy  # For medical NER
+pip install en-core-sci-md  # ScispaCy model (350MB)
+```
+
+---
+
+### Issue 4: Lambda GPU Instance Costs
+
+**Cost monitoring**:
+- 1x NVIDIA GH200 Grace Hopper: **$3.69/hour**
+- 200-sample validation: ~3 hours = **~$11**
+- **Always terminate instance after downloading results!**
+
+```bash
+# Check instance status from local machine
+ssh ubuntu@<LAMBDA_IP> "uptime"
+
+# Terminate from Lambda dashboard after confirming downloads
+```
 
 ---
 

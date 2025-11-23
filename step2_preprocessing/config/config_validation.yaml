@@ -11,6 +11,12 @@ data:
   mimic_iv_base: "/home/dev/Documents/Portfolio/MIMIC_Data/physionet.org/files/mimiciv/3.1"
   mimic_ed_base: "/home/dev/Documents/Portfolio/MIMIC_Data/physionet.org/files/mimic-iv-ed/2.2"
 
+  # CXR-PRO radiology reports (374k reports, 99% coverage)
+  cxr_pro_reports: "../validation_data_subset/cxr-pro/mimic_train_impressions.csv"
+
+  # DICOM metadata (view position, patient orientation, image dimensions)
+  dicom_metadata_path: "/media/dev/MIMIC_DATA/mimic-cxr-jpg/mimic-cxr-2.0.0-metadata.csv.gz"
+
   # Output locations
   output_base: "./output/validation_200"
 

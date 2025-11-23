@@ -23,10 +23,10 @@ echo "Output directory: $OUTPUT_DIR"
 echo ""
 
 # Create output directories
-mkdir -p ${OUTPUT_DIR}/{cxr/files,mimic-iv/hosp,mimic-ed/ed}
+mkdir -p ${OUTPUT_DIR}/{cxr/files,mimic-iv/hosp,mimic-ed/ed,cxr-pro}
 
 # 1. Extract CXR images for 200 samples
-echo "Step 1/3: Extracting CXR images..."
+echo "Step 1/5: Extracting CXR images..."
 echo "--------------------------------------"
 python3 << 'EOF'
 import pandas as pd
@@ -75,7 +75,7 @@ EOF
 echo ""
 
 # 2. Copy MIMIC-IV structured data (labs/vitals)
-echo "Step 2/3: Copying MIMIC-IV structured data..."
+echo "Step 2/5: Copying MIMIC-IV structured data..."
 echo "----------------------------------------------"
 
 # Copy dictionary files (small, always need these)
@@ -123,7 +123,7 @@ EOFLAB
 echo ""
 
 # 3. Copy MIMIC-IV-ED data (notes + vitals)
-echo "Step 3/3: Copying MIMIC-IV-ED data..."
+echo "Step 3/5: Copying MIMIC-IV-ED data..."
 echo "--------------------------------------"
 
 # Copy ED directory recursively
@@ -134,6 +134,62 @@ if [ -d "/home/dev/Documents/Portfolio/MIMIC_Data/physionet.org/files/mimic-iv-e
     echo "  - ED data copied successfully"
 else
     echo "  WARNING: MIMIC-IV-ED directory not found"
+fi
+
+echo ""
+
+# 4. Copy CXR-PRO radiology reports
+echo "Step 4/5: Copying CXR-PRO radiology reports..."
+echo "----------------------------------------------"
+
+# Create CXR-PRO output directory
+mkdir -p ${OUTPUT_DIR}/cxr-pro
+
+# Copy CXR-PRO reports (mimic_train_impressions.csv - 66MB with 371,951 reports)
+CXR_PRO_SOURCE="/home/dev/Documents/Portfolio/MIMIC_Data/physionet.org/files/cxr-pro/mimic_train_impressions.csv"
+if [ -f "$CXR_PRO_SOURCE" ]; then
+    echo "  - Copying mimic_train_impressions.csv (371k reports, 66MB)..."
+    cp "$CXR_PRO_SOURCE" ${OUTPUT_DIR}/cxr-pro/
+    echo "  - CXR-PRO reports copied successfully"
+
+    # Verify coverage
+    python3 << 'EOFCXRPRO'
+import pandas as pd
+from pathlib import Path
+
+cohort = pd.read_csv("/home/dev/Documents/Portfolio/MIMIC/MIMIC-CXR-Anomaly-Preprocessing/step2_preprocessing/cohorts/validation_subset_200.csv")
+cxr_pro = pd.read_csv(Path("/home/dev/Documents/Portfolio/MIMIC/MIMIC-CXR-Anomaly-Preprocessing/validation_data_subset/cxr-pro/mimic_train_impressions.csv"))
+
+cohort_subjects = set(cohort['subject_id'].unique())
+cxr_pro_subjects = set(cxr_pro['subject_id'].unique())
+matched = cohort_subjects.intersection(cxr_pro_subjects)
+
+print(f"  - Coverage: {len(matched)}/{len(cohort_subjects)} subjects ({100*len(matched)/len(cohort_subjects):.1f}%)")
+EOFCXRPRO
+else
+    echo "  WARNING: CXR-PRO reports not found at: $CXR_PRO_SOURCE"
+    echo "  Text processing will fail without these reports!"
+fi
+
+echo ""
+
+# 5. Copy DICOM metadata (for image acquisition context)
+echo "Step 5/5: Copying DICOM metadata..."
+echo "----------------------------------------------"
+
+DICOM_METADATA_SOURCE="/media/dev/MIMIC_DATA/mimic-cxr-jpg/mimic-cxr-2.0.0-metadata.csv.gz"
+if [ -f "$DICOM_METADATA_SOURCE" ]; then
+    echo "  - Copying mimic-cxr-2.0.0-metadata.csv.gz (377k DICOM images, 100MB compressed)..."
+    cp "$DICOM_METADATA_SOURCE" ${OUTPUT_DIR}/
+    echo "  - DICOM metadata copied successfully"
+    echo "  - Features: View position, patient orientation, image dimensions"
+
+    # Show size
+    SIZE=$(du -h ${OUTPUT_DIR}/mimic-cxr-2.0.0-metadata.csv.gz | cut -f1)
+    echo "  - Size: $SIZE"
+else
+    echo "  WARNING: DICOM metadata not found at: $DICOM_METADATA_SOURCE"
+    echo "  Image acquisition features (view position, orientation) will not be available!"
 fi
 
 echo ""
@@ -150,6 +206,10 @@ echo "Breakdown by component:"
 du -sh ${OUTPUT_DIR}/cxr/
 du -sh ${OUTPUT_DIR}/mimic-iv/
 du -sh ${OUTPUT_DIR}/mimic-ed/
+du -sh ${OUTPUT_DIR}/cxr-pro/
+if [ -f "${OUTPUT_DIR}/mimic-cxr-2.0.0-metadata.csv.gz" ]; then
+    du -sh ${OUTPUT_DIR}/mimic-cxr-2.0.0-metadata.csv.gz
+fi
 echo ""
 echo "Next steps:"
 echo "  1. Compress for transfer: tar -czf validation_data_subset.tar.gz validation_data_subset/"
