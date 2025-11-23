@@ -202,20 +202,18 @@ class MultimodalMIMICDataset(Dataset):
             return None
 
     def _load_text(self, row: pd.Series, errors: List[str]) -> Optional[Dict]:
-        """Load and process clinical notes"""
+        """Load and process clinical notes / radiology reports"""
         try:
-            # In Step 1, we don't have clinical notes loaded yet
-            # This is a placeholder for when we integrate MIMIC-IV clinical notes
-
-            # For now, return empty/placeholder
-            # TODO: Load actual clinical notes from MIMIC-IV noteevents table
-            note_text = row.get('clinical_note', '')
+            # Use radiology report impressions from CXR-Pro dataset
+            # This contains radiologist-written findings for each CXR study
+            # Format: "No acute cardiopulmonary process", "Evidence of pneumonia", etc.
+            note_text = row.get('radiology_report', '')
 
             if pd.isna(note_text) or len(str(note_text).strip()) == 0:
-                # Return empty result
+                # Return empty result if no report available
                 return self.text_processor._empty_note_result()
 
-            # Process note
+            # Process radiology report
             result = self.text_processor.process_note(str(note_text))
 
             return result

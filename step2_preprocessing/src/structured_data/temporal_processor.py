@@ -90,9 +90,30 @@ class TemporalFeatureExtractor(StructuredProcessor):
             logger.warning(f"Could not load ED triage: {e}")
             self.ed_triage = pd.DataFrame()
 
-        # Lab events - this is very large, we'll load in chunks as needed
+        # Lab events - load ONCE during initialization (chunked for memory efficiency)
         self.lab_events_path = self.paths.get_lab_events_path()
-        logger.info(f"  Lab events will be loaded on-demand from {self.lab_events_path}")
+        try:
+            logger.info(f"  Loading lab events (this may take 30-60 seconds)...")
+
+            # Load only required columns to save memory
+            required_cols = ['hadm_id', 'charttime', 'label', 'valuenum']
+
+            # Read in chunks to avoid memory issues
+            chunks = []
+            for chunk in pd.read_csv(
+                self.lab_events_path,
+                chunksize=1_000_000,
+                usecols=required_cols,
+                parse_dates=['charttime']
+            ):
+                chunks.append(chunk)
+
+            self.lab_events = pd.concat(chunks, ignore_index=True)
+            logger.info(f"  Loaded {len(self.lab_events):,} lab event records")
+
+        except Exception as e:
+            logger.warning(f"Could not load lab events: {e}")
+            self.lab_events = pd.DataFrame()
 
     def extract_features(
         self,
@@ -206,32 +227,25 @@ class TemporalFeatureExtractor(StructuredProcessor):
         """Extract laboratory results"""
         features = {}
 
-        # Load relevant lab events (chunk by chunk to save memory)
+        # Check if lab events were loaded
+        if not hasattr(self, 'lab_events') or len(self.lab_events) == 0:
+            # No lab data available
+            for lab in self.priority_labs:
+                features[f"lab_{lab}"] = self._create_missing_feature(lab)
+            return features
+
+        # Filter pre-loaded lab events for this admission
         try:
-            # Read only rows for this admission
-            lab_df = pd.read_csv(
-                self.lab_events_path,
-                chunksize=100000,
-                parse_dates=['charttime']
-            )
-
-            patient_labs = []
-            for chunk in lab_df:
-                patient_chunk = chunk[chunk['hadm_id'] == hadm_id]
-                if len(patient_chunk) > 0:
-                    patient_labs.append(patient_chunk)
-
-            if len(patient_labs) > 0:
-                patient_labs = pd.concat(patient_labs, ignore_index=True)
-            else:
-                patient_labs = pd.DataFrame()
+            patient_labs = self.lab_events[
+                self.lab_events['hadm_id'] == hadm_id
+            ].copy()
 
         except Exception as e:
-            logger.warning(f"Error loading labs for hadm_id {hadm_id}: {e}")
+            logger.warning(f"Error filtering labs for hadm_id {hadm_id}: {e}")
             patient_labs = pd.DataFrame()
 
         if len(patient_labs) == 0:
-            # No labs available
+            # No labs available for this admission
             for lab in self.priority_labs:
                 features[f"lab_{lab}"] = self._create_missing_feature(lab)
             return features

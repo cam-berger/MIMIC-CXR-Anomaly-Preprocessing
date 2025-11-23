@@ -10,6 +10,7 @@ data:
   mimic_cxr_base: "/media/dev/MIMIC_DATA/mimic-cxr-jpg"
   mimic_iv_base: "/home/dev/Documents/Portfolio/MIMIC_Data/physionet.org/files/mimiciv/3.1"
   mimic_ed_base: "/home/dev/Documents/Portfolio/MIMIC_Data/physionet.org/files/mimic-iv-ed/2.2"
+  cxr_pro_base: "/home/dev/Documents/Portfolio/MIMIC_Data/physionet.org/files/cxr-pro/1.0.0"
 
   # Output locations
   output_base: "./output"
@@ -123,6 +124,44 @@ processing:
   # Logging
   verbose: true
   log_every_n: 10
+
+# Pre-compilation settings
+precompilation:
+  enabled: false  # Set to true to build pre-compiled dataset
+  batch_size: null  # null = single batch (local testing), integer = batch size for Lambda deployment
+  output_dir: "./precompiled_dataset"
+
+  # Storage configuration
+  storage:
+    image_format: "hdf5"  # HDF5 for images (memory-mapped, chunked)
+    structured_format: "parquet"  # Parquet for structured/text (columnar, queryable)
+    compression: "gzip"  # Options: "gzip", "snappy", "lz4", "zstd"
+    chunk_size: 100  # Samples per HDF5 chunk (for memory-mapped loading)
+
+  # Data source toggles
+  data_sources:
+    mimic_cxr_jpg: true  # Use MIMIC-CXR-JPG for images
+    mimic_iv: true  # Use MIMIC-IV for demographics, admissions, labs
+    mimic_ed: true  # Use MIMIC-IV-ED for vitals, triage
+    cxr_pro: true  # Use CXR-PRO for radiology reports
+    mimic_iv_note: "auto"  # "auto" = detect availability, true = require, false = skip
+    mimic_iv_med: "auto"  # "auto" = detect availability, true = require, false = skip
+
+  # Temporal aggregation window
+  temporal_window:
+    before_study_hours: 48  # Extract data from 48 hours before CXR
+    after_study_hours: 24  # Extract data up to 24 hours after CXR
+
+  # Checkpoint settings (for resuming failed builds)
+  checkpoint:
+    enabled: true
+    save_every_n_samples: 100  # Save checkpoint every N samples
+    checkpoint_dir: "./checkpoints"
+
+  # Batch manifest settings
+  manifest:
+    include_checksums: true  # Compute SHA256 checksums for integrity
+    include_stats: true  # Include per-batch statistics (completeness, sizes)
 
 # Testing/debugging
 debug:
