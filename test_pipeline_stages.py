@@ -6,6 +6,7 @@ This script tests each component individually and generates a comprehensive
 markdown report showing how data changes through each stage.
 """
 import sys
+import os
 from pathlib import Path
 import pandas as pd
 import numpy as np
