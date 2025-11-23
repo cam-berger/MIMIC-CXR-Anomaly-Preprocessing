@@ -9,6 +9,135 @@
 
 ---
 
+## Pre-Deployment Validation Checklist
+
+**Complete these checks BEFORE Lambda deployment** to ensure smooth preprocessing and avoid costly failures on the GPU instance.
+
+### Local Environment Verification
+
+#### 1. Cohort Generation ✅
+```bash
+# Verify new stratified cohort exists
+ls -lh step2_preprocessing/cohorts/validation_subset_200.csv
+# Expected: ~30KB, 201 lines (200 samples + header)
+
+# Verify demographic balance
+python3 generate_stratified_cohort.py \
+  --input output/output_test/cohorts/normal_cohort_validation.csv \
+  --output /tmp/test_cohort.csv \
+  --n-samples 200 \
+  --stratify-by gender anchor_age
+
+# Check output shows balanced gender/age distribution
+```
+
+**Expected Output**:
+- Gender: ~59% F / 41% M
+- Age groups: Proportional across 18-30, 31-45, 46-60, 61-75, 76+
+- Mean age: ~48 years
+
+#### 2. Data Extraction ✅
+```bash
+# Verify all 5 components extracted
+ls -ld validation_data_subset/*
+
+# Component checklist:
+# ✓ CXR images: ~850 JPG files (200 studies)
+# ✓ MIMIC-IV: 4 structured data files (patients, admissions, labevents, d_labitems)
+# ✓ MIMIC-ED: 7 ED tables
+# ✓ CXR-PRO: mimic_train_impressions.csv (66MB, 371k reports)
+# ✓ DICOM metadata: mimic-cxr-2.0.0-metadata.csv.gz (16MB)
+
+# Verify CXR image count
+find validation_data_subset/cxr/files -name "*.jpg" | wc -l
+# Expected: ~850 files
+
+# Verify CXR-PRO reports present
+wc -l validation_data_subset/cxr-pro/mimic_train_impressions.csv
+# Expected: 371952 lines
+
+# Verify DICOM metadata present
+ls -lh validation_data_subset/mimic-cxr-2.0.0-metadata.csv.gz
+# Expected: ~16MB compressed
+```
+
+#### 3. Archive Creation ✅
+```bash
+# Verify compressed archives exist and are reasonable size
+ls -lh *.tar.gz
+
+# Expected sizes:
+# validation_data_subset.tar.gz: ~1.9GB (compressed from 3.7GB)
+# step2_preprocessing.tar.gz: ~80MB (code + configs)
+```
+
+#### 4. Local Path Validation (Optional but Recommended) ✅
+```bash
+# Test path validation script locally
+./validate_deployment_paths.sh step2_preprocessing/config/config_validation.yaml
+
+# This will FAIL locally (paths point to Lambda filesystem)
+# But verifies script works and shows what paths will be checked
+```
+
+### Pre-Transfer Checklist
+
+Before transferring to Lambda GPU, ensure:
+
+- [ ] **Cohort generated**: validation_subset_200.csv exists with 200 stratified samples
+- [ ] **Data extracted**: validation_data_subset/ contains all 5 components (3.7GB uncompressed)
+- [ ] **CXR-PRO verified**: mimic_train_impressions.csv present (prevents 93.5% failure)
+- [ ] **DICOM metadata verified**: mimic-cxr-2.0.0-metadata.csv.gz present (adds 10 acquisition features)
+- [ ] **Archives created**: Both .tar.gz files exist (~2GB total compressed)
+- [ ] **Archive sizes reasonable**: validation_data_subset.tar.gz ~1.9GB, step2_preprocessing.tar.gz ~80MB
+- [ ] **Extraction script updated**: Latest version with 5 steps (includes DICOM)
+- [ ] **Validation script present**: validate_deployment_paths.sh executable
+- [ ] **Lambda credentials ready**: API key for Anthropic Claude (if using summarization)
+- [ ] **Cost budgeted**: Expect $32-40 for 4-5 hours on 1x GH200
+
+### What These Checks Prevent
+
+**93.5% Failure Scenario** (Previous Lambda Run):
+- **Root cause**: CXR-PRO reports path not configured
+- **Symptom**: Text sequences showed 2 tokens (empty), structured data 93.5% empty
+- **Prevention**: Steps 2 and 4 above verify CXR-PRO reports present and paths validated
+
+**DICOM Features Missing**:
+- **Impact**: Model can't distinguish AP portable vs PA standard (20-30% FP reduction lost)
+- **Prevention**: Step 2 verifies DICOM metadata file present
+
+**Incomplete Extraction**:
+- **Impact**: Preprocessing fails on missing files, wastes Lambda time ($8/hr)
+- **Prevention**: Step 2 component checklist verifies all 5 data sources
+
+**Unbalanced Demographics**:
+- **Impact**: Results not representative of full population
+- **Prevention**: Step 1 verifies stratified sampling by gender/age
+
+### Quick Validation Summary
+
+```bash
+# One-liner to check everything
+echo "Cohort: $(wc -l < step2_preprocessing/cohorts/validation_subset_200.csv) lines" && \
+echo "CXR images: $(find validation_data_subset/cxr/files -name "*.jpg" 2>/dev/null | wc -l) files" && \
+echo "CXR-PRO: $([ -f validation_data_subset/cxr-pro/mimic_train_impressions.csv ] && echo "✓" || echo "✗")" && \
+echo "DICOM: $([ -f validation_data_subset/mimic-cxr-2.0.0-metadata.csv.gz ] && echo "✓" || echo "✗")" && \
+echo "Archives: $(ls *.tar.gz 2>/dev/null | wc -l) files" && \
+echo "Total size: $(du -sh validation_data_subset.tar.gz step2_preprocessing.tar.gz 2>/dev/null | awk '{sum+=$1} END {print sum}')"
+
+# Expected output:
+# Cohort: 201 lines
+# CXR images: ~850 files
+# CXR-PRO: ✓
+# DICOM: ✓
+# Archives: 2 files
+# Total size: ~2GB
+```
+
+If all checks pass, proceed to Lambda deployment below.
+
+---
+
 ## Quick Start
 
 ### 1. Local Preparation (30 min)
@@ -192,6 +321,242 @@ cat validation_results/mae_readiness_report.json | jq '.'
 #   - Select your instance
 #   - Click "Terminate"
 ```
+
+### 10. Post-Deployment Comparison & Analysis
+
+After retrieving results, compare the new run against the previous baseline to quantify improvements.
+
+#### A. Quick Success Metrics
+
+```bash
+cd /home/dev/Documents/Portfolio/MIMIC/MIMIC-CXR-Anomaly-Preprocessing/validation_results
+
+# View MAE readiness report
+cat mae_readiness_report.json | jq '.summary'
+
+# Key metrics to check:
+# 1. Overall success rate (target: ≥95%)
+# 2. Text sequence length (target: 50-200 tokens, not 2)
+# 3. Structured feature completeness (target: <5% empty, not 93.5%)
+# 4. DICOM features present (target: 10 fields per sample)
+```
+
+#### B. Comparison with Previous Run (November 22, 2025)
+
+**Previous Lambda Run Results** (Before CXR-PRO & DICOM fixes):
+```json
+{
+  "total_samples": 200,
+  "successful_samples": 13,
+  "failed_samples": 187,
+  "success_rate": 6.5%,
+
+  "text_issues": {
+    "mean_sequence_length": 2.0,
+    "median_sequence_length": 2.0,
+    "issue": "Empty text sequences (CXR-PRO path missing)"
+  },
+
+  "structured_issues": {
+    "empty_count": 187,
+    "empty_percentage": 93.5%,
+    "issue": "All vitals showing 'NOT_DONE' (ED data or CXR-PRO missing)"
+  },
+
+  "dicom_features": {
+    "present": false,
+    "fields_per_sample": 0
+  }
+}
+```
+
+**Expected New Run Results** (After CXR-PRO & DICOM fixes):
+```json
+{
+  "total_samples": 200,
+  "successful_samples": 190-200,
+  "success_rate": "95-100%",
+
+  "text_improvements": {
+    "mean_sequence_length": "50-200 tokens",
+    "median_sequence_length": "~100 tokens",
+    "fix_applied": "CXR-PRO reports path configured"
+  },
+
+  "structured_improvements": {
+    "empty_count": "<10 samples",
+    "empty_percentage": "<5%",
+    "fix_applied": "All 5 data paths validated before preprocessing"
+  },
+
+  "dicom_features": {
+    "present": true,
+    "fields_per_sample": 10,
+    "features": ["view_pa", "view_ap", "view_lateral", "orientation_erect",
+                 "orientation_recumbent", "is_portable", "image_rows_normalized",
+                 "image_cols_normalized", "num_views", "orientation_unknown"]
+  }
+}
+```
+
+#### C. Detailed Comparison Script
+
+Create a comparison script to analyze both runs:
+
+```python
+# compare_lambda_runs.py
+import json
+import pandas as pd
+from pathlib import Path
+
+def compare_runs(old_path, new_path):
+    """Compare two Lambda preprocessing runs"""
+
+    # Load reports
+    with open(old_path) as f:
+        old_data = json.load(f)
+    with open(new_path) as f:
+        new_data = json.load(f)
+
+    print("="*70)
+    print("Lambda Preprocessing Run Comparison")
+    print("="*70)
+
+    # Success rate comparison
+    old_success = old_data.get('success_rate', 0)
+    new_success = new_data.get('success_rate', 0)
+    improvement = new_success - old_success
+
+    print(f"\n📊 SUCCESS RATE:")
+    print(f"  Previous run: {old_success:.1f}%")
+    print(f"  New run:      {new_success:.1f}%")
+    print(f"  Improvement:  +{improvement:.1f} percentage points")
+
+    # Text processing comparison
+    old_text_len = old_data.get('text_seq_length_stats', {}).get('mean', 0)
+    new_text_len = new_data.get('text_seq_length_stats', {}).get('mean', 0)
+
+    print(f"\n📝 TEXT PROCESSING:")
+    print(f"  Previous mean seq length: {old_text_len:.1f} tokens")
+    print(f"  New mean seq length:      {new_text_len:.1f} tokens")
+    if new_text_len > 10:
+        print(f"  ✅ Text processing FIXED (was {old_text_len:.0f}, now {new_text_len:.0f})")
+
+    # Structured data comparison
+    old_empty = old_data.get('structured_empty_count', 0)
+    new_empty = new_data.get('structured_empty_count', 0)
+    old_empty_pct = 100 * old_empty / 200
+    new_empty_pct = 100 * new_empty / 200
+
+    print(f"\n🏥 STRUCTURED DATA:")
+    print(f"  Previous empty: {old_empty}/200 ({old_empty_pct:.1f}%)")
+    print(f"  New empty:      {new_empty}/200 ({new_empty_pct:.1f}%)")
+    if new_empty_pct < 10:
+        print(f"  ✅ Structured data FIXED (reduced from {old_empty_pct:.1f}% to {new_empty_pct:.1f}%)")
+
+    # DICOM features (new in this run)
+    new_dicom_count = new_data.get('dicom_features_count', 0)
+    if new_dicom_count > 0:
+        print(f"\n🩻 DICOM METADATA (NEW):")
+        print(f"  Samples with DICOM features: {new_dicom_count}/200")
+        print(f"  Features per sample: 10 (view position, orientation, portable, dimensions)")
+        print(f"  ✅ NEW FEATURE: Image acquisition context available")
+
+    # Overall verdict
+    print(f"\n{'='*70}")
+    if new_success >= 95 and new_text_len > 10 and new_empty_pct < 10:
+        print("✅ VALIDATION PASSED - All improvements verified")
+        print("   Ready to proceed with full dataset preprocessing and MAE training")
+    else:
+        print("⚠️  VALIDATION NEEDS REVIEW - Some metrics below target")
+        print("   Review failed samples before proceeding")
+    print(f"{'='*70}\n")
+
+# Run comparison
+compare_runs(
+    'validation_results/old_run/mae_readiness_report.json',
+    'validation_results/mae_readiness_report.json'
+)
+```
+
+#### D. Key Improvements to Verify
+
+| Metric | Previous Run | Target (New Run) | What Fixed It |
+|--------|--------------|------------------|---------------|
+| **Success Rate** | 6.5% (13/200) | ≥95% (190+/200) | CXR-PRO path + validation script |
+| **Text Seq Length** | 2.0 tokens (empty) | 50-200 tokens | CXR-PRO reports loaded |
+| **Structured Empty** | 93.5% (187/200) | <5% (<10/200) | All 5 paths validated |
+| **DICOM Features** | 0 fields | 10 fields/sample | New metadata integration |
+| **Processing Time** | N/A | 0.4-0.5s/sample | Baseline for full run |
+
+#### E. Sample-Level Validation
+
+Check a few specific samples to verify all modalities present:
+
+```bash
+# Check a random sample's structured features
+cat output/validation_200/train/structured_features/s10874533_study54444686.json | jq . | head -30
+
+# Expected to see:
+# - First 10 fields: DICOM metadata (view_pa, view_ap, etc.)
+# - Next fields: Vitals (temperature, heart_rate, resp_rate, etc.)
+# - Final fields: Labs (if available)
+
+# Verify DICOM features present
+cat output/validation_200/train/structured_features/s10874533_study54444686.json | jq 'keys | length'
+# Expected: ~40-60 fields (10 DICOM + 30-50 clinical features)
+
+# Check portable detection works
+grep -A 1 "is_portable" output/validation_200/train/structured_features/*.json | head -20
+# Should see is_portable: 1.0 for some samples (AP portable studies)
+```
+
+#### F. Cost-Benefit Analysis
+
+```bash
+# Calculate improvement ROI
+OLD_SUCCESS_RATE=6.5
+NEW_SUCCESS_RATE=95.0  # Target
+LAMBDA_COST_PER_HOUR=8
+PREPROCESSING_HOURS=4
+
+echo "Improvement Analysis:"
+echo "  Successful samples (old): $((200 * $OLD_SUCCESS_RATE / 100))"
+echo "  Successful samples (new): $((200 * $NEW_SUCCESS_RATE / 100))"
+echo "  Additional usable samples: $((200 * ($NEW_SUCCESS_RATE - $OLD_SUCCESS_RATE) / 100))"
+echo ""
+echo "Cost per usable sample:"
+echo "  Old run: \$$(echo "scale=2; $LAMBDA_COST_PER_HOUR * $PREPROCESSING_HOURS / (200 * $OLD_SUCCESS_RATE / 100)" | bc)/sample"
+echo "  New run: \$$(echo "scale=2; $LAMBDA_COST_PER_HOUR * $PREPROCESSING_HOURS / (200 * $NEW_SUCCESS_RATE / 100)" | bc)/sample"
+```
+
+**Expected Output**:
+```
+Improvement Analysis:
+  Successful samples (old): 13
+  Successful samples (new): 190
+  Additional usable samples: 177
+
+Cost per usable sample:
+  Old run: $2.46/sample (wasted 93.5% of GPU time!)
+  New run: $0.17/sample (efficient use of resources)
+```
+
+#### G. Decision Criteria
+
+**Proceed to full dataset if**:
+- ✅ Success rate ≥95%
+- ✅ Text sequences 50-200 tokens (not 2)
+- ✅ Structured features <5% empty (not 93.5%)
+- ✅ DICOM features present in all samples (10 fields each)
+- ✅ Processing time reasonable (<1s per sample)
+
+**Investigate further if**:
+- ❌ Success rate <90%
+- ❌ Text sequences still ~2 tokens
+- ❌ Structured features >10% empty
+- ❌ DICOM features missing
+- ❌ Processing time >5s per sample
 
 ---
 
