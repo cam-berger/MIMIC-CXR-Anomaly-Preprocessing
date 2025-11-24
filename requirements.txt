@@ -1,95 +1,74 @@
-# MIMIC-CXR Anomaly Detection - Pre-compilation Infrastructure
+# MIMIC-CXR Anomaly Detection Pipeline
 # Python 3.10+
+#
+# Installation:
+#   conda create -n mimic_cxr python=3.10
+#   conda activate mimic_cxr
+#   pip install -r requirements.txt
+#   python -m spacy download en_core_sci_md
 
-# ============================================================================
+# =============================================================================
 # Core Data Processing
-# ============================================================================
-pandas>=2.0.0
-numpy>=1.24.0
-pyarrow>=19.0.0  # Parquet file support (columnar storage)
-h5py>=3.14.0  # HDF5 file support (image storage)
-pyyaml>=6.0  # Configuration files
+# =============================================================================
+pandas==2.2.0
+numpy==1.26.4
+pyarrow==15.0.0
+h5py==3.10.0
+pyyaml==6.0.1
+python-dotenv==1.0.1
 
-# ============================================================================
-# Deep Learning Framework
-# ============================================================================
-torch>=2.0.0
-torchvision>=0.15.0
+# =============================================================================
+# Deep Learning
+# =============================================================================
+torch==2.2.0
+torchvision==0.17.0
 
-# ============================================================================
+# =============================================================================
 # Image Processing
-# ============================================================================
-Pillow>=10.0.0  # Image loading and preprocessing
+# =============================================================================
+Pillow==10.2.0
+opencv-python==4.9.0.80
+scikit-image==0.22.0
+albumentations==1.3.1
 
-# ============================================================================
+# =============================================================================
 # NLP & Text Processing
-# ============================================================================
-# Transformers for ClinicalBERT
-transformers>=4.30.0
-# Sentence embeddings for semantic retrieval
-sentence-transformers>=2.2.0
-# Medical NLP
-spacy>=3.6.0
-scispacy>=0.5.0  # Medical entity recognition
-# Note: After pip install, run: python -m spacy download en_core_sci_md
+# =============================================================================
+transformers==4.38.0
+sentence-transformers==2.3.1
+spacy==3.7.4
+scispacy==0.5.4
 
-# ============================================================================
+# =============================================================================
 # LLM Integration (Claude)
-# ============================================================================
-langchain>=0.1.0
-langchain-anthropic>=0.1.0
-langchain-core>=0.1.0
-anthropic>=0.18.0
+# =============================================================================
+anthropic==0.18.1
+langchain==0.1.9
+langchain-anthropic==0.1.1
+langchain-core==0.1.27
 
-# ============================================================================
+# =============================================================================
+# Scientific Computing
+# =============================================================================
+scipy==1.12.0
+scikit-learn==1.4.0
+
+# =============================================================================
 # Utilities
-# ============================================================================
-tqdm>=4.65.0  # Progress bars
-scipy>=1.10.0  # Scientific computing
-scikit-learn>=1.3.0  # ML utilities
+# =============================================================================
+tqdm==4.66.2
+duckdb==0.10.0
 
-# ============================================================================
+# =============================================================================
 # Development & Testing
-# ============================================================================
-pytest>=7.4.0
-pytest-cov>=4.1.0
-black>=23.0.0  # Code formatting
-flake8>=6.0.0  # Linting
+# =============================================================================
+pytest==8.0.2
+pytest-cov==4.1.0
 
-# ============================================================================
-# Jupyter & Visualization
-# ============================================================================
-jupyter>=1.0.0
-ipykernel>=6.25.0
-matplotlib>=3.7.0
-seaborn>=0.12.0
-
-# ============================================================================
-# Optional: Analytics & Queries
-# ============================================================================
-# For SQL-like queries on Parquet files (optional but recommended)
-duckdb>=0.9.0
-
-# ============================================================================
-# Installation Instructions
-# ============================================================================
-#
-# 1. Create conda environment:
-#    conda create -n ml_env python=3.10
-#    conda activate ml_env
-#
-# 2. Install PyTorch (with CUDA if available):
-#    conda install pytorch torchvision pytorch-cuda=11.8 -c pytorch -c nvidia
-#    OR for CPU only:
-#    conda install pytorch torchvision cpuonly -c pytorch
-#
-# 3. Install all requirements:
-#    pip install -r requirements.txt
-#
-# 4. Download spaCy medical model:
-#    python -m spacy download en_core_sci_md
-#
-# 5. Set Anthropic API key (for text processing):
-#    export ANTHROPIC_API_KEY="your-api-key-here"
-#
-# ============================================================================
+# =============================================================================
+# Jupyter & Visualization (optional)
+# =============================================================================
+jupyter==1.0.0
+ipykernel==6.29.2
+matplotlib==3.8.3
+seaborn==0.13.2

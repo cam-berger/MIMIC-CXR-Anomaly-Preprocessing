@@ -56,5 +56,12 @@ logs/
 !**/example_*.csv
 !**/template_*.csv
 
+# Environment
+.env
+
+# Old code (backed up during refactor)
+_old_src/
+_old_step2/
+
 # OS
 Thumbs.db

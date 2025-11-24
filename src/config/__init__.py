@@ -1,5 +1,3 @@
-"""Configuration modules."""
-from .config import FilterConfig, ProcessingConfig
-from .paths import DataPaths
+from .settings import Settings, get_settings
 
-__all__ = ['FilterConfig', 'ProcessingConfig', 'DataPaths']
+__all__ = ["Settings", "get_settings"]
