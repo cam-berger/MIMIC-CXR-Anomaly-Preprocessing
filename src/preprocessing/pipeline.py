@@ -51,6 +51,7 @@ class PreprocessingPipeline:
         process_structured: bool = True,
         process_text: bool = True,
         enable_summarization: bool = False,
+        include_context: bool = True,
         num_workers: int = 4,
     ) -> dict:
         """
@@ -63,6 +64,7 @@ class PreprocessingPipeline:
             process_structured: Whether to process structured data
             process_text: Whether to process text
             enable_summarization: Whether to use Claude for text summarization
+            include_context: Whether to include clinical context in summarization
             num_workers: Number of parallel workers for image processing
 
         Returns:
@@ -148,6 +150,7 @@ class PreprocessingPipeline:
                 cohort=cohort,
                 output_path=text_output,
                 enable_summarization=enable_summarization,
+                include_context=include_context,
             )
 
             has_report = text_results.get("has_report", pd.Series([False])).sum()
@@ -159,6 +162,7 @@ class PreprocessingPipeline:
                 "with_report": int(has_report),
                 "avg_token_count": float(avg_tokens),
                 "summarization_enabled": enable_summarization,
+                "include_context": include_context,
             }
 
         # Finalize

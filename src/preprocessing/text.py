@@ -4,14 +4,16 @@ Text preprocessing for radiology reports and clinical notes.
 Processing pipeline:
 1. Load radiology reports from CXR-PRO
 2. Clean and normalize text
-3. (Optional) Summarize using Claude API
-4. Tokenize using ClinicalBERT
+3. Build clinical context from cohort features
+4. (Optional) Summarize using Claude API with full clinical context
+5. Tokenize using ClinicalBERT
 
 Output Parquet schema:
 - study_id, subject_id (keys)
 - report (original text)
 - report_clean (cleaned text)
-- summary (Claude summary, if enabled)
+- clinical_context (formatted context string)
+- summary (Claude summary with context, if enabled)
 - tokens (tokenized IDs as list)
 - token_count (number of tokens)
 """
@@ -70,10 +72,128 @@ def clean_report_text(text: str) -> str:
     return text
 
 
-class TextPreprocessor:
-    """Process radiology reports and clinical notes."""
+def format_clinical_context(row: pd.Series) -> str:
+    """
+    Format clinical context from cohort row for summarization prompt.
 
-    SUMMARIZATION_PROMPT = """You are a medical expert reviewing radiology reports.
+    Includes: demographics, triage vitals, labs, diagnoses, procedures.
+    """
+    context_parts = []
+
+    # Demographics
+    demographics = []
+    if "anchor_age" in row and pd.notna(row.get("anchor_age")):
+        demographics.append(f"{int(row['anchor_age'])} year old")
+    if "gender" in row and pd.notna(row.get("gender")):
+        gender_str = "male" if row["gender"] == "M" else "female"
+        demographics.append(gender_str)
+    if demographics:
+        context_parts.append("Patient: " + " ".join(demographics))
+
+    # Chief complaint
+    if "triage_chiefcomplaint" in row and pd.notna(row.get("triage_chiefcomplaint")):
+        cc = str(row["triage_chiefcomplaint"]).strip()
+        if cc:
+            context_parts.append(f"Chief complaint: {cc}")
+
+    # Triage vitals
+    vitals = []
+    vital_mappings = [
+        ("triage_temperature", "Temp", "°F"),
+        ("triage_heartrate", "HR", "bpm"),
+        ("triage_resprate", "RR", "/min"),
+        ("triage_o2sat", "SpO2", "%"),
+        ("triage_sbp", "SBP", "mmHg"),
+        ("triage_dbp", "DBP", "mmHg"),
+    ]
+    for col, name, unit in vital_mappings:
+        if col in row and pd.notna(row.get(col)):
+            val = row[col]
+            if isinstance(val, float):
+                if col == "triage_temperature":
+                    vitals.append(f"{name} {val:.1f}{unit}")
+                else:
+                    vitals.append(f"{name} {int(val)}{unit}")
+    if vitals:
+        context_parts.append("Vitals: " + ", ".join(vitals))
+
+    # Acuity
+    if "triage_acuity" in row and pd.notna(row.get("triage_acuity")):
+        acuity = int(row["triage_acuity"])
+        acuity_desc = {1: "Resuscitation", 2: "Emergent", 3: "Urgent", 4: "Less urgent", 5: "Non-urgent"}
+        context_parts.append(f"Triage acuity: {acuity} ({acuity_desc.get(acuity, 'Unknown')})")
+
+    # Labs (if available)
+    lab_mappings = [
+        ("lab_wbc_mean", "WBC", "K/uL"),
+        ("lab_hemoglobin_mean", "Hgb", "g/dL"),
+        ("lab_platelets_mean", "Plt", "K/uL"),
+        ("lab_glucose_mean", "Glucose", "mg/dL"),
+        ("lab_creatinine_mean", "Cr", "mg/dL"),
+        ("lab_sodium_mean", "Na", "mEq/L"),
+        ("lab_potassium_mean", "K", "mEq/L"),
+        ("lab_lactate_mean", "Lactate", "mmol/L"),
+        ("lab_troponin_mean", "Troponin", "ng/mL"),
+    ]
+    labs = []
+    for col, name, unit in lab_mappings:
+        if col in row and pd.notna(row.get(col)):
+            val = row[col]
+            if isinstance(val, (int, float)) and not np.isnan(val):
+                labs.append(f"{name} {val:.1f}")
+    if labs:
+        context_parts.append("Labs: " + ", ".join(labs))
+
+    # ED Diagnoses
+    if "ed_diagnoses" in row and pd.notna(row.get("ed_diagnoses")):
+        dx = str(row["ed_diagnoses"]).strip()
+        if dx and dx.lower() != "nan":
+            # Limit to first few codes
+            codes = dx.split(",")[:5]
+            context_parts.append(f"ED diagnoses: {', '.join(codes)}")
+
+    # Hospital Diagnoses (if admitted)
+    if "hospital_diagnoses" in row and pd.notna(row.get("hospital_diagnoses")):
+        dx = str(row["hospital_diagnoses"]).strip()
+        if dx and dx.lower() != "nan":
+            codes = dx.split(",")[:5]
+            context_parts.append(f"Hospital diagnoses: {', '.join(codes)}")
+
+    # Procedures
+    if "procedures" in row and pd.notna(row.get("procedures")):
+        proc = str(row["procedures"]).strip()
+        if proc and proc.lower() != "nan":
+            codes = proc.split(",")[:3]
+            context_parts.append(f"Procedures: {', '.join(codes)}")
+
+    # ED disposition
+    if "disposition" in row and pd.notna(row.get("disposition")):
+        disp = str(row["disposition"]).strip()
+        if disp:
+            context_parts.append(f"Disposition: {disp}")
+
+    return "\n".join(context_parts)
+
+
+class TextPreprocessor:
+    """Process radiology reports and clinical notes with clinical context."""
+
+    SUMMARIZATION_PROMPT = """You are a medical expert reviewing a chest X-ray case.
+
+CLINICAL CONTEXT:
+{context}
+
+RADIOLOGY REPORT:
+{report}
+
+Based on the clinical context and radiology report above, provide a concise clinical summary (2-3 sentences) that:
+1. Synthesizes the key imaging findings with the clinical presentation
+2. Notes any correlation or discordance between symptoms and imaging
+3. Highlights clinically significant findings or reassuring normal results
+
+Summary:"""
+
+    SUMMARIZATION_PROMPT_NO_CONTEXT = """You are a medical expert reviewing radiology reports.
 Summarize the following chest X-ray report in 2-3 concise sentences.
 Focus on key clinical findings and impressions.
 If no significant findings, state "No acute cardiopulmonary findings."
@@ -121,15 +241,17 @@ Summary:"""
         cohort: pd.DataFrame,
         output_path: Path,
         enable_summarization: Optional[bool] = None,
+        include_context: bool = True,
         batch_size: int = 50,
     ) -> pd.DataFrame:
         """
         Process text data for entire cohort.
 
         Args:
-            cohort: Cohort DataFrame (must have subject_id, study_id)
+            cohort: Cohort DataFrame with all features (demographics, vitals, labs, etc.)
             output_path: Output parquet file path
             enable_summarization: Use Claude for summarization (uses config if None)
+            include_context: Include clinical context in summarization prompt
             batch_size: Batch size for API calls
 
         Returns:
@@ -149,8 +271,11 @@ Summary:"""
 
         logger.info(f"Found reports for {len(reports_df):,} / {len(study_ids):,} studies")
 
-        # Merge with cohort
-        result = cohort[["subject_id", "study_id"]].merge(
+        # Start with full cohort to preserve all columns for context
+        result = cohort.copy()
+
+        # Merge reports
+        result = result.merge(
             reports_df[["study_id", "report"]],
             on="study_id",
             how="left",
@@ -160,10 +285,17 @@ Summary:"""
         logger.info("Cleaning report text...")
         result["report_clean"] = result["report"].apply(clean_report_text)
 
+        # Build clinical context for each row
+        if include_context:
+            logger.info("Building clinical context...")
+            result["clinical_context"] = result.apply(format_clinical_context, axis=1)
+        else:
+            result["clinical_context"] = ""
+
         # Summarization (if enabled)
         if enable_summarization and self.anthropic_client:
-            logger.info("Generating summaries with Claude...")
-            result = self._add_summaries(result, batch_size)
+            logger.info("Generating summaries with Claude (with clinical context)...")
+            result = self._add_summaries(result, batch_size, include_context)
         else:
             result["summary"] = result["report_clean"]  # Use cleaned report as summary
 
@@ -177,6 +309,14 @@ Summary:"""
 
         # Add availability flag
         result["has_report"] = result["report"].notna() & (result["report"] != "")
+
+        # Select output columns
+        output_cols = [
+            "subject_id", "study_id",
+            "report", "report_clean", "clinical_context",
+            "summary", "tokens", "token_count", "has_report"
+        ]
+        result = result[[c for c in output_cols if c in result.columns]]
 
         # Save to parquet
         output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -196,24 +336,25 @@ Summary:"""
         self,
         result: pd.DataFrame,
         batch_size: int = 50,
+        include_context: bool = True,
     ) -> pd.DataFrame:
-        """Add Claude-generated summaries."""
+        """Add Claude-generated summaries with clinical context."""
         summaries = []
 
-        # Process in batches to handle rate limits
-        reports = result["report_clean"].tolist()
-
-        for i in tqdm(range(0, len(reports), batch_size), desc="Summarizing"):
-            batch = reports[i : i + batch_size]
+        for i in tqdm(range(0, len(result), batch_size), desc="Summarizing"):
+            batch_df = result.iloc[i : i + batch_size]
             batch_summaries = []
 
-            for report in batch:
+            for _, row in batch_df.iterrows():
+                report = row.get("report_clean", "")
+                context = row.get("clinical_context", "") if include_context else ""
+
                 if not report or report == "":
                     batch_summaries.append("")
                     continue
 
                 try:
-                    summary = self._summarize_report(report)
+                    summary = self._summarize_with_context(report, context)
                     batch_summaries.append(summary)
                 except Exception as e:
                     logger.warning(f"Summarization failed: {e}")
@@ -224,17 +365,24 @@ Summary:"""
         result["summary"] = summaries
         return result
 
-    def _summarize_report(self, report: str) -> str:
-        """Summarize a single report using Claude."""
+    def _summarize_with_context(self, report: str, context: str) -> str:
+        """Summarize a report with clinical context using Claude."""
         if not self.anthropic_client:
             return report[:500]
 
-        prompt = self.SUMMARIZATION_PROMPT.format(report=report)
+        # Choose prompt based on whether we have context
+        if context and context.strip():
+            prompt = self.SUMMARIZATION_PROMPT.format(
+                context=context,
+                report=report
+            )
+        else:
+            prompt = self.SUMMARIZATION_PROMPT_NO_CONTEXT.format(report=report)
 
         try:
             response = self.anthropic_client.messages.create(
                 model=self.config.claude_model,
-                max_tokens=200,
+                max_tokens=300,  # Slightly more for context-aware summaries
                 temperature=0.0,
                 messages=[{"role": "user", "content": prompt}],
             )

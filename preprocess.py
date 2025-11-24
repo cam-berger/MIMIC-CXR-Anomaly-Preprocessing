@@ -78,6 +78,11 @@ def main():
         help="Enable Claude API for text summarization",
     )
     parser.add_argument(
+        "--no-context",
+        action="store_true",
+        help="Disable clinical context in summarization (use report only)",
+    )
+    parser.add_argument(
         "--workers",
         type=int,
         default=4,
@@ -144,6 +149,7 @@ def main():
     logger.info(f"Processing: images={process_images}, structured={process_structured}, text={process_text}")
     logger.info(f"Workers: {args.workers}")
     logger.info(f"Summarization: {args.enable_summarization}")
+    logger.info(f"Include clinical context: {not args.no_context}")
 
     # Initialize pipeline
     pipeline = PreprocessingPipeline(settings)
@@ -163,6 +169,7 @@ def main():
                 process_structured=process_structured,
                 process_text=process_text,
                 enable_summarization=args.enable_summarization,
+                include_context=not args.no_context,
                 num_workers=args.workers,
             )
 
@@ -181,6 +188,7 @@ def main():
                 process_structured=process_structured,
                 process_text=process_text,
                 enable_summarization=args.enable_summarization,
+                include_context=not args.no_context,
                 num_workers=args.workers,
             )
 
