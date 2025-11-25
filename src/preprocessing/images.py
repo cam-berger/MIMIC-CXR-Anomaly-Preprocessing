@@ -186,6 +186,8 @@ class ImagePreprocessor:
         """
         Process all images in a cohort and save to HDF5.
 
+        Uses streaming writes to HDF5 to avoid memory accumulation.
+
         Args:
             cohort: Cohort DataFrame with subject_id, study_id
             output_path: Path for output HDF5 file
@@ -195,8 +197,8 @@ class ImagePreprocessor:
         Returns:
             DataFrame with processing results (study_id, success, error, shape)
         """
-        num_workers = num_workers or self.config.num_workers
-        batch_size = batch_size or self.config.batch_size
+        num_workers = num_workers if num_workers is not None else self.config.num_workers
+        batch_size = batch_size if batch_size is not None else self.config.batch_size
 
         logger.info(f"Processing {len(cohort):,} images with {num_workers} workers...")
 
@@ -214,19 +216,24 @@ class ImagePreprocessor:
         normalize = self.config.image_normalize
         worker_args = [(batch, cxr_base, normalize) for batch in batches]
 
-        # Process in parallel
+        # Stream results to HDF5 to avoid memory accumulation
+        output_path.parent.mkdir(parents=True, exist_ok=True)
         all_results = []
-        successful_images = []
+        index_data = []
+        image_idx = 0
+        successful_count = 0
 
-        with ProcessPoolExecutor(max_workers=num_workers) as executor:
-            futures = {
-                executor.submit(_process_batch_worker, args): i
-                for i, args in enumerate(worker_args)
-            }
+        with h5py.File(output_path, "w") as f:
+            # Create groups
+            img_group = f.create_group("images")
+            meta_group = f.create_group("metadata")
 
-            with tqdm(total=len(futures), desc="Processing batches") as pbar:
-                for future in as_completed(futures):
-                    batch_results = future.result()
+            # Use sequential processing if workers <= 0, otherwise parallel
+            if num_workers <= 0:
+                # Sequential processing (no multiprocessing)
+                logger.info("Using sequential processing (no multiprocessing)")
+                for args in tqdm(worker_args, desc="Processing batches"):
+                    batch_results = _process_batch_worker(args)
                     for result in batch_results:
                         all_results.append({
                             "study_id": result["study_id"],
@@ -236,18 +243,94 @@ class ImagePreprocessor:
                             "shape": str(result.get("shape", "")),
                         })
                         if result["success"]:
-                            successful_images.append(result)
-                    pbar.update(1)
+                            # Write immediately to HDF5
+                            self._write_image_to_hdf5(
+                                img_group, meta_group, result, image_idx
+                            )
+                            index_data.append({
+                                "idx": image_idx,
+                                "study_id": result["study_id"],
+                                "subject_id": result["subject_id"],
+                            })
+                            image_idx += 1
+                            successful_count += 1
+            else:
+                # Parallel processing
+                with ProcessPoolExecutor(max_workers=num_workers) as executor:
+                    futures = {
+                        executor.submit(_process_batch_worker, args): i
+                        for i, args in enumerate(worker_args)
+                    }
 
-        # Save to HDF5
-        logger.info(f"Saving {len(successful_images):,} images to HDF5...")
-        self._save_to_hdf5(successful_images, output_path)
+                    with tqdm(total=len(futures), desc="Processing batches") as pbar:
+                        for future in as_completed(futures):
+                            batch_results = future.result()
+                            for result in batch_results:
+                                all_results.append({
+                                    "study_id": result["study_id"],
+                                    "subject_id": result["subject_id"],
+                                    "success": result["success"],
+                                    "error": result.get("error"),
+                                    "shape": str(result.get("shape", "")),
+                                })
+                                if result["success"]:
+                                    # Write immediately to HDF5
+                                    self._write_image_to_hdf5(
+                                        img_group, meta_group, result, image_idx
+                                    )
+                                    index_data.append({
+                                        "idx": image_idx,
+                                        "study_id": result["study_id"],
+                                        "subject_id": result["subject_id"],
+                                    })
+                                    image_idx += 1
+                                    successful_count += 1
+                            pbar.update(1)
+
+            # Save index as dataset at the end
+            logger.info(f"Writing index for {successful_count:,} images...")
+            index_df = pd.DataFrame(index_data)
+            index_bytes = index_df.to_parquet()
+            f.create_dataset("index", data=np.frombuffer(index_bytes, dtype=np.uint8))
+
+        logger.info(f"Saved HDF5 to {output_path}")
 
         results_df = pd.DataFrame(all_results)
         success_rate = results_df["success"].mean() * 100
         logger.info(f"Image processing complete: {success_rate:.1f}% success rate")
 
         return results_df
+
+    def _write_image_to_hdf5(
+        self,
+        img_group: h5py.Group,
+        meta_group: h5py.Group,
+        result: dict,
+        idx: int,
+    ) -> None:
+        """Write a single image to HDF5 immediately (streaming write)."""
+        image = result["image"]
+
+        # Save image with compression
+        img_group.create_dataset(
+            str(idx),
+            data=image,
+            compression=self.config.image_compression,
+            compression_opts=self.config.image_compression_level,
+            chunks=True,
+        )
+
+        # Save metadata
+        metadata = {
+            "study_id": int(result["study_id"]),
+            "subject_id": int(result["subject_id"]),
+            "shape": list(image.shape),
+            "image_path": result.get("image_path", ""),
+        }
+        meta_group.create_dataset(
+            str(idx),
+            data=json.dumps(metadata),
+        )
 
     def _save_to_hdf5(
         self,
