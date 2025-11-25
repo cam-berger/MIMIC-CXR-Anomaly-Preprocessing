@@ -63,6 +63,11 @@ def main():
         help="Don't require ED stay match (more samples, less clinical context)",
     )
     parser.add_argument(
+        "--no-disposition-filter",
+        action="store_true",
+        help="Don't filter by disposition (include admitted patients)",
+    )
+    parser.add_argument(
         "--no-reports",
         action="store_true",
         help="Don't include radiology reports",
@@ -131,6 +136,7 @@ def main():
             logger.info("Building normal cohort only...")
             normal = builder.build_normal_cohort(
                 require_ed_match=not args.no_ed_match,
+                filter_dispositions=not args.no_disposition_filter,
                 include_reports=not args.no_reports,
             )
             normal_train, normal_val = builder.split_cohort(normal)

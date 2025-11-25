@@ -25,6 +25,14 @@ except ImportError:
     pass
 
 
+def _resolve_csv_path(base_path: Path, filename: str) -> Path:
+    """Return path to CSV file, checking for both compressed and uncompressed versions."""
+    gz_path = base_path / f"{filename}.gz"
+    csv_path = base_path / filename
+    # Prefer .gz if it exists, otherwise use .csv
+    return gz_path if gz_path.exists() else csv_path
+
+
 @dataclass
 class DataPaths:
     """Paths to MIMIC datasets - loaded from environment variables."""
@@ -73,65 +81,65 @@ class DataPaths:
 
     @property
     def iv_patients(self) -> Path:
-        return self.iv_hosp / "patients.csv.gz"
+        return _resolve_csv_path(self.iv_hosp, "patients.csv")
 
     @property
     def iv_admissions(self) -> Path:
-        return self.iv_hosp / "admissions.csv.gz"
+        return _resolve_csv_path(self.iv_hosp, "admissions.csv")
 
     @property
     def iv_diagnoses_icd(self) -> Path:
-        return self.iv_hosp / "diagnoses_icd.csv.gz"
+        return _resolve_csv_path(self.iv_hosp, "diagnoses_icd.csv")
 
     @property
     def iv_procedures_icd(self) -> Path:
-        return self.iv_hosp / "procedures_icd.csv.gz"
+        return _resolve_csv_path(self.iv_hosp, "procedures_icd.csv")
 
     @property
     def iv_labevents(self) -> Path:
-        return self.iv_hosp / "labevents.csv.gz"
+        return _resolve_csv_path(self.iv_hosp, "labevents.csv")
 
     @property
     def iv_d_labitems(self) -> Path:
-        return self.iv_hosp / "d_labitems.csv.gz"
+        return _resolve_csv_path(self.iv_hosp, "d_labitems.csv")
 
     @property
     def iv_d_icd_diagnoses(self) -> Path:
-        return self.iv_hosp / "d_icd_diagnoses.csv.gz"
+        return _resolve_csv_path(self.iv_hosp, "d_icd_diagnoses.csv")
 
     @property
     def iv_d_icd_procedures(self) -> Path:
-        return self.iv_hosp / "d_icd_procedures.csv.gz"
+        return _resolve_csv_path(self.iv_hosp, "d_icd_procedures.csv")
 
     @property
     def iv_transfers(self) -> Path:
-        return self.iv_hosp / "transfers.csv.gz"
+        return _resolve_csv_path(self.iv_hosp, "transfers.csv")
 
     # Derived paths - MIMIC-IV-ED
     @property
     def ed_stays(self) -> Path:
-        return self.mimic_iv_ed / "ed" / "edstays.csv.gz"
+        return _resolve_csv_path(self.mimic_iv_ed / "ed", "edstays.csv")
 
     @property
     def ed_diagnosis(self) -> Path:
-        return self.mimic_iv_ed / "ed" / "diagnosis.csv.gz"
+        return _resolve_csv_path(self.mimic_iv_ed / "ed", "diagnosis.csv")
 
     @property
     def ed_triage(self) -> Path:
-        return self.mimic_iv_ed / "ed" / "triage.csv.gz"
+        return _resolve_csv_path(self.mimic_iv_ed / "ed", "triage.csv")
 
     @property
     def ed_vitalsign(self) -> Path:
-        return self.mimic_iv_ed / "ed" / "vitalsign.csv.gz"
+        return _resolve_csv_path(self.mimic_iv_ed / "ed", "vitalsign.csv")
 
     # Derived paths - MIMIC-IV-Note
     @property
     def note_discharge(self) -> Path:
-        return self.mimic_iv_note / "note" / "discharge.csv.gz"
+        return _resolve_csv_path(self.mimic_iv_note / "note", "discharge.csv")
 
     @property
     def note_radiology(self) -> Path:
-        return self.mimic_iv_note / "note" / "radiology.csv.gz"
+        return _resolve_csv_path(self.mimic_iv_note / "note", "radiology.csv")
 
     # Derived paths - CXR-PRO (radiology reports with prior refs removed)
     @property

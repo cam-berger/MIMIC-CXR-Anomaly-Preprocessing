@@ -274,12 +274,15 @@ Summary:"""
         # Start with full cohort to preserve all columns for context
         result = cohort.copy()
 
-        # Merge reports
-        result = result.merge(
-            reports_df[["study_id", "report"]],
-            on="study_id",
-            how="left",
-        )
+        # Merge reports only if 'report' column doesn't already exist
+        if "report" not in result.columns:
+            result = result.merge(
+                reports_df[["study_id", "report"]],
+                on="study_id",
+                how="left",
+            )
+        else:
+            logger.info("Report column already exists in cohort, skipping merge")
 
         # Clean reports
         logger.info("Cleaning report text...")

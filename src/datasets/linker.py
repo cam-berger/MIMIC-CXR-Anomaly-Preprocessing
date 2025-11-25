@@ -161,8 +161,23 @@ class DatasetLinker:
             "admission_type", "discharge_location",
         ]].copy()
 
-        # Merge (left join to keep all linked records)
-        result = linked_df.merge(adm_cols, on="hadm_id", how="left")
+        # Split into records with and without hadm_id to avoid NA merge issues
+        has_hadm = linked_df["hadm_id"].notna()
+        df_with_hadm = linked_df[has_hadm].copy()
+        df_without_hadm = linked_df[~has_hadm].copy()
+
+        # Merge only records that have hadm_id
+        if len(df_with_hadm) > 0:
+            df_with_hadm["hadm_id"] = df_with_hadm["hadm_id"].astype(int)
+            df_with_hadm = df_with_hadm.merge(adm_cols, on="hadm_id", how="left")
+
+        # Add empty columns to records without hadm_id
+        for col in ["admittime", "dischtime", "deathtime", "admission_type", "discharge_location"]:
+            if col not in df_without_hadm.columns:
+                df_without_hadm[col] = pd.NA
+
+        # Combine back
+        result = pd.concat([df_with_hadm, df_without_hadm], ignore_index=True)
 
         has_admission = result["admittime"].notna().sum()
         logger.info(f"Records with hospital admission: {has_admission:,} / {len(result):,}")
