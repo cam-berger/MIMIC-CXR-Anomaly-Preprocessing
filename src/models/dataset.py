@@ -1,15 +1,17 @@
 """
 PyTorch Dataset for loading preprocessed MIMIC-CXR images from HDF5.
 
-Supports both HDF5 format (from image preprocessing pipeline) and
-individual .pt files (from step2 preprocessing).
+Supports the preprocessed data format as documented in PREPROCESSED_DATA_SCHEMA.md:
+- images.h5: HDF5 file with images and index
+- structured.parquet: Clinical features (demographics, vitals, labs)
+- text.parquet: Radiology reports and summaries
 """
 
 import io
 import json
 import logging
 from pathlib import Path
-from typing import Optional, Callable, Union
+from typing import Optional, Callable, Union, List
 
 import h5py
 import numpy as np
@@ -17,7 +19,6 @@ import pandas as pd
 import torch
 from torch.utils.data import Dataset
 import torchvision.transforms as T
-import torchvision.transforms.functional as TF
 
 logger = logging.getLogger(__name__)
 
@@ -26,45 +27,78 @@ class MIMICCXRDataset(Dataset):
     """
     Dataset for loading preprocessed chest X-ray images from HDF5.
 
-    The HDF5 file structure (from ImagePreprocessor):
-        /images/{idx} - Image tensor [C, H, W]
-        /metadata/{idx} - JSON metadata string
-        /index - Parquet-encoded DataFrame with study_id -> idx mapping
+    Matches the preprocessed data schema:
+        output/preprocessed/{cohort_name}/
+        ├── images.h5              # HDF5 with /images/{idx}, /metadata/{idx}, /index
+        ├── structured.parquet     # Clinical features
+        ├── text.parquet           # Reports and summaries
+        └── manifest.json          # Processing statistics
+
+    Image format in HDF5:
+        - Shape: [1, H, W] (grayscale with channel dim)
+        - Dtype: float32
+        - Normalization: Min-max scaled to [0, 1]
+        - Resolution: Full resolution (variable, e.g., 2544x3056)
 
     Args:
-        hdf5_path: Path to HDF5 file containing preprocessed images
+        preprocessed_dir: Path to preprocessed cohort directory (e.g., output/preprocessed/normal_train)
         transform: Optional transform to apply to images
         target_size: Target image size (H, W) for resizing, default (224, 224)
         normalize: Whether to apply ImageNet normalization
-        return_metadata: Whether to return metadata dict with each sample
+        include_structured: Whether to load structured features
+        include_text: Whether to load text features
+        return_metadata: Whether to return full metadata dict
     """
 
     def __init__(
         self,
-        hdf5_path: Union[str, Path],
+        preprocessed_dir: Union[str, Path],
         transform: Optional[Callable] = None,
         target_size: tuple[int, int] = (224, 224),
         normalize: bool = True,
+        include_structured: bool = False,
+        include_text: bool = False,
         return_metadata: bool = False,
     ):
-        self.hdf5_path = Path(hdf5_path)
+        self.preprocessed_dir = Path(preprocessed_dir)
         self.transform = transform
         self.target_size = target_size
         self.normalize = normalize
+        self.include_structured = include_structured
+        self.include_text = include_text
         self.return_metadata = return_metadata
 
-        # Validate file exists
+        # Paths
+        self.hdf5_path = self.preprocessed_dir / "images.h5"
+        self.structured_path = self.preprocessed_dir / "structured.parquet"
+        self.text_path = self.preprocessed_dir / "text.parquet"
+
+        # Validate HDF5 exists
         if not self.hdf5_path.exists():
             raise FileNotFoundError(f"HDF5 file not found: {self.hdf5_path}")
 
-        # Load index (mapping study_id -> idx)
+        # Load index from HDF5
         self._load_index()
 
-        # Build default transform pipeline if none provided
+        # Load structured data if requested
+        self.structured_df = None
+        if self.include_structured and self.structured_path.exists():
+            self.structured_df = pd.read_parquet(self.structured_path)
+            self.structured_df = self.structured_df.set_index("study_id")
+            logger.info(f"Loaded structured data: {len(self.structured_df)} rows")
+
+        # Load text data if requested
+        self.text_df = None
+        if self.include_text and self.text_path.exists():
+            self.text_df = pd.read_parquet(self.text_path)
+            self.text_df = self.text_df.set_index("study_id")
+            logger.info(f"Loaded text data: {len(self.text_df)} rows")
+
+        # Build default transform if none provided
         if self.transform is None:
             self.transform = self._build_default_transform()
 
-        # Keep file handle closed until needed (for multiprocessing)
+        # Lazy HDF5 file handle (for multiprocessing)
         self._hdf5_file = None
 
     def _load_index(self) -> None:
@@ -77,34 +111,35 @@ class MIMICCXRDataset(Dataset):
             self.index_df = pd.read_parquet(io.BytesIO(bytes(index_bytes)))
 
         self.study_ids = self.index_df["study_id"].tolist()
-        self.idx_to_study = {row["idx"]: row["study_id"] for _, row in self.index_df.iterrows()}
-        self.study_to_idx = {row["study_id"]: row["idx"] for _, row in self.index_df.iterrows()}
+        self.idx_to_study = dict(zip(self.index_df["idx"], self.index_df["study_id"]))
+        self.study_to_idx = dict(zip(self.index_df["study_id"], self.index_df["idx"]))
 
-        logger.info(f"Loaded index with {len(self.study_ids)} samples")
+        logger.info(f"Loaded index with {len(self.study_ids)} images")
 
     def _build_default_transform(self) -> Callable:
-        """Build default transform pipeline for MAE training."""
+        """
+        Build default transform pipeline for MAE training.
+
+        Handles:
+        - Full resolution input [1, H, W] float32 in [0, 1]
+        - Resize to target_size
+        - Convert grayscale to 3-channel for ViT
+        - Apply ImageNet normalization
+        """
         transforms = [
             T.ToPILImage(),
             T.Resize(self.target_size),
+            T.Grayscale(num_output_channels=3),  # 1 channel -> 3 channels
+            T.ToTensor(),
         ]
 
         if self.normalize:
-            # Convert grayscale to 3-channel for ImageNet pretrained models
-            transforms.extend([
-                T.Grayscale(num_output_channels=3),
-                T.ToTensor(),
-                # ImageNet normalization (commonly used even for grayscale)
+            transforms.append(
                 T.Normalize(
                     mean=[0.485, 0.456, 0.406],
                     std=[0.229, 0.224, 0.225]
-                ),
-            ])
-        else:
-            transforms.extend([
-                T.Grayscale(num_output_channels=3),
-                T.ToTensor(),
-            ])
+                )
+            )
 
         return T.Compose(transforms)
 
@@ -117,7 +152,7 @@ class MIMICCXRDataset(Dataset):
     def __len__(self) -> int:
         return len(self.study_ids)
 
-    def __getitem__(self, idx: int) -> Union[torch.Tensor, tuple[torch.Tensor, dict]]:
+    def __getitem__(self, idx: int) -> Union[torch.Tensor, dict]:
         """
         Get a sample by index.
 
@@ -125,45 +160,158 @@ class MIMICCXRDataset(Dataset):
             idx: Sample index
 
         Returns:
-            If return_metadata=False: image tensor [3, H, W]
-            If return_metadata=True: (image tensor, metadata dict)
+            If include_structured/include_text/return_metadata=False:
+                image tensor [3, H, W]
+            Otherwise:
+                dict with 'image' and optional 'structured', 'text', 'metadata'
         """
         f = self._get_hdf5_file()
 
-        # Get the HDF5 internal index
+        # Get study info from index
         row = self.index_df.iloc[idx]
-        hdf5_idx = str(row["idx"])
-        study_id = row["study_id"]
-        subject_id = row["subject_id"]
+        hdf5_idx = str(int(row["idx"]))
+        study_id = int(row["study_id"])
+        subject_id = int(row["subject_id"])
 
-        # Load image
-        image = f["images"][hdf5_idx][:]  # Shape: [1, H, W]
+        # Load image from HDF5 - Shape: [1, H, W], float32, [0, 1]
+        image = f["images"][hdf5_idx][:]
 
-        # Ensure correct shape and convert to float
+        # Ensure correct shape
         if image.ndim == 2:
-            image = image[np.newaxis, ...]  # Add channel dim
+            image = image[np.newaxis, ...]
 
-        # Convert to torch tensor for transforms
+        # Convert to torch tensor
         image = torch.from_numpy(image).float()
 
-        # Apply transforms
+        # Apply transforms (expects [H, W] for ToPILImage)
         if self.transform is not None:
-            # Transform expects [C, H, W] or [H, W]
-            image = self.transform(image.squeeze(0))  # Remove channel for ToPILImage
+            image = self.transform(image.squeeze(0))
 
+        # Simple return if no extra data requested
+        if not (self.include_structured or self.include_text or self.return_metadata):
+            return image
+
+        # Build result dict
+        result = {
+            "image": image,
+            "study_id": study_id,
+            "subject_id": subject_id,
+        }
+
+        # Add structured features
+        if self.include_structured and self.structured_df is not None:
+            if study_id in self.structured_df.index:
+                struct_row = self.structured_df.loc[study_id]
+                result["structured"] = self._extract_structured_features(struct_row)
+            else:
+                result["structured"] = self._get_empty_structured_features()
+
+        # Add text features
+        if self.include_text and self.text_df is not None:
+            if study_id in self.text_df.index:
+                text_row = self.text_df.loc[study_id]
+                result["text"] = self._extract_text_features(text_row)
+            else:
+                result["text"] = self._get_empty_text_features()
+
+        # Add full metadata
         if self.return_metadata:
-            # Load metadata if available
-            metadata = {"study_id": study_id, "subject_id": subject_id}
             if "metadata" in f and hdf5_idx in f["metadata"]:
                 meta_json = f["metadata"][hdf5_idx][()]
                 if isinstance(meta_json, bytes):
                     meta_json = meta_json.decode("utf-8")
-                metadata.update(json.loads(meta_json))
-            return image, metadata
+                result["metadata"] = json.loads(meta_json)
+            else:
+                result["metadata"] = {}
 
-        return image
+        return result
 
-    def get_by_study_id(self, study_id: int) -> torch.Tensor:
+    def _extract_structured_features(self, row: pd.Series) -> dict:
+        """Extract structured features from parquet row."""
+        # Demographics
+        features = {
+            "age": float(row.get("age", 0)) if pd.notna(row.get("age")) else 0.0,
+            "gender_M": int(row.get("gender_M", 0)) if pd.notna(row.get("gender_M")) else 0,
+        }
+
+        # Triage vitals
+        triage_cols = [
+            "triage_temperature", "triage_heartrate", "triage_resprate",
+            "triage_o2sat", "triage_sbp", "triage_dbp", "triage_acuity"
+        ]
+        for col in triage_cols:
+            val = row.get(col)
+            features[col] = float(val) if pd.notna(val) else 0.0
+
+        # ED vitals (aggregated)
+        vital_types = ["temperature", "heartrate", "resprate", "o2sat", "sbp", "dbp"]
+        for vital in vital_types:
+            for stat in ["mean", "min", "max"]:
+                col = f"{vital}_{stat}"
+                val = row.get(col)
+                features[col] = float(val) if pd.notna(val) else 0.0
+
+        # Labs
+        lab_types = [
+            "bicarbonate", "bnp", "bun", "calcium", "chloride", "creatinine",
+            "glucose", "hematocrit", "hemoglobin", "lactate", "magnesium",
+            "platelets", "potassium", "procalcitonin", "sodium", "troponin", "wbc"
+        ]
+        for lab in lab_types:
+            col = f"lab_{lab}_mean"
+            val = row.get(col)
+            features[col] = float(val) if pd.notna(val) else 0.0
+
+        # Availability flags
+        for flag in ["has_triage", "has_labs", "has_ed_vitals"]:
+            features[flag] = bool(row.get(flag, False))
+
+        return features
+
+    def _get_empty_structured_features(self) -> dict:
+        """Return empty structured features dict."""
+        return {
+            "age": 0.0,
+            "gender_M": 0,
+            "has_triage": False,
+            "has_labs": False,
+            "has_ed_vitals": False,
+        }
+
+    def _extract_text_features(self, row: pd.Series) -> dict:
+        """Extract text features from parquet row."""
+        # Parse comma-separated tokens to tensor
+        tokens_str = row.get("tokens", "")
+        if tokens_str and isinstance(tokens_str, str):
+            token_ids = [int(t) for t in tokens_str.split(",") if t.strip()]
+            # Pad or truncate to 512
+            if len(token_ids) < 512:
+                token_ids = token_ids + [0] * (512 - len(token_ids))
+            else:
+                token_ids = token_ids[:512]
+            tokens = torch.tensor(token_ids, dtype=torch.long)
+        else:
+            tokens = torch.zeros(512, dtype=torch.long)
+
+        return {
+            "tokens": tokens,
+            "summary": str(row.get("summary", "")),
+            "report": str(row.get("report", "")),
+            "token_count": int(row.get("token_count", 0)),
+            "has_report": bool(row.get("has_report", False)),
+        }
+
+    def _get_empty_text_features(self) -> dict:
+        """Return empty text features dict."""
+        return {
+            "tokens": torch.zeros(512, dtype=torch.long),
+            "summary": "",
+            "report": "",
+            "token_count": 0,
+            "has_report": False,
+        }
+
+    def get_by_study_id(self, study_id: int) -> Union[torch.Tensor, dict]:
         """Get sample by study_id."""
         if study_id not in self.study_to_idx:
             raise KeyError(f"Study ID {study_id} not found in dataset")
@@ -174,160 +322,55 @@ class MIMICCXRDataset(Dataset):
     def __del__(self):
         """Clean up HDF5 file handle."""
         if self._hdf5_file is not None:
-            self._hdf5_file.close()
+            try:
+                self._hdf5_file.close()
+            except Exception:
+                pass
 
 
-class MIMICCXRHybridDataset(Dataset):
+class PreprocessedMAEDataset(Dataset):
     """
-    Dataset that loads from individual .pt files (step2 preprocessing format).
+    Convenience dataset for MAE training that loads images only.
 
-    Directory structure (from DATA_SCHEMA.md):
-        {base_dir}/
-        ├── images/
-        │   ├── s{subject_id}_study{study_id}.pt
-        ├── structured_features/
-        │   ├── s{subject_id}_study{study_id}.json
-        ├── text_features/
-        │   ├── s{subject_id}_study{study_id}.pt
-        └── metadata/
-            ├── s{subject_id}_study{study_id}.json
+    Simplified wrapper around MIMICCXRDataset optimized for MAE pretraining:
+    - Only loads images (no structured/text data)
+    - Applies MAE-specific augmentations
+    - Returns tensors directly (not dicts)
 
     Args:
-        base_dir: Base directory containing train/ or val/ subdirectory
-        cohort_csv: Path to cohort CSV with subject_id, study_id columns
-        split: 'train' or 'val'
-        transform: Optional transform to apply to images
-        target_size: Target image size (H, W) for resizing
-        include_text: Whether to include text features
-        include_structured: Whether to include structured features
+        preprocessed_dir: Path to preprocessed cohort directory
+        training: Whether to apply training augmentations
+        target_size: Target image size (H, W)
     """
 
     def __init__(
         self,
-        base_dir: Union[str, Path],
-        cohort_csv: Union[str, Path],
-        split: str = "train",
-        transform: Optional[Callable] = None,
+        preprocessed_dir: Union[str, Path],
+        training: bool = True,
         target_size: tuple[int, int] = (224, 224),
-        include_text: bool = False,
-        include_structured: bool = False,
     ):
-        self.base_dir = Path(base_dir) / split
-        self.split = split
-        self.transform = transform
+        self.training = training
         self.target_size = target_size
-        self.include_text = include_text
-        self.include_structured = include_structured
 
-        # Load cohort
-        self.cohort = pd.read_csv(cohort_csv)
+        # Build appropriate transform
+        transform = get_mae_augmentations(target_size, training)
 
-        # Filter to samples that exist on disk
-        self._filter_existing_samples()
-
-        # Build default transform
-        if self.transform is None:
-            self.transform = self._build_default_transform()
-
-        logger.info(f"Loaded {len(self)} samples from {split} split")
-
-    def _filter_existing_samples(self) -> None:
-        """Filter cohort to only samples that exist on disk."""
-        valid_indices = []
-
-        for idx, row in self.cohort.iterrows():
-            sample_id = f"s{row['subject_id']}_study{row['study_id']}"
-            image_path = self.base_dir / "images" / f"{sample_id}.pt"
-
-            if image_path.exists():
-                valid_indices.append(idx)
-
-        original_len = len(self.cohort)
-        self.cohort = self.cohort.loc[valid_indices].reset_index(drop=True)
-
-        if len(self.cohort) < original_len:
-            logger.warning(
-                f"Filtered from {original_len} to {len(self.cohort)} samples "
-                f"(missing {original_len - len(self.cohort)} image files)"
-            )
-
-    def _build_default_transform(self) -> Callable:
-        """Build default transform pipeline."""
-        return T.Compose([
-            T.ToPILImage(),
-            T.Resize(self.target_size),
-            T.Grayscale(num_output_channels=3),
-            T.ToTensor(),
-            T.Normalize(
-                mean=[0.485, 0.456, 0.406],
-                std=[0.229, 0.224, 0.225]
-            ),
-        ])
+        # Create underlying dataset
+        self.dataset = MIMICCXRDataset(
+            preprocessed_dir,
+            transform=transform,
+            target_size=target_size,
+            normalize=True,
+            include_structured=False,
+            include_text=False,
+            return_metadata=False,
+        )
 
     def __len__(self) -> int:
-        return len(self.cohort)
+        return len(self.dataset)
 
-    def __getitem__(self, idx: int) -> dict:
-        """
-        Get a sample by index.
-
-        Returns:
-            Dictionary with:
-                - 'image': tensor [3, H, W]
-                - 'study_id': int
-                - 'subject_id': int
-                - 'text_tokens': tensor [512] (if include_text)
-                - 'attention_mask': tensor [512] (if include_text)
-                - 'structured': dict (if include_structured)
-        """
-        row = self.cohort.iloc[idx]
-        subject_id = int(row["subject_id"])
-        study_id = int(row["study_id"])
-        sample_id = f"s{subject_id}_study{study_id}"
-
-        result = {
-            "study_id": study_id,
-            "subject_id": subject_id,
-        }
-
-        # Load image
-        image_path = self.base_dir / "images" / f"{sample_id}.pt"
-        image = torch.load(image_path, weights_only=True)
-
-        # Handle different shapes
-        if image.ndim == 2:
-            image = image.unsqueeze(0)  # [H, W] -> [1, H, W]
-
-        # Apply transform
-        if self.transform is not None:
-            image = self.transform(image.squeeze(0))
-
-        result["image"] = image
-
-        # Load text features if requested
-        if self.include_text:
-            text_path = self.base_dir / "text_features" / f"{sample_id}.pt"
-            if text_path.exists():
-                text_data = torch.load(text_path, weights_only=False)
-                result["text_tokens"] = text_data["tokens"]["input_ids"]
-                result["attention_mask"] = text_data["tokens"]["attention_mask"]
-                result["summary"] = text_data.get("summary", "")
-            else:
-                # Empty placeholders
-                result["text_tokens"] = torch.zeros(512, dtype=torch.long)
-                result["attention_mask"] = torch.zeros(512, dtype=torch.long)
-                result["summary"] = ""
-
-        # Load structured features if requested
-        if self.include_structured:
-            struct_path = self.base_dir / "structured_features" / f"{sample_id}.json"
-            if struct_path.exists():
-                with open(struct_path, "r") as f:
-                    result["structured"] = json.load(f)
-            else:
-                result["structured"] = {}
-
-        return result
+    def __getitem__(self, idx: int) -> torch.Tensor:
+        return self.dataset[idx]
 
 
 def get_mae_augmentations(
@@ -339,13 +382,16 @@ def get_mae_augmentations(
 
     Based on medical_mae recommendations:
     - Moderate crop ranges (0.5-1.0) vs aggressive for natural images
-    - Horizontal flip (anatomically valid)
+    - Horizontal flip (anatomically valid for CXR)
     - Light rotation (up to 15 degrees)
     - Gaussian blur
 
+    Input: Grayscale image [1, H, W] float32 in [0, 1] (full resolution)
+    Output: RGB tensor [3, target_size, target_size] ImageNet-normalized
+
     Args:
         target_size: Target image size (H, W)
-        training: Whether this is for training (applies augmentations)
+        training: Whether to apply training augmentations
 
     Returns:
         Transform function
@@ -375,3 +421,7 @@ def get_mae_augmentations(
                 std=[0.229, 0.224, 0.225]
             ),
         ])
+
+
+# Backwards compatibility aliases
+MIMICCXRHybridDataset = MIMICCXRDataset  # Alias for old name

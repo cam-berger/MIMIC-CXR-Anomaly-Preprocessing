@@ -114,11 +114,18 @@ class AnomalyDetectionConfig:
 class TrainingConfig:
     """Full training configuration."""
 
-    # Paths
+    # Paths - preprocessed directory format (recommended)
+    # Directory structure: {train_dir}/images.h5, structured.parquet, text.parquet
+    train_dir: Optional[Path] = None  # e.g., output/preprocessed/normal_train
+    val_dir: Optional[Path] = None    # e.g., output/preprocessed/normal_val
+
+    # Legacy paths (for backwards compatibility)
     data_dir: Path = Path("output/preprocessed")
     train_hdf5: Optional[Path] = None
     val_hdf5: Optional[Path] = None
     cohort_csv: Optional[Path] = None
+
+    # Output paths
     output_dir: Path = Path("output/models")
     checkpoint_dir: Path = Path("output/checkpoints")
 

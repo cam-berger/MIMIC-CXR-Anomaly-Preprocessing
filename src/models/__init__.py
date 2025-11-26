@@ -12,13 +12,14 @@ Components:
 - AnomalyDetector: Reconstruction-based anomaly detection
 """
 
-from .dataset import MIMICCXRDataset, MIMICCXRHybridDataset
+from .dataset import MIMICCXRDataset, PreprocessedMAEDataset, get_mae_augmentations
 from .mae import MaskedAutoencoder
 from .anomaly import ReconstructionAnomalyDetector, EmbeddingAnomalyDetector
 
 __all__ = [
     "MIMICCXRDataset",
-    "MIMICCXRHybridDataset",
+    "PreprocessedMAEDataset",
+    "get_mae_augmentations",
     "MaskedAutoencoder",
     "ReconstructionAnomalyDetector",
     "EmbeddingAnomalyDetector",

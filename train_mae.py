@@ -12,21 +12,30 @@ Phase 1: MAE Pretraining on normal cohort
 
 Usage:
     # Quick test with small model
-    python train_mae.py --config debug --data-dir output/preprocessed
+    python train_mae.py --config debug --train-dir output/preprocessed/normal_train
 
     # Full training with ViT-Base
-    python train_mae.py --config base --epochs 800 --batch-size 64
+    python train_mae.py --config base --epochs 800 --batch-size 64 \\
+        --train-dir output/preprocessed/normal_train \\
+        --val-dir output/preprocessed/normal_val
 
     # Resume from checkpoint
     python train_mae.py --resume checkpoints/mae_epoch_100.pt
 
 Example:
     python train_mae.py \\
-        --train-hdf5 output/preprocessed/train/images.h5 \\
-        --val-hdf5 output/preprocessed/val/images.h5 \\
+        --train-dir output/preprocessed/normal_train \\
+        --val-dir output/preprocessed/normal_val \\
         --output-dir output/models \\
         --epochs 800 \\
         --batch-size 64
+
+Data format (per PREPROCESSED_DATA_SCHEMA.md):
+    output/preprocessed/{cohort_name}/
+    ├── images.h5              # HDF5: /images/{idx}, /metadata/{idx}, /index
+    ├── structured.parquet     # Clinical features
+    ├── text.parquet           # Reports and summaries
+    └── manifest.json          # Processing statistics
 """
 
 import argparse
@@ -52,7 +61,7 @@ from tqdm import tqdm
 sys.path.insert(0, str(Path(__file__).parent))
 
 from src.models.mae import MaskedAutoencoder, mae_vit_base_patch16, mae_vit_small_patch16
-from src.models.dataset import MIMICCXRDataset, MIMICCXRHybridDataset, get_mae_augmentations
+from src.models.dataset import MIMICCXRDataset, PreprocessedMAEDataset, get_mae_augmentations
 from src.models.config import (
     TrainingConfig, MAEConfig,
     get_debug_config, get_fast_config, get_base_config
@@ -129,11 +138,35 @@ def create_model(config: MAEConfig, device: str) -> MaskedAutoencoder:
 def create_dataloaders(
     config: TrainingConfig,
 ) -> tuple[DataLoader, Optional[DataLoader]]:
-    """Create training and validation dataloaders."""
+    """Create training and validation dataloaders.
 
-    # Determine data source
-    if config.train_hdf5 and config.train_hdf5.exists():
-        # Use HDF5 format
+    Supports the preprocessed directory format:
+        output/preprocessed/{cohort_name}/
+        ├── images.h5
+        ├── structured.parquet
+        └── text.parquet
+    """
+    # Check for preprocessed directory (new format)
+    if config.train_dir and config.train_dir.exists():
+        logger.info(f"Loading training data from: {config.train_dir}")
+
+        train_dataset = PreprocessedMAEDataset(
+            config.train_dir,
+            training=True,
+            target_size=(config.mae.img_size, config.mae.img_size),
+        )
+
+        val_dataset = None
+        if config.val_dir and config.val_dir.exists():
+            logger.info(f"Loading validation data from: {config.val_dir}")
+            val_dataset = PreprocessedMAEDataset(
+                config.val_dir,
+                training=False,
+                target_size=(config.mae.img_size, config.mae.img_size),
+            )
+
+    # Legacy: Direct HDF5 path
+    elif config.train_hdf5 and config.train_hdf5.exists():
         logger.info(f"Loading data from HDF5: {config.train_hdf5}")
 
         train_transform = get_mae_augmentations(
@@ -145,51 +178,26 @@ def create_dataloaders(
             training=False,
         )
 
+        # For legacy HDF5, assume it's in a directory with images.h5
+        train_dir = config.train_hdf5.parent
         train_dataset = MIMICCXRDataset(
-            config.train_hdf5,
+            train_dir,
             transform=train_transform,
             target_size=(config.mae.img_size, config.mae.img_size),
         )
 
         val_dataset = None
         if config.val_hdf5 and config.val_hdf5.exists():
+            val_dir = config.val_hdf5.parent
             val_dataset = MIMICCXRDataset(
-                config.val_hdf5,
+                val_dir,
                 transform=val_transform,
                 target_size=(config.mae.img_size, config.mae.img_size),
             )
-
-    elif config.cohort_csv and config.cohort_csv.exists():
-        # Use individual .pt files
-        logger.info(f"Loading data from cohort CSV: {config.cohort_csv}")
-
-        train_transform = get_mae_augmentations(
-            target_size=(config.mae.img_size, config.mae.img_size),
-            training=True,
-        )
-        val_transform = get_mae_augmentations(
-            target_size=(config.mae.img_size, config.mae.img_size),
-            training=False,
-        )
-
-        train_dataset = MIMICCXRHybridDataset(
-            config.data_dir,
-            config.cohort_csv,
-            split="train",
-            transform=train_transform,
-            target_size=(config.mae.img_size, config.mae.img_size),
-        )
-
-        val_dataset = MIMICCXRHybridDataset(
-            config.data_dir,
-            config.cohort_csv,
-            split="val",
-            transform=val_transform,
-            target_size=(config.mae.img_size, config.mae.img_size),
-        )
     else:
         raise ValueError(
-            "Must provide either --train-hdf5 or --cohort-csv for data loading"
+            "Must provide --train-dir (preprocessed directory) or --train-hdf5 for data loading.\n"
+            "Expected format: output/preprocessed/{cohort_name}/ with images.h5, structured.parquet, text.parquet"
         )
 
     train_loader = DataLoader(
@@ -548,22 +556,28 @@ def main():
         help="Configuration preset (default: base)"
     )
 
-    # Data paths
+    # Data paths (new preprocessed format)
+    parser.add_argument(
+        "--train-dir", type=Path, default=None,
+        help="Path to training preprocessed directory (e.g., output/preprocessed/normal_train)"
+    )
+    parser.add_argument(
+        "--val-dir", type=Path, default=None,
+        help="Path to validation preprocessed directory (e.g., output/preprocessed/normal_val)"
+    )
+
+    # Legacy data paths (backwards compatibility)
     parser.add_argument(
         "--train-hdf5", type=Path, default=None,
-        help="Path to training HDF5 file"
+        help="[Legacy] Path to training HDF5 file"
     )
     parser.add_argument(
         "--val-hdf5", type=Path, default=None,
-        help="Path to validation HDF5 file"
-    )
-    parser.add_argument(
-        "--cohort-csv", type=Path, default=None,
-        help="Path to cohort CSV file (alternative to HDF5)"
+        help="[Legacy] Path to validation HDF5 file"
     )
     parser.add_argument(
         "--data-dir", type=Path, default=Path("output/preprocessed"),
-        help="Base directory for preprocessed data"
+        help="[Legacy] Base directory for preprocessed data"
     )
 
     # Output paths
@@ -619,12 +633,17 @@ def main():
         config = get_base_config()
 
     # Apply overrides
+    # New preprocessed directory format (preferred)
+    if args.train_dir:
+        config.train_dir = args.train_dir
+    if args.val_dir:
+        config.val_dir = args.val_dir
+
+    # Legacy paths
     if args.train_hdf5:
         config.train_hdf5 = args.train_hdf5
     if args.val_hdf5:
         config.val_hdf5 = args.val_hdf5
-    if args.cohort_csv:
-        config.cohort_csv = args.cohort_csv
     if args.data_dir:
         config.data_dir = args.data_dir
     if args.output_dir:
