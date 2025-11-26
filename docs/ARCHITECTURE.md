@@ -872,9 +872,87 @@ def sample_custom_data():
 
 ---
 
+---
+
+## Production Preprocessing Pipeline
+
+The Step 2 preprocessing has been refactored for production deployment with the following key changes:
+
+### Unified Output Format
+
+Instead of per-sample files, the production pipeline outputs consolidated files:
+
+```
+output/preprocessed/{cohort_name}/
+├── images.h5              # HDF5 with streaming writes
+├── structured.parquet     # All structured data
+├── text.parquet           # All text data with summaries
+├── image_results.parquet  # Processing status log
+└── manifest.json          # Statistics
+```
+
+See [Data Schema Documentation](DATA_SCHEMA.md) for complete schema reference.
+
+### Streaming HDF5 Writes
+
+To prevent OOM errors on large datasets, the `ImagePreprocessor` now streams directly to HDF5:
+
+```python
+# Old approach (OOM risk):
+all_images = []  # Accumulates in memory
+for batch in batches:
+    all_images.extend(process_batch(batch))
+write_hdf5(all_images)  # 30k images = 100+ GB memory
+
+# New approach (streaming):
+with h5py.File(output_path, "w") as f:
+    for batch in batches:
+        for result in process_batch(batch):
+            if result['success']:
+                f['images'].create_dataset(str(idx), data=result['image'])
+                idx += 1
+```
+
+### Claude Summarization with Context
+
+Text summarization now includes full clinical context:
+
+```
+CLINICAL CONTEXT:
+Patient: 65 year old male
+Chief complaint: chest pain
+Vitals: HR 88bpm, RR 18/min, SpO2 98%
+Labs: WBC 8.5, Cr 1.1
+ED diagnoses: R07.9, I25.10
+
+RADIOLOGY REPORT:
+[Original report text]
+
+Summary: [2-3 sentence clinical synthesis]
+```
+
+### Lambda GPU Deployment
+
+For full-scale preprocessing (30k+ samples), deploy to Lambda GPU:
+
+```bash
+# Transfer cohorts and code
+rsync -avz cohorts/ ubuntu@$LAMBDA_IP:~/mimic-data/output/cohorts/
+
+# Run preprocessing
+python -m src.preprocessing.pipeline \
+    --cohort normal_train \
+    --summarization \
+    --num-workers 0  # Sequential for streaming
+```
+
+See [Lambda Deployment Guide](LAMBDA_DEPLOYMENT.md) for complete instructions.
+
+---
+
 ## See Also
 
-- [Data Schema Documentation](DATA_SCHEMA.md) - Complete schema reference
-- [Configuration Guide](CONFIGURATION_GUIDE.md) - Configuration options and tuning
-- [Testing Documentation](../step2_preprocessing/tests/README.md) - Test suite overview
+- [Data Schema Documentation](DATA_SCHEMA.md) - Complete preprocessed output schema
+- [Lambda Deployment Guide](LAMBDA_DEPLOYMENT.md) - GPU deployment instructions
+- [Model Training Research](MODEL_TRAINING_RESEARCH.md) - MAE training approaches
 - [Main README](../README.md) - Quick start and usage examples
