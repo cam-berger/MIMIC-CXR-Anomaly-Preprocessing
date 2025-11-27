@@ -596,6 +596,7 @@ def main():
     parser.add_argument("--lr", type=float, default=None, help="Learning rate")
     parser.add_argument("--mask-ratio", type=float, default=None, help="Mask ratio")
     parser.add_argument("--img-size", type=int, default=None, help="Input image size (default: 224)")
+    parser.add_argument("--patch-size", type=int, default=None, help="Patch size (default: 16)")
 
     # Resumption
     parser.add_argument(
@@ -661,6 +662,8 @@ def main():
         config.mae.mask_ratio = args.mask_ratio
     if args.img_size:
         config.mae.img_size = args.img_size
+    if args.patch_size:
+        config.mae.patch_size = args.patch_size
     if args.num_workers:
         config.mae.num_workers = args.num_workers
     config.device = args.device
