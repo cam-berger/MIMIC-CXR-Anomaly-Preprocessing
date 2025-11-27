@@ -381,12 +381,12 @@ def get_mae_augmentations(
     Get augmentation pipeline for MAE training.
 
     Based on medical_mae recommendations:
-    - Moderate crop ranges (0.5-1.0) vs aggressive for natural images
+    - Center crop from full resolution (captures lung fields)
     - Horizontal flip (anatomically valid for CXR)
     - Light rotation (up to 15 degrees)
     - Gaussian blur
 
-    Input: Grayscale image [1, H, W] float32 in [0, 1] (full resolution)
+    Input: Grayscale image [1, H, W] float32 in [0, 1] (full resolution ~3056x2544)
     Output: RGB tensor [3, target_size, target_size] ImageNet-normalized
 
     Args:
@@ -399,7 +399,7 @@ def get_mae_augmentations(
     if training:
         return T.Compose([
             T.ToPILImage(),
-            T.RandomResizedCrop(target_size, scale=(0.5, 1.0)),
+            T.CenterCrop(target_size),  # Center crop from full resolution
             T.RandomHorizontalFlip(p=0.5),
             T.RandomRotation(degrees=15),
             T.RandomApply([T.GaussianBlur(kernel_size=23)], p=0.5),
@@ -413,7 +413,7 @@ def get_mae_augmentations(
     else:
         return T.Compose([
             T.ToPILImage(),
-            T.Resize(target_size),
+            T.CenterCrop(target_size),  # Center crop for validation too
             T.Grayscale(num_output_channels=3),
             T.ToTensor(),
             T.Normalize(

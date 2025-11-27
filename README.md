@@ -519,6 +519,97 @@ After preprocessing, the data is ready for:
 
 ---
 
+## MAE Training (Step 3)
+
+The project includes a complete MAE training pipeline for learning "normal" chest X-ray representations.
+
+### train_mae.py
+
+```bash
+python train_mae.py [OPTIONS]
+
+Options:
+  --config {debug,fast,base,large}  Preset configuration (default: base)
+  --train-dir PATH      Path to preprocessed training data
+  --val-dir PATH        Path to preprocessed validation data
+  --output-dir PATH     Directory for model outputs
+  --checkpoint-dir PATH Directory for checkpoints
+  --img-size SIZE       Input image size (default: 224, recommended: 1024 for CXR)
+  --epochs N            Number of training epochs
+  --batch-size N        Batch size per GPU
+  --num-workers N       DataLoader workers (default: 8)
+  --skip-anomaly        Skip anomaly detection phase (MAE pretraining only)
+  --resume PATH         Resume from checkpoint
+  -v, --verbose         Verbose output
+
+Examples:
+  # Debug run (2 epochs, small model)
+  python train_mae.py --config debug --train-dir output/preprocessed/normal_train \
+    --epochs 2 --batch-size 2 --skip-anomaly
+
+  # Full training on high-resolution images
+  python train_mae.py --config base --train-dir output/preprocessed/normal_train \
+    --val-dir output/preprocessed/normal_val --img-size 1024 --epochs 800 \
+    --batch-size 4 --skip-anomaly
+```
+
+### Image Processing Strategy
+
+The MAE training uses **center crop** from full-resolution X-rays to consistently capture lung fields:
+
+```
+Full resolution image (~3056×2544)
+         ↓
+    Center Crop (1024×1024)
+         ↓
+   Augmentations (flip, rotate, blur)
+         ↓
+   3-channel conversion + ImageNet normalize
+         ↓
+   Output: [3, 1024, 1024] tensor
+```
+
+**Why center crop?** Chest X-rays are centered by radiologists. A center crop from full resolution:
+- Captures the entire lung field consistently
+- Avoids edge artifacts from random cropping
+- Preserves anatomical context for anomaly detection
+- Works with variable input resolutions (224 to 1024+)
+
+### Configuration Presets
+
+| Preset | Model | Embed Dim | Epochs | Batch Size | Use Case |
+|--------|-------|-----------|--------|------------|----------|
+| `debug` | ViT-Small | 384 | 10 | 8 | Quick testing |
+| `fast` | ViT-Small | 384 | 100 | 32 | Experiments |
+| `base` | ViT-Base | 768 | 800 | 64 | Production training |
+| `large` | ViT-Large | 1024 | 1600 | 32 | Best results |
+
+### Memory Requirements (1024×1024 input)
+
+| Model | batch_size=2 | batch_size=4 | batch_size=6 |
+|-------|--------------|--------------|--------------|
+| ViT-Small | ~8 GB | ~15 GB | ~22 GB |
+| ViT-Base | ~35 GB | ~68 GB | OOM (>97GB) |
+| ViT-Large | ~70 GB | OOM | OOM |
+
+*Tested on NVIDIA GH200 (97GB VRAM)*
+
+### Output Files
+
+```
+output/models/
+├── mae_final.pt           # Final trained model
+├── config.json            # Training configuration
+└── training_history.json  # Loss curves and metrics
+
+output/checkpoints/
+├── checkpoint_epoch_50.pt  # Periodic checkpoints
+├── checkpoint_epoch_100.pt
+└── ...
+```
+
+---
+
 ## References
 
 ### Datasets

@@ -883,6 +883,102 @@ ssh ubuntu@<LAMBDA_IP> "uptime"
 
 ---
 
+## MAE Training on Lambda GPU (Step 3)
+
+After preprocessing validation passes, deploy MAE training to Lambda GPU.
+
+### Quick Start - MAE Training
+
+```bash
+# 1. Transfer code to Lambda
+export LAMBDA_IP=xxx.xxx.xxx.xxx
+export PEM_KEY=/path/to/your-key.pem
+
+rsync -avz --progress -e "ssh -i $PEM_KEY" \
+  src/ train_mae.py requirements.txt \
+  ubuntu@$LAMBDA_IP:~/mae-training/
+
+# 2. SSH and setup environment
+ssh -i $PEM_KEY ubuntu@$LAMBDA_IP
+
+cd ~/mae-training
+pip3 install torch torchvision --index-url https://download.pytorch.org/whl/cu126
+pip3 install h5py pandas pyarrow tqdm
+
+# 3. Run training (nohup for long runs)
+nohup python3 train_mae.py \
+    --config base \
+    --train-dir /home/ubuntu/mimic-data/output/preprocessed/normal_train \
+    --val-dir /home/ubuntu/mimic-data/output/preprocessed/normal_val \
+    --output-dir ~/mae-training/output/models \
+    --checkpoint-dir ~/mae-training/output/checkpoints \
+    --img-size 1024 \
+    --epochs 800 \
+    --batch-size 4 \
+    --num-workers 16 \
+    --skip-anomaly \
+    > ~/mae-training/training.log 2>&1 &
+```
+
+### Optimal Batch Sizes for GH200 (97GB VRAM)
+
+At **1024×1024** image resolution:
+
+| Config | Model | batch_size | VRAM Used | Status |
+|--------|-------|------------|-----------|--------|
+| debug | ViT-Small | 2 | ~8 GB | ✓ Safe |
+| base | ViT-Base | 4 | ~68 GB | ✓ Recommended |
+| base | ViT-Base | 5 | ~85 GB | ⚠️ Risky |
+| base | ViT-Base | 6 | OOM | ✗ |
+
+### Monitoring Training
+
+```bash
+# Check progress
+tail -20 ~/mae-training/training.log
+
+# GPU status
+nvidia-smi --query-gpu=memory.used,memory.total,utilization.gpu --format=csv
+
+# Process status
+ps aux | grep train_mae | head -1
+```
+
+### Training Time Estimates (1024×1024, batch_size=4)
+
+| Epochs | Time per Epoch | Total Time |
+|--------|----------------|------------|
+| 100 | ~38 min | ~2.6 days |
+| 400 | ~38 min | ~10.5 days |
+| 800 | ~38 min | ~21 days |
+
+*Based on 30,107 training samples, ~3.3 it/s on GH200*
+
+### Download Trained Model
+
+```bash
+# After training completes, download model locally
+scp -i $PEM_KEY ubuntu@$LAMBDA_IP:~/mae-training/output/models/mae_final.pt ./
+scp -i $PEM_KEY ubuntu@$LAMBDA_IP:~/mae-training/output/models/config.json ./
+scp -i $PEM_KEY ubuntu@$LAMBDA_IP:~/mae-training/output/models/training_history.json ./
+```
+
+### Cost Estimate (GH200 @ $8/hr)
+
+| Training Duration | Cost |
+|-------------------|------|
+| Debug (2 epochs) | ~$1 |
+| 100 epochs | ~$500 |
+| 800 epochs | ~$4,000 |
+
+**Cost optimization tips**:
+- Use spot instances if available
+- Start with smaller experiments (100 epochs) to validate
+- Monitor for early convergence - may not need full 800 epochs
+
+---
+
 **Created**: 2025-11-20
-**Purpose**: Validate MIMIC-CXR preprocessing pipeline (Step 2) before MAE training (Step 3)
+**Updated**: 2025-11-27 (Added MAE training section)
+**Purpose**: Validate MIMIC-CXR preprocessing pipeline (Step 2) and MAE training (Step 3)
 **Status**: Ready for deployment
