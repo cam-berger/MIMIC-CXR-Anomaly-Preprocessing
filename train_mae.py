@@ -388,12 +388,13 @@ def load_checkpoint(
     return checkpoint["epoch"]
 
 
-def train(config: TrainingConfig) -> MaskedAutoencoder:
+def train(config: TrainingConfig, resume_path: Optional[Path] = None) -> MaskedAutoencoder:
     """
     Main training loop.
 
     Args:
         config: Training configuration
+        resume_path: Optional path to checkpoint to resume from
 
     Returns:
         Trained model
@@ -426,6 +427,11 @@ def train(config: TrainingConfig) -> MaskedAutoencoder:
     history = {"train_loss": [], "val_loss": [], "lr": []}
     best_val_loss = float("inf")
     start_epoch = 0
+
+    # Resume from checkpoint if provided
+    if resume_path is not None:
+        start_epoch = load_checkpoint(resume_path, model, optimizer, scheduler, scaler)
+        logger.info(f"Resuming training from epoch {start_epoch}")
 
     # Log training info
     logger.info("=" * 60)
@@ -685,30 +691,7 @@ def main():
 
     # Train
     if not args.skip_pretrain:
-        if args.resume:
-            # Resume training
-            model = create_model(config.mae, config.device)
-            train_loader, val_loader = create_dataloaders(config)
-
-            optimizer = optim.AdamW(
-                model.parameters(),
-                lr=config.mae.base_lr,
-                betas=config.mae.betas,
-                weight_decay=config.mae.weight_decay,
-            )
-            steps_per_epoch = len(train_loader)
-            scheduler = get_lr_scheduler(optimizer, config.mae, steps_per_epoch)
-            scaler = GradScaler() if config.mae.mixed_precision else None
-
-            start_epoch = load_checkpoint(
-                args.resume, model, optimizer, scheduler, scaler
-            )
-            logger.info(f"Resuming from epoch {start_epoch}")
-
-            # Continue training
-            model = train(config)
-        else:
-            model = train(config)
+        model = train(config, resume_path=args.resume)
     else:
         # Load from checkpoint
         if args.resume:
