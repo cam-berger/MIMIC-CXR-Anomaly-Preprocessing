@@ -540,6 +540,309 @@ def evaluate_anomaly_detection(
     }
 
 
+class MultimodalEnsembleDetector:
+    """
+    Multimodal ensemble anomaly detector.
+
+    Combines multiple detection signals from the multimodal classifier:
+    1. Classification confidence: Max probability of any pathology
+    2. MAE reconstruction error: How well can we reconstruct the image
+    3. Embedding distance: Distance to normal embeddings in fused space
+    4. Prediction entropy: Uncertainty in predictions
+
+    This provides a more comprehensive anomaly score than image-only methods
+    by leveraging clinical context from text and structured data.
+    """
+
+    def __init__(
+        self,
+        classifier,  # MultimodalClassifier
+        mae_model: MaskedAutoencoder,
+        device: str = "cuda",
+        weights: Optional[Dict[str, float]] = None,
+        k: int = 10,
+    ):
+        """
+        Initialize multimodal ensemble detector.
+
+        Args:
+            classifier: Trained MultimodalClassifier
+            mae_model: Pretrained MAE model (for reconstruction)
+            device: Device to run inference on
+            weights: Optional weights for each method
+                     Default: {'confidence': 0.3, 'reconstruction': 0.25,
+                              'embedding': 0.25, 'entropy': 0.2}
+            k: Number of neighbors for k-NN embedding distance
+        """
+        self.classifier = classifier.to(device)
+        self.classifier.eval()
+        self.mae = mae_model.to(device)
+        self.mae.eval()
+        self.device = device
+        self.k = k
+
+        # Default weights
+        self.weights = weights or {
+            "confidence": 0.3,
+            "reconstruction": 0.25,
+            "embedding": 0.25,
+            "entropy": 0.2,
+        }
+
+        # k-NN model for embedding distance
+        self.nn_model = None
+        self.train_embeddings = None
+
+        # Normalization parameters
+        self.score_means = {}
+        self.score_stds = {}
+        self.threshold = None
+
+    def fit(
+        self,
+        dataloader,  # DataLoader with multimodal data
+        percentile: float = 99.0,
+    ) -> None:
+        """
+        Fit detector on normal training data.
+
+        Args:
+            dataloader: DataLoader with normal samples (multimodal format)
+            percentile: Percentile for threshold
+        """
+        logger.info("Fitting multimodal ensemble detector...")
+
+        all_scores = {
+            "confidence": [],
+            "reconstruction": [],
+            "embedding": [],
+            "entropy": [],
+        }
+        all_embeddings = []
+
+        for batch in tqdm(dataloader, desc="Fitting multimodal detector"):
+            # Extract batch data
+            images = batch["image"].to(self.device)
+            text_tokens = batch["text_tokens"].to(self.device)
+            attention_mask = batch.get("attention_mask")
+            if attention_mask is not None:
+                attention_mask = attention_mask.to(self.device)
+            structured = batch["structured"].to(self.device)
+
+            with torch.no_grad():
+                # Get classifier outputs
+                logits, _, _, fused_emb, _, _ = self.classifier(
+                    images, text_tokens, structured, attention_mask,
+                    return_embeddings=True,
+                )
+                probs = torch.sigmoid(logits)
+
+                # 1. Classification confidence (max pathology prob)
+                # For normal images, all pathologies should have low probability
+                conf_scores = probs.max(dim=1)[0].cpu().numpy()
+                all_scores["confidence"].append(conf_scores)
+
+                # 2. MAE reconstruction error
+                reconstructed = self.mae.reconstruct(images, mask_ratio=0.75)
+                recon_error = ((images - reconstructed) ** 2).mean(dim=(1, 2, 3))
+                all_scores["reconstruction"].append(recon_error.cpu().numpy())
+
+                # 3. Embedding (for k-NN fitting later)
+                all_embeddings.append(fused_emb.cpu().numpy())
+
+                # 4. Prediction entropy
+                # Higher entropy = more uncertain = potentially anomalous
+                entropy = -(probs * torch.log(probs + 1e-8) +
+                           (1 - probs) * torch.log(1 - probs + 1e-8)).sum(dim=1)
+                all_scores["entropy"].append(entropy.cpu().numpy())
+
+        # Fit k-NN on embeddings
+        self.train_embeddings = np.concatenate(all_embeddings, axis=0)
+        logger.info(f"Fitting k-NN on {len(self.train_embeddings)} embeddings...")
+        self.nn_model = NearestNeighbors(n_neighbors=self.k, metric="cosine")
+        self.nn_model.fit(self.train_embeddings)
+
+        # Compute embedding distances for training data
+        distances, _ = self.nn_model.kneighbors(self.train_embeddings)
+        all_scores["embedding"] = [distances.mean(axis=1)]
+
+        # Concatenate all scores
+        for method in all_scores:
+            all_scores[method] = np.concatenate(all_scores[method])
+
+        # Compute normalization parameters
+        for method in all_scores:
+            self.score_means[method] = np.mean(all_scores[method])
+            self.score_stds[method] = np.std(all_scores[method])
+            logger.info(f"  {method}: mean={self.score_means[method]:.4f}, "
+                       f"std={self.score_stds[method]:.4f}")
+
+        # Compute ensemble threshold
+        ensemble_scores = self._combine_scores(all_scores)
+        self.threshold = np.percentile(ensemble_scores, percentile)
+        logger.info(f"Ensemble threshold: {self.threshold:.6f}")
+
+    def _normalize_score(self, score: np.ndarray, method: str) -> np.ndarray:
+        """Normalize score to zero mean and unit variance."""
+        return (score - self.score_means[method]) / (self.score_stds[method] + 1e-8)
+
+    def _combine_scores(self, scores_dict: Dict[str, np.ndarray]) -> np.ndarray:
+        """Combine normalized scores with weights."""
+        ensemble = np.zeros(len(scores_dict["confidence"]))
+        for method, weight in self.weights.items():
+            if method in scores_dict:
+                normalized = self._normalize_score(scores_dict[method], method)
+                ensemble += weight * normalized
+        return ensemble
+
+    def score(
+        self,
+        images: torch.Tensor,
+        text_tokens: torch.Tensor,
+        structured: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+        return_components: bool = False,
+    ) -> Union[np.ndarray, Tuple[np.ndarray, Dict[str, np.ndarray]]]:
+        """
+        Compute multimodal ensemble anomaly scores.
+
+        Args:
+            images: Input images [B, 3, H, W]
+            text_tokens: Text token IDs [B, seq_len]
+            structured: Structured features [B, num_features]
+            attention_mask: Text attention mask [B, seq_len]
+            return_components: Whether to return individual scores
+
+        Returns:
+            Ensemble scores [B]
+            If return_components: (ensemble_scores, {method: scores})
+        """
+        images = images.to(self.device)
+        text_tokens = text_tokens.to(self.device)
+        structured = structured.to(self.device)
+        if attention_mask is not None:
+            attention_mask = attention_mask.to(self.device)
+
+        with torch.no_grad():
+            # Get classifier outputs
+            logits, _, _, fused_emb, _, _ = self.classifier(
+                images, text_tokens, structured, attention_mask,
+                return_embeddings=True,
+            )
+            probs = torch.sigmoid(logits)
+
+            # Individual scores
+            scores = {}
+
+            # 1. Classification confidence
+            scores["confidence"] = probs.max(dim=1)[0].cpu().numpy()
+
+            # 2. Reconstruction error
+            reconstructed = self.mae.reconstruct(images, mask_ratio=0.75)
+            scores["reconstruction"] = ((images - reconstructed) ** 2).mean(
+                dim=(1, 2, 3)
+            ).cpu().numpy()
+
+            # 3. Embedding distance
+            embeddings = fused_emb.cpu().numpy()
+            distances, _ = self.nn_model.kneighbors(embeddings)
+            scores["embedding"] = distances.mean(axis=1)
+
+            # 4. Entropy
+            scores["entropy"] = -(
+                probs * torch.log(probs + 1e-8) +
+                (1 - probs) * torch.log(1 - probs + 1e-8)
+            ).sum(dim=1).cpu().numpy()
+
+        # Combine scores
+        ensemble = self._combine_scores(scores)
+
+        if return_components:
+            return ensemble, scores
+        return ensemble
+
+    def score_batch(
+        self,
+        batch: Dict[str, torch.Tensor],
+        return_components: bool = False,
+    ) -> Union[np.ndarray, Tuple[np.ndarray, Dict[str, np.ndarray]]]:
+        """
+        Convenience method to score a batch dict from DataLoader.
+
+        Args:
+            batch: Batch dict with 'image', 'text_tokens', 'structured', etc.
+            return_components: Whether to return individual scores
+
+        Returns:
+            Same as score()
+        """
+        return self.score(
+            images=batch["image"],
+            text_tokens=batch["text_tokens"],
+            structured=batch["structured"],
+            attention_mask=batch.get("attention_mask"),
+            return_components=return_components,
+        )
+
+    def predict(
+        self,
+        images: torch.Tensor,
+        text_tokens: torch.Tensor,
+        structured: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+    ) -> np.ndarray:
+        """
+        Predict anomaly labels (0 = normal, 1 = anomalous).
+
+        Args:
+            images: Input images [B, 3, H, W]
+            text_tokens: Text token IDs [B, seq_len]
+            structured: Structured features [B, num_features]
+            attention_mask: Text attention mask [B, seq_len]
+
+        Returns:
+            Binary predictions [B]
+        """
+        if self.threshold is None:
+            raise ValueError("Must call fit() before predict()")
+
+        scores = self.score(images, text_tokens, structured, attention_mask)
+        return (scores > self.threshold).astype(int)
+
+    def get_pathology_probabilities(
+        self,
+        images: torch.Tensor,
+        text_tokens: torch.Tensor,
+        structured: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+    ) -> Tuple[np.ndarray, List[str]]:
+        """
+        Get per-pathology probabilities for interpretability.
+
+        Args:
+            Same as score()
+
+        Returns:
+            probabilities: [B, num_labels] array
+            label_names: List of pathology names
+        """
+        from .classification_dataset import MultimodalClassificationDataset
+
+        images = images.to(self.device)
+        text_tokens = text_tokens.to(self.device)
+        structured = structured.to(self.device)
+        if attention_mask is not None:
+            attention_mask = attention_mask.to(self.device)
+
+        with torch.no_grad():
+            logits, _, _ = self.classifier(
+                images, text_tokens, structured, attention_mask
+            )
+            probs = torch.sigmoid(logits).cpu().numpy()
+
+        return probs, MultimodalClassificationDataset.PATHOLOGY_LABELS
+
+
 def compute_optimal_threshold(
     scores: np.ndarray,
     labels: np.ndarray,

@@ -53,6 +53,7 @@ class PreprocessingPipeline:
         enable_summarization: bool = False,
         include_context: bool = True,
         num_workers: int = 4,
+        leak_free: bool = False,
     ) -> dict:
         """
         Run full preprocessing pipeline on a cohort.
@@ -66,6 +67,8 @@ class PreprocessingPipeline:
             enable_summarization: Whether to use Claude for text summarization
             include_context: Whether to include clinical context in summarization
             num_workers: Number of parallel workers for image processing
+            leak_free: If True, use only clinical context for text (no radiology reports).
+                      REQUIRED for classification training to prevent CheXpert label leakage.
 
         Returns:
             Dictionary with processing statistics
@@ -143,6 +146,8 @@ class PreprocessingPipeline:
         if process_text:
             logger.info("=" * 60)
             logger.info("PROCESSING TEXT")
+            if leak_free:
+                logger.info("(LEAK-FREE MODE: using clinical context only)")
             logger.info("=" * 60)
 
             text_output = output_dir / "text.parquet"
@@ -151,6 +156,7 @@ class PreprocessingPipeline:
                 output_path=text_output,
                 enable_summarization=enable_summarization,
                 include_context=include_context,
+                leak_free=leak_free,
             )
 
             has_report = text_results.get("has_report", pd.Series([False])).sum()
@@ -163,6 +169,7 @@ class PreprocessingPipeline:
                 "avg_token_count": float(avg_tokens),
                 "summarization_enabled": enable_summarization,
                 "include_context": include_context,
+                "leak_free": leak_free,
             }
 
         # Finalize

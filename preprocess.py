@@ -83,6 +83,12 @@ def main():
         help="Disable clinical context in summarization (use report only)",
     )
     parser.add_argument(
+        "--leak-free",
+        action="store_true",
+        help="Use only clinical context for text (no radiology reports). "
+             "REQUIRED for classification training to prevent CheXpert label leakage.",
+    )
+    parser.add_argument(
         "--workers",
         type=int,
         default=4,
@@ -150,6 +156,10 @@ def main():
     logger.info(f"Workers: {args.workers}")
     logger.info(f"Summarization: {args.enable_summarization}")
     logger.info(f"Include clinical context: {not args.no_context}")
+    logger.info(f"Leak-free mode: {args.leak_free}")
+    if args.leak_free:
+        logger.info("  -> Text will use only clinical context (no radiology reports)")
+        logger.info("  -> Prevents CheXpert label leakage for classification training")
 
     # Initialize pipeline
     pipeline = PreprocessingPipeline(settings)
@@ -171,6 +181,7 @@ def main():
                 enable_summarization=args.enable_summarization,
                 include_context=not args.no_context,
                 num_workers=args.workers,
+                leak_free=args.leak_free,
             )
 
         else:
@@ -190,6 +201,7 @@ def main():
                 enable_summarization=args.enable_summarization,
                 include_context=not args.no_context,
                 num_workers=args.workers,
+                leak_free=args.leak_free,
             )
 
         logger.info("=" * 60)

@@ -17,6 +17,7 @@ This is a **medical data preprocessing pipeline** that prepares chest X-ray imag
 | `build_cohort.py` | Build patient cohorts from MIMIC data | `python build_cohort.py` |
 | `preprocess.py` | Preprocess cohorts into ML-ready format | `python preprocess.py --workers 8` |
 | `train_mae.py` | Train Masked Autoencoder model | `python train_mae.py --config base` |
+| `train_classifier.py` | Train multimodal classifier | `python train_classifier.py --config base` |
 | `detect_anomalies.py` | Run anomaly detection on new data | `python detect_anomalies.py` |
 
 ### Environment Setup
@@ -38,14 +39,22 @@ ANTHROPIC_API_KEY=sk-ant-...  # Optional, for text summarization
 pip install -r requirements.txt
 python -m spacy download en_core_sci_md
 
-# Full pipeline
-python build_cohort.py                    # Step 1: Build cohorts
+# MAE Pretraining Pipeline (unsupervised on normal X-rays)
+python build_cohort.py --normal-only      # Step 1: Build normal cohort
 python preprocess.py --workers 8          # Step 2: Preprocess data
-python train_mae.py --config base         # Step 3: Train model
+python train_mae.py --config base         # Step 3: Train MAE
+
+# Classification Pipeline (supervised on anomalous X-rays)
+python build_cohort.py --anomalous-only   # Step 1: Build anomalous cohort
+python preprocess.py --leak-free \        # Step 2: Preprocess (leak-free!)
+    --enable-summarization --workers 8
+python train_classifier.py --config base  # Step 3: Train classifier
 
 # Quick test
 python train_mae.py --config debug --epochs 2 --batch-size 2 --skip-anomaly
 ```
+
+**IMPORTANT**: For classification training, always use `--leak-free` to prevent CheXpert label leakage (labels are extracted from radiology reports).
 
 ## Codebase Structure
 
@@ -70,6 +79,9 @@ MIMIC-CXR-Anomaly-Preprocessing/
 │   ├── models/
 │   │   ├── mae.py                # Masked Autoencoder implementation
 │   │   ├── dataset.py            # PyTorch datasets (MIMICCXRDataset, PreprocessedMAEDataset)
+│   │   ├── multimodal.py         # Multimodal classifier (TextEncoder, CrossAttentionFusion)
+│   │   ├── classification_dataset.py  # Dataset with CheXpert labels
+│   │   ├── losses.py             # Loss functions (CLIP, SupCon, Focal)
 │   │   ├── anomaly.py            # Anomaly detection (reconstruction, embedding, ensemble)
 │   │   └── config.py             # Training configurations (debug, fast, base)
 │   └── utils/
@@ -81,6 +93,7 @@ MIMIC-CXR-Anomaly-Preprocessing/
 ├── build_cohort.py               # CLI: Build cohorts
 ├── preprocess.py                 # CLI: Preprocess data
 ├── train_mae.py                  # CLI: Train MAE model
+├── train_classifier.py           # CLI: Train multimodal classifier
 ├── detect_anomalies.py           # CLI: Run anomaly detection
 ├── requirements.txt              # Python dependencies
 └── .env.example                  # Environment variable template
@@ -103,33 +116,40 @@ Understanding these IDs is critical for working with MIMIC data:
 ### Pipeline Stages
 
 **Stage 1: Cohort Building** (`build_cohort.py`)
-- Filters CXR studies by CheXpert labels ("No Finding" = normal)
+- Filters CXR studies by CheXpert labels
+- `--normal-only`: "No Finding" = 1.0 for MAE pretraining (~33k studies)
+- `--anomalous-only`: Any pathology = 1.0 for classification (~32k studies)
 - Links to ED visits within 24-hour window
-- Filters by disposition (discharged home = truly normal)
-- Excludes critical diagnoses (sepsis, MI, etc.)
-- Outputs: `output/cohorts/normal_train.parquet`, `normal_val.parquet`
+- Outputs: `output/cohorts/{normal,anomalous}_{train,val}.parquet`
 
 **Stage 2: Preprocessing** (`preprocess.py`)
 - Processes images -> HDF5 (full resolution, min-max normalized)
 - Processes structured data -> Parquet (labs, vitals, demographics)
-- Processes text -> Parquet (reports, summaries, tokens)
+- Processes text -> Parquet (reports OR clinical context)
+- **IMPORTANT**: Use `--leak-free` for classification to prevent CheXpert label leakage
 - Outputs: `output/preprocessed/{cohort_name}/images.h5`, `structured.parquet`, `text.parquet`
 
 **Stage 3: MAE Training** (`train_mae.py`)
 - Self-supervised pretraining on normal X-rays
 - 75% masking ratio (medical imaging optimal)
 - ViT encoder with asymmetric decoder
-- Outputs: `output/models/mae_final.pt`, `training_history.json`
+- Outputs: `output/models/mae_final.pt`
+
+**Stage 4: Classification Training** (`train_classifier.py`)
+- Supervised training on anomalous X-rays with CheXpert labels
+- Multimodal: Image (MAE encoder) + Text (ClinicalBERT) + Structured
+- Loss: Asymmetric Focal + CLIP + Supervised Contrastive
+- Outputs: `output/models/classifier.pt`
 
 ### Data Flow
 
 ```
 Raw MIMIC Data → Cohort Building → Preprocessing → Training
      │                 │                │             │
-     ├── MIMIC-CXR     ├── Filter       ├── images.h5 ├── MAE Model
-     ├── MIMIC-IV      ├── Link         ├── structured.parquet
-     ├── MIMIC-IV-ED   ├── Split        └── text.parquet
-     └── CXR-PRO       └── cohorts/*.parquet
+     ├── MIMIC-CXR     ├── Normal       ├── images.h5 ├── MAE Model
+     ├── MIMIC-IV      ├── Anomalous    ├── structured│
+     ├── MIMIC-IV-ED   ├── Split        ├── text      ├── Classifier
+     └── CXR-PRO       └── cohorts/     └── (leak-free)
 ```
 
 ## Development Workflow
@@ -195,6 +215,13 @@ Training uses center crop from full-resolution images. Chest X-rays are radiolog
 ### 4. Claude Summarization (Optional)
 Text summarization uses Claude API when enabled. Includes clinical context (demographics, vitals, labs) for richer summaries. Can be disabled to reduce costs.
 
+### 5. Leak-Free Mode for Classification
+CheXpert labels are NLP-extracted from radiology reports. To prevent label leakage when training classifiers:
+- Use `--leak-free` flag during preprocessing
+- Text features use only clinical context (vitals, labs, chief complaint)
+- Radiology report text is excluded
+- See `docs/ARCHITECTURE.md` section "CheXpert Label Leakage Prevention"
+
 ## Key Files to Know
 
 | File | Purpose | When to Edit |
@@ -202,7 +229,10 @@ Text summarization uses Claude API when enabled. Includes clinical context (demo
 | `src/config/settings.py` | All configuration dataclasses | Adding config options |
 | `src/cohort/builder.py` | Cohort filtering logic | Changing filter criteria |
 | `src/preprocessing/pipeline.py` | Pipeline orchestration | Adding processing steps |
+| `src/preprocessing/text.py` | Text processing, leak-free mode | Text feature changes |
 | `src/models/mae.py` | MAE architecture | Model architecture changes |
+| `src/models/multimodal.py` | Classifier architecture | Classification model changes |
+| `src/models/losses.py` | Loss functions (CLIP, SupCon, Focal) | Loss modifications |
 | `src/models/dataset.py` | PyTorch datasets | Data loading changes |
 | `src/models/config.py` | Training presets (debug/fast/base) | Training hyperparameters |
 
@@ -219,7 +249,9 @@ Text summarization uses Claude API when enabled. Includes clinical context (demo
 Key columns: `subject_id`, `study_id`, `age`, `gender`, `triage_*`, `*_mean/min/max/std`, `lab_*_mean/min/max/count`, `has_*` flags
 
 ### text.parquet
-Key columns: `subject_id`, `study_id`, `report`, `clinical_context`, `summary`, `tokens`, `token_count`
+Key columns: `subject_id`, `study_id`, `report`, `clinical_context`, `summary`, `tokens`, `token_count`, `has_report`
+
+**Note**: In `--leak-free` mode, `report` and `report_clean` are empty; `summary` contains clinical context summary only.
 
 ## Performance Considerations
 
@@ -258,6 +290,10 @@ Set environment variables or create `.env` file with MIMIC dataset paths.
 - Set `ANTHROPIC_API_KEY` environment variable
 - Use `--text-only` flag to skip other modalities
 - Disable with `--no-summarization` to skip entirely
+
+### Classification Training Issues
+- **Data Leakage**: If classifier achieves suspiciously high accuracy, check if `--leak-free` was used during preprocessing. CheXpert labels are extracted from radiology reports - feeding report text leaks labels.
+- **Missing Labels**: Some studies have uncertain (-1.0) or missing (NaN) labels. These are masked out during training automatically.
 
 ## Git Conventions
 

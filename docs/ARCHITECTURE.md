@@ -1,6 +1,6 @@
 # Technical Architecture Documentation
 
-Comprehensive technical documentation for the MIMIC-CXR Unsupervised Anomaly Detection preprocessing pipeline.
+Comprehensive technical documentation for the MIMIC-CXR Anomaly Detection pipeline, including preprocessing, self-supervised pretraining, and multimodal classification.
 
 ## Table of Contents
 
@@ -11,23 +11,32 @@ Comprehensive technical documentation for the MIMIC-CXR Unsupervised Anomaly Det
 5. [Data Flow Architecture](#data-flow-architecture)
 6. [Performance Characteristics](#performance-characteristics)
 7. [Extension Points](#extension-points)
+8. [CheXpert Label Leakage Prevention](#chexpert-label-leakage-prevention)
+9. [Multimodal Classification System](#multimodal-classification-system)
+10. [Ensemble Anomaly Detection](#ensemble-anomaly-detection)
 
 ---
 
 ## Overview
 
-The MIMIC-CXR preprocessing pipeline is structured as a two-step process:
+The MIMIC-CXR pipeline is structured as a three-step process:
 
-**Step 1: Normal Cohort Identification**
+**Step 1: Cohort Building**
 - Filter-based cohort building using radiology and clinical criteria
+- Supports both normal cohorts (~33k for MAE pretraining) and anomalous cohorts (~32k for classification)
 - Modular filter architecture for extensibility
-- Output: CSV cohorts (~20,000 normal cases with 28 metadata columns)
+- Output: Parquet cohorts with metadata and CheXpert labels
 
 **Step 2: Multimodal Data Preprocessing**
 - Object-oriented processor architecture with abstract base classes
 - Three independent modality processors (image, structured, text)
 - Dependency injection for testability and modularity
-- Output: PyTorch-ready tensors and structured features
+- Output: HDF5 images, Parquet structured/text data
+
+**Step 3: Model Training**
+- **MAE Pretraining**: Self-supervised Masked Autoencoder on normal X-rays
+- **Multimodal Classification**: Supervised training with CLIP + SupCon + Focal Loss
+- **Ensemble Anomaly Detection**: Combines multiple detection methods
 
 ### Architecture Principles
 
@@ -947,6 +956,500 @@ python -m src.preprocessing.pipeline \
 ```
 
 See [Lambda Deployment Guide](LAMBDA_DEPLOYMENT.md) for complete instructions.
+
+---
+
+## CheXpert Label Leakage Prevention
+
+When training classification models to predict CheXpert pathology labels, **data leakage** is a critical concern because CheXpert labels are NLP-extracted from radiology report text.
+
+### The Problem
+
+```
+┌────────────────────────────────────────────────────────────────┐
+│ Radiology Report (text.parquet)                                │
+│ "IMPRESSION: Moderate cardiomegaly. Bilateral pleural          │
+│  effusions. No pneumothorax."                                  │
+└─────────────────────────┬──────────────────────────────────────┘
+                          │
+         ┌────────────────┼────────────────┐
+         ▼                                 ▼
+┌─────────────────────┐          ┌─────────────────────┐
+│ CheXpert NLP        │          │ Our Text Encoder    │
+│ (Stanford tool)     │          │ (ClinicalBERT)      │
+└─────────┬───────────┘          └─────────┬───────────┘
+          ▼                                ▼
+┌─────────────────────┐          ┌─────────────────────┐
+│ Labels we predict:  │          │ Model learns to     │
+│ Cardiomegaly: 1.0   │  ←───────│ READ the report     │
+│ Pleural Effusion:1.0│          │ (trivial task!)     │ 
+│ Pneumothorax: 0.0   │          │                     │
+└─────────────────────┘          └─────────────────────┘
+```
+
+If we feed radiology report text to predict CheXpert labels, the model can trivially "read" the diagnoses from the text rather than learning from the images.
+
+### The Solution: Leak-Free Mode
+
+The preprocessing pipeline supports `--leak-free` mode which uses **only pre-imaging clinical context**:
+
+**Included (Safe):**
+- Demographics (age, gender)
+- Chief complaint
+- Triage vitals (HR, BP, SpO2, RR, Temp)
+- Triage acuity
+- Labs (WBC, Hgb, Cr, etc.)
+- ED diagnoses (ICD codes from clinical exam)
+- Disposition
+
+**Excluded (Leaked):**
+- Radiology report text
+- Report impressions/findings
+- Any text derived from radiologist interpretation
+
+### Example Comparison
+
+**Leak-Free Clinical Context** (SAFE):
+```
+Patient: 69 year old female
+Chief complaint: Dyspnea
+Vitals: Temp 98.7°F, HR 108bpm, RR 26/min, SpO2 99%, SBP 115mmHg, DBP 48mmHg
+Triage acuity: 1 (Resuscitation)
+ED diagnoses: 49121, 486
+Disposition: ADMITTED
+```
+
+**Radiology Report** (LEAKED - DO NOT USE):
+```
+Regions of consolidation in the left mid and upper right lung suspicious
+for pneumonia. Bibasilar opacities potentially atelectasis.
+```
+
+### Usage
+
+```bash
+# For classification training: ALWAYS use --leak-free
+python preprocess.py \
+    --cohort output/cohorts/anomalous_train.parquet \
+    --leak-free \
+    --enable-summarization
+
+# For MAE pretraining: leak-free NOT needed (no labels predicted)
+python preprocess.py \
+    --cohort output/cohorts/normal_train.parquet \
+    --enable-summarization
+```
+
+### Implementation Details
+
+The `--leak-free` flag triggers:
+
+1. **Skip report loading** - Radiology reports are not merged into the dataset
+2. **Clinical context only** - Text features come from `format_clinical_context()`:
+   - Demographics, vitals, labs, ICD codes
+   - NO radiology findings
+3. **Claude summarization** - Uses `CLINICAL_CONTEXT_PROMPT` which explicitly instructs:
+   - Summarize clinical presentation only
+   - Do NOT speculate about imaging findings
+
+**Key files:**
+- `src/preprocessing/text.py`: `leak_free` parameter in `process_cohort()`
+- `src/preprocessing/pipeline.py`: Passes through to text processor
+- `preprocess.py`: `--leak-free` CLI flag
+
+---
+
+## Multimodal Classification System
+
+The classification system combines multiple data modalities for supervised pathology detection using CheXpert labels.
+
+### Architecture Overview
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                     MultimodalClassifier                                │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                         │
+│  ┌──────────────┐    ┌──────────────┐    ┌──────────────────┐           │
+│  │ MAE Encoder  │    │ TextEncoder  │    │ StructuredEncoder│           │
+│  │ (ViT-Base)   │    │ (ClinicalBERT)│   │ (MLP)            │           │
+│  │              │    │              │    │                  │           │
+│  │ img [B,3,H,W]│    │ tokens [B,512]│   │ struct [B,F]     │           │
+│  │      ↓       │    │      ↓       │    │      ↓           │           │
+│  │ [B, 768]     │    │ [B, 768]     │    │ [B, 256]         │           │
+│  └──────┬───────┘    └──────┬───────┘    └────────┬─────────┘           │
+│         │                   │                     │                     │
+│         └────────┬──────────┘                     │                     │
+│                  ↓                                │                     │
+│         ┌────────────────┐                        │                     │
+│         │CrossAttention  │                        │                     │
+│         │Fusion          │                        │                     │
+│         │ [B, 768]       │                        │                     │
+│         └────────┬───────┘                        │                     │
+│                  │                                │                     │
+│                  └──────────────┬─────────────────┘                     │
+│                                 ↓                                       │
+│                        ┌───────────────┐                                │
+│                        │ Concatenate   │                                │
+│                        │ [B, 1024]     │                                │
+│                        └───────┬───────┘                                │
+│                                ↓                                        │
+│                        ┌───────────────┐                                │
+│                        │ Final Fusion  │                                │
+│                        │ MLP → [B,512] │                                │
+│                        └───────┬───────┘                                │
+│                                │                                        │
+│              ┌─────────────────┼─────────────────┐                      │
+│              ↓                 ↓                 ↓                      │
+│     ┌──────────────┐  ┌──────────────┐  ┌──────────────┐                │
+│     │ Classifier   │  │ CLIP Proj    │  │ SupCon Proj  │                │
+│     │ [B, 12]      │  │ [B, 128]     │  │ [B, 128]     │                │
+│     │ (pathologies)│  │ (contrastive)│  │ (contrastive)│                │
+│     └──────────────┘  └──────────────┘  └──────────────┘                │
+│                                                                         │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+### Components
+
+#### TextEncoder (`src/models/multimodal.py`)
+
+Encodes clinical text using pretrained ClinicalBERT:
+
+```python
+class TextEncoder(nn.Module):
+    """Encodes tokenized clinical text using ClinicalBERT."""
+
+    def __init__(self, hidden_size: int = 768, freeze: bool = True):
+        # Uses microsoft/BiomedNLP-PubMedBERT-base-uncased-abstract-fulltext
+        self.bert = AutoModel.from_pretrained(model_name)
+        if freeze:
+            for param in self.bert.parameters():
+                param.requires_grad = False
+
+    def forward(self, input_ids, attention_mask=None):
+        outputs = self.bert(input_ids, attention_mask=attention_mask)
+        # Mean pooling over non-padded tokens
+        return mean_pooled_embedding  # [B, 768]
+```
+
+#### StructuredEncoder (`src/models/multimodal.py`)
+
+Encodes vitals, labs, and demographics:
+
+```python
+class StructuredEncoder(nn.Module):
+    """Encodes structured clinical data (vitals, labs, demographics)."""
+
+    def __init__(self, input_size: int, hidden_size: int = 256):
+        self.encoder = nn.Sequential(
+            nn.Linear(input_size, hidden_size * 2),
+            nn.LayerNorm(hidden_size * 2),
+            nn.GELU(),
+            nn.Dropout(0.1),
+            nn.Linear(hidden_size * 2, hidden_size),
+            nn.LayerNorm(hidden_size),
+            nn.GELU(),
+        )
+```
+
+#### CrossAttentionFusion (`src/models/multimodal.py`)
+
+Fuses image and text embeddings via cross-attention:
+
+```python
+class CrossAttentionFusion(nn.Module):
+    """Cross-attention fusion between image and text embeddings."""
+
+    def __init__(self, embed_dim: int = 768, num_heads: int = 8):
+        # Image attends to text
+        self.cross_attn = nn.MultiheadAttention(embed_dim, num_heads, batch_first=True)
+        self.norm1 = nn.LayerNorm(embed_dim)
+        self.ffn = nn.Sequential(...)
+        self.norm2 = nn.LayerNorm(embed_dim)
+
+    def forward(self, img_emb, text_emb):
+        # img_emb queries, text_emb provides keys/values
+        attn_out, _ = self.cross_attn(img_emb, text_emb, text_emb)
+        return self.norm2(self.ffn(self.norm1(img_emb + attn_out)))
+```
+
+### Loss Functions (`src/models/losses.py`)
+
+#### 1. AsymmetricFocalLoss
+
+Handles class imbalance in multi-label classification:
+
+```python
+class AsymmetricFocalLoss(nn.Module):
+    """
+    Asymmetric Focal Loss for multi-label classification.
+
+    Args:
+        gamma_pos: Focusing for positives (usually 0)
+        gamma_neg: Focusing for negatives (usually 4)
+        clip: Probability clipping for easy negatives
+    """
+    def forward(self, logits, targets, mask=None):
+        # Different gamma for positive vs negative samples
+        # Clips easy negatives to reduce their contribution
+```
+
+#### 2. CLIPLoss
+
+Symmetric image-text contrastive loss:
+
+```python
+class CLIPLoss(nn.Module):
+    """CLIP-style contrastive loss (symmetric InfoNCE)."""
+
+    def __init__(self, temperature: float = 0.07):
+        self.temperature = nn.Parameter(torch.tensor(temperature))  # Learnable
+
+    def forward(self, img_emb, text_emb):
+        # Compute similarity matrix [B, B]
+        logits = img_emb @ text_emb.T / self.temperature
+        # Cross-entropy in both directions
+        loss_i2t = F.cross_entropy(logits, labels)
+        loss_t2i = F.cross_entropy(logits.T, labels)
+        return (loss_i2t + loss_t2i) / 2
+```
+
+#### 3. SupConLoss
+
+Supervised contrastive loss for multi-label:
+
+```python
+class SupConLoss(nn.Module):
+    """Supervised Contrastive Loss extended for multi-label."""
+
+    def forward(self, embeddings, labels, mask=None):
+        # Compute label similarity (Jaccard-like)
+        # intersection / union for each pair
+        label_sim = intersection / (union + eps)
+
+        # Weight positive pairs by label similarity
+        # Pull together samples with overlapping pathologies
+```
+
+#### 4. MultiTaskLoss
+
+Combines all three losses:
+
+```python
+class MultiTaskLoss(nn.Module):
+    """Combined loss: classification + CLIP + SupCon."""
+
+    def __init__(self, cls_weight=1.0, clip_weight=0.3, supcon_weight=0.3):
+        self.cls_loss = AsymmetricFocalLoss()
+        self.clip_loss = CLIPLoss()
+        self.supcon_loss = SupConLoss()
+
+    def forward(self, logits, clip_emb, supcon_emb, labels, label_mask, text_emb):
+        total = (cls_weight * loss_cls +
+                 clip_weight * loss_clip +
+                 supcon_weight * loss_supcon)
+        return {"total": total, "cls": loss_cls, "clip": loss_clip, "supcon": loss_supcon}
+```
+
+### Dataset (`src/models/classification_dataset.py`)
+
+```python
+class MultimodalClassificationDataset(Dataset):
+    """Dataset combining images, text, structured data, and CheXpert labels."""
+
+    PATHOLOGY_LABELS = [
+        "Atelectasis", "Cardiomegaly", "Consolidation", "Edema",
+        "Enlarged Cardiomediastinum", "Fracture", "Lung Lesion",
+        "Lung Opacity", "Pleural Effusion", "Pleural Other",
+        "Pneumonia", "Pneumothorax",
+    ]
+
+    def __getitem__(self, idx):
+        return {
+            "image": image,           # [3, H, W] - augmented
+            "text_tokens": tokens,    # [512] - ClinicalBERT tokens
+            "attention_mask": mask,   # [512]
+            "structured": features,   # [num_features]
+            "labels": labels,         # [12] - multi-hot CheXpert
+            "label_mask": label_mask, # [12] - validity (0 for uncertain/-1.0)
+            "study_id": study_id,
+            "subject_id": subject_id,
+        }
+```
+
+### Training Script (`train_classifier.py`)
+
+```bash
+# Debug run (2 epochs, small batches)
+python train_classifier.py --config debug \
+    --train-dir output/preprocessed/anomalous_train \
+    --val-dir output/preprocessed/anomalous_val \
+    --chexpert-csv /path/to/mimic-cxr-2.0.0-chexpert.csv.gz \
+    --mae-checkpoint output/models/mae_final.pt
+
+# Full training
+python train_classifier.py --config base \
+    --train-dir output/preprocessed/anomalous_train \
+    --val-dir output/preprocessed/anomalous_val \
+    --chexpert-csv /path/to/mimic-cxr-2.0.0-chexpert.csv.gz \
+    --mae-checkpoint output/models/mae_final.pt \
+    --epochs 30 \
+    --batch-size 16
+```
+
+### Training Configurations
+
+| Config | Epochs | Batch | LR | Image Size | Use Case |
+|--------|--------|-------|-----|------------|----------|
+| debug | 2 | 2 | 1e-4 | 224 | Quick testing |
+| fast | 10 | 8 | 5e-5 | 384 | Development |
+| base | 30 | 16 | 3e-5 | 512 | Production |
+
+### Optimizer: Layer-wise Learning Rate Decay (LLRD)
+
+Different learning rates for different network depths:
+
+```python
+def create_optimizer(model, base_lr, llrd_factor=0.9):
+    """
+    MAE encoder layers get progressively lower LR
+    - Layer 0: base_lr * 0.9^11
+    - Layer 11: base_lr * 0.9^0 = base_lr
+    - New heads: base_lr (highest)
+    """
+    param_groups = []
+
+    # MAE encoder with LLRD
+    for i, layer in enumerate(model.image_encoder.encoder.blocks):
+        lr = base_lr * (llrd_factor ** (num_layers - i - 1))
+        param_groups.append({"params": layer.parameters(), "lr": lr})
+
+    # New modules at base LR
+    param_groups.append({"params": model.classifier.parameters(), "lr": base_lr})
+```
+
+---
+
+## Ensemble Anomaly Detection
+
+The `MultimodalEnsembleDetector` combines multiple anomaly signals for robust detection.
+
+### Detection Methods
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                 MultimodalEnsembleDetector                      │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────┐  │
+│  │  Classification │  │  Reconstruction │  │    Embedding    │  │
+│  │   Confidence    │  │      Error      │  │    Distance     │  │
+│  │   (weight=0.3)  │  │   (weight=0.25) │  │   (weight=0.25) │  │
+│  └────────┬────────┘  └────────┬────────┘  └────────┬────────┘  │
+│           │                    │                    │           │
+│           │     ┌─────────────────┐                 │           │
+│           │     │    Entropy      │                 │           │
+│           │     │  (weight=0.2)   │                 │           │
+│           │     └────────┬────────┘                 │           │
+│           │              │                          │           │
+│           └──────────────┼──────────────────────────┘           │
+│                          ↓                                      │
+│                 ┌─────────────────┐                             │
+│                 │ Weighted Average│                             │
+│                 │  Anomaly Score  │                             │
+│                 └─────────────────┘                             │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Implementation (`src/models/anomaly.py`)
+
+```python
+class MultimodalEnsembleDetector:
+    """Ensemble anomaly detection combining multiple methods."""
+
+    def __init__(
+        self,
+        classifier: MultimodalClassifier,
+        mae_model: MaskedAutoencoder,
+        normal_embeddings: torch.Tensor,  # Reference from training
+        weights: dict = None,
+    ):
+        self.weights = weights or {
+            "confidence": 0.3,      # 1 - max(sigmoid(logits))
+            "reconstruction": 0.25, # MAE reconstruction error
+            "embedding": 0.25,      # k-NN distance to normal samples
+            "entropy": 0.2,         # Prediction uncertainty
+        }
+
+    def score(self, images, text_tokens, structured, attention_mask=None):
+        """Compute ensemble anomaly score (higher = more anomalous)."""
+
+        # 1. Classification confidence
+        logits = self.classifier(images, text_tokens, structured)
+        probs = torch.sigmoid(logits)
+        confidence_score = 1 - probs.max(dim=1).values
+
+        # 2. MAE reconstruction error
+        _, recon_loss, _ = self.mae_model(images)
+        reconstruction_score = recon_loss
+
+        # 3. Embedding distance (k-NN to normal reference)
+        embeddings = self.classifier.get_fused_embedding(...)
+        distances = torch.cdist(embeddings, self.normal_embeddings)
+        knn_distances = distances.topk(k=5, largest=False).values.mean(dim=1)
+        embedding_score = knn_distances
+
+        # 4. Prediction entropy
+        entropy = -(probs * torch.log(probs + 1e-8)).sum(dim=1)
+        entropy_score = entropy / math.log(num_classes)  # Normalize
+
+        # Weighted combination
+        ensemble_score = (
+            self.weights["confidence"] * confidence_score +
+            self.weights["reconstruction"] * reconstruction_score +
+            self.weights["embedding"] * embedding_score +
+            self.weights["entropy"] * entropy_score
+        )
+
+        return ensemble_score, {
+            "confidence": confidence_score,
+            "reconstruction": reconstruction_score,
+            "embedding": embedding_score,
+            "entropy": entropy_score,
+        }
+```
+
+### Usage
+
+```python
+from src.models import MultimodalClassifier, MaskedAutoencoder, MultimodalEnsembleDetector
+
+# Load trained models
+classifier = MultimodalClassifier.from_pretrained("output/models/classifier.pt")
+mae = MaskedAutoencoder.from_pretrained("output/models/mae_final.pt")
+
+# Build reference embeddings from normal training data
+normal_embeddings = extract_embeddings(classifier, normal_dataloader)
+
+# Create ensemble detector
+detector = MultimodalEnsembleDetector(
+    classifier=classifier,
+    mae_model=mae,
+    normal_embeddings=normal_embeddings,
+)
+
+# Score new samples
+for batch in test_loader:
+    scores, component_scores = detector.score(
+        batch["image"],
+        batch["text_tokens"],
+        batch["structured"],
+        batch["attention_mask"],
+    )
+    # Higher score = more likely anomalous
+```
 
 ---
 

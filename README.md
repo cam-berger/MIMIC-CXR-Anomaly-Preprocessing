@@ -624,6 +624,46 @@ output/checkpoints/
 
 ---
 
+## Future Improvements
+
+### Image Processing Alternatives
+
+The current implementation uses **CenterCrop** to extract a fixed-size region from full-resolution X-rays:
+
+```
+Original: ~3056×2544 → CenterCrop(1024) → 1024×1024
+Coverage: ~13% of original pixels (33% width × 40% height)
+```
+
+**Potential improvement**: Use **Resize** instead of CenterCrop to preserve the entire image:
+
+```python
+# Current (CenterCrop):
+T.CenterCrop(target_size)  # Takes center portion only
+
+# Alternative (Resize):
+T.Resize(target_size)  # Scales entire image
+```
+
+| Approach | Pros | Cons |
+|----------|------|------|
+| **CenterCrop** (current) | Preserves native resolution, consistent framing | Loses peripheral lung fields (~86% of image) |
+| **Resize** (alternative) | Captures entire anatomy, no information loss | 3× downscale reduces fine detail |
+
+**When to consider Resize:**
+- Detecting peripheral pathology (pneumothorax, pleural effusions)
+- Analyzing diaphragm or shoulder regions
+- When global context matters more than fine detail
+
+**When CenterCrop is preferred:**
+- Central pathology (cardiomegaly, mediastinal masses)
+- When training resolution is limited (224×224)
+- When consistent anatomical framing is important
+
+This is configurable in `src/models/dataset.py` in the `get_mae_augmentations()` function.
+
+---
+
 ## License
 
 Research use only. Requires PhysioNet credentialed access to MIMIC datasets.

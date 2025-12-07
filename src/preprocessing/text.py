@@ -109,9 +109,10 @@ def format_clinical_context(row: pd.Series) -> str:
     for col, name, unit in vital_mappings:
         if col in row and pd.notna(row.get(col)):
             val = row[col]
-            if isinstance(val, float):
+            # Handle both Python float and numpy.float32/float64
+            if isinstance(val, (int, float, np.integer, np.floating)):
                 if col == "triage_temperature":
-                    vitals.append(f"{name} {val:.1f}{unit}")
+                    vitals.append(f"{name} {float(val):.1f}{unit}")
                 else:
                     vitals.append(f"{name} {int(val)}{unit}")
     if vitals:
@@ -139,8 +140,9 @@ def format_clinical_context(row: pd.Series) -> str:
     for col, name, unit in lab_mappings:
         if col in row and pd.notna(row.get(col)):
             val = row[col]
-            if isinstance(val, (int, float)) and not np.isnan(val):
-                labs.append(f"{name} {val:.1f}")
+            # Handle both Python float and numpy.float32/float64
+            if isinstance(val, (int, float, np.integer, np.floating)):
+                labs.append(f"{name} {float(val):.1f}")
     if labs:
         context_parts.append("Labs: " + ", ".join(labs))
 
@@ -203,6 +205,22 @@ Report:
 
 Summary:"""
 
+    # Leak-free prompt: summarizes clinical context WITHOUT radiology findings
+    # This prevents CheXpert label leakage since labels are extracted from reports
+    CLINICAL_CONTEXT_PROMPT = """You are a medical expert preparing a clinical summary for a patient presenting to the emergency department who will receive a chest X-ray.
+
+CLINICAL PRESENTATION:
+{context}
+
+Based on the clinical presentation above (before imaging results are available), provide a concise clinical summary (2-3 sentences) that:
+1. Describes the patient's presentation and chief complaint
+2. Notes relevant vital sign abnormalities or concerning findings
+3. Summarizes the clinical picture that prompted chest imaging
+
+Do NOT speculate about imaging findings. Focus only on the clinical presentation.
+
+Summary:"""
+
     def __init__(self, settings: Optional[Settings] = None):
         """Initialize preprocessor."""
         self.settings = settings or get_settings()
@@ -243,6 +261,7 @@ Summary:"""
         enable_summarization: Optional[bool] = None,
         include_context: bool = True,
         batch_size: int = 50,
+        leak_free: bool = False,
     ) -> pd.DataFrame:
         """
         Process text data for entire cohort.
@@ -253,11 +272,15 @@ Summary:"""
             enable_summarization: Use Claude for summarization (uses config if None)
             include_context: Include clinical context in summarization prompt
             batch_size: Batch size for API calls
+            leak_free: If True, use ONLY clinical context (no radiology report) to prevent
+                      CheXpert label leakage. Use this for classification training.
 
         Returns:
             Processed text data DataFrame
         """
         logger.info(f"Processing text data for {len(cohort):,} samples...")
+        if leak_free:
+            logger.info("LEAK-FREE MODE: Using only clinical context (no radiology reports)")
 
         enable_summarization = (
             enable_summarization
@@ -265,42 +288,60 @@ Summary:"""
             else self.config.use_claude_summarization
         )
 
-        # Get reports for all studies
-        study_ids = set(cohort["study_id"])
-        reports_df = self.cxr_pro_loader.get_reports_for_studies(study_ids)
-
-        logger.info(f"Found reports for {len(reports_df):,} / {len(study_ids):,} studies")
-
         # Start with full cohort to preserve all columns for context
         result = cohort.copy()
 
-        # Merge reports only if 'report' column doesn't already exist
-        if "report" not in result.columns:
-            result = result.merge(
-                reports_df[["study_id", "report"]],
-                on="study_id",
-                how="left",
-            )
-        else:
-            logger.info("Report column already exists in cohort, skipping merge")
+        # Only load reports if not in leak-free mode
+        if not leak_free:
+            # Get reports for all studies
+            study_ids = set(cohort["study_id"])
+            reports_df = self.cxr_pro_loader.get_reports_for_studies(study_ids)
+            logger.info(f"Found reports for {len(reports_df):,} / {len(study_ids):,} studies")
 
-        # Clean reports
-        logger.info("Cleaning report text...")
-        result["report_clean"] = result["report"].apply(clean_report_text)
+        # Build clinical context for each row (always needed)
+        logger.info("Building clinical context...")
+        result["clinical_context"] = result.apply(format_clinical_context, axis=1)
 
-        # Build clinical context for each row
-        if include_context:
-            logger.info("Building clinical context...")
-            result["clinical_context"] = result.apply(format_clinical_context, axis=1)
-        else:
-            result["clinical_context"] = ""
+        if leak_free:
+            # LEAK-FREE MODE: Only use clinical context, no radiology reports
+            # This prevents CheXpert label leakage since labels are NLP-extracted from reports
+            result["report"] = ""
+            result["report_clean"] = ""
 
-        # Summarization (if enabled)
-        if enable_summarization and self.anthropic_client:
-            logger.info("Generating summaries with Claude (with clinical context)...")
-            result = self._add_summaries(result, batch_size, include_context)
+            # Summarization from clinical context only
+            if enable_summarization and self.anthropic_client:
+                logger.info("Generating summaries from clinical context (leak-free)...")
+                result = self._add_clinical_context_summaries(result, batch_size)
+            else:
+                # Use clinical context directly as summary
+                result["summary"] = result["clinical_context"]
+
+            result["has_report"] = False
         else:
-            result["summary"] = result["report_clean"]  # Use cleaned report as summary
+            # STANDARD MODE: Include radiology reports (for MAE pretraining, etc.)
+            # Merge reports only if 'report' column doesn't already exist
+            if "report" not in result.columns:
+                result = result.merge(
+                    reports_df[["study_id", "report"]],
+                    on="study_id",
+                    how="left",
+                )
+            else:
+                logger.info("Report column already exists in cohort, skipping merge")
+
+            # Clean reports
+            logger.info("Cleaning report text...")
+            result["report_clean"] = result["report"].apply(clean_report_text)
+
+            # Summarization (if enabled)
+            if enable_summarization and self.anthropic_client:
+                logger.info("Generating summaries with Claude (with clinical context)...")
+                result = self._add_summaries(result, batch_size, include_context)
+            else:
+                result["summary"] = result["report_clean"]  # Use cleaned report as summary
+
+            # Add availability flag
+            result["has_report"] = result["report"].notna() & (result["report"] != "")
 
         # Tokenization
         if self.tokenizer:
@@ -309,9 +350,6 @@ Summary:"""
         else:
             result["tokens"] = None
             result["token_count"] = 0
-
-        # Add availability flag
-        result["has_report"] = result["report"].notna() & (result["report"] != "")
 
         # Select output columns
         output_cols = [
@@ -393,6 +431,68 @@ Summary:"""
         except Exception as e:
             logger.warning(f"Claude API error: {e}")
             return report[:500]
+
+    def _add_clinical_context_summaries(
+        self,
+        result: pd.DataFrame,
+        batch_size: int = 50,
+    ) -> pd.DataFrame:
+        """
+        Add Claude-generated summaries from clinical context ONLY (leak-free).
+
+        This method generates summaries using only pre-imaging clinical data:
+        - Demographics, chief complaint, vitals, labs, ED diagnoses
+        - Does NOT include radiology report findings
+        - Prevents CheXpert label leakage for classification training
+        """
+        summaries = []
+
+        for i in tqdm(range(0, len(result), batch_size), desc="Summarizing (leak-free)"):
+            batch_df = result.iloc[i : i + batch_size]
+            batch_summaries = []
+
+            for _, row in batch_df.iterrows():
+                context = row.get("clinical_context", "")
+
+                if not context or context.strip() == "":
+                    batch_summaries.append("")
+                    continue
+
+                try:
+                    summary = self._summarize_clinical_context(context)
+                    batch_summaries.append(summary)
+                except Exception as e:
+                    logger.warning(f"Clinical context summarization failed: {e}")
+                    batch_summaries.append(context[:500])  # Fallback to truncated context
+
+            summaries.extend(batch_summaries)
+
+        result["summary"] = summaries
+        return result
+
+    def _summarize_clinical_context(self, context: str) -> str:
+        """
+        Summarize clinical context only (no radiology report) using Claude.
+
+        This is the leak-free summarization method that prevents CheXpert
+        label leakage by not including the radiology report text.
+        """
+        if not self.anthropic_client:
+            return context[:500]
+
+        prompt = self.CLINICAL_CONTEXT_PROMPT.format(context=context)
+
+        try:
+            response = self.anthropic_client.messages.create(
+                model=self.config.claude_model,
+                max_tokens=200,  # Shorter for context-only summaries
+                temperature=0.0,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            return response.content[0].text.strip()
+        except Exception as e:
+            logger.warning(f"Claude API error: {e}")
+            return context[:500]
 
     def _add_tokens(self, result: pd.DataFrame) -> pd.DataFrame:
         """Add tokenized representations."""
