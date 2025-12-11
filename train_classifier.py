@@ -317,6 +317,7 @@ def train_epoch(
 
     total_losses = {"total": 0.0, "cls": 0.0, "clip": 0.0, "supcon": 0.0}
     num_batches = 0
+    nan_batches = 0
     start_time = time.time()
 
     progress = tqdm(dataloader, desc=f"Epoch {epoch}")
@@ -328,6 +329,9 @@ def train_epoch(
         structured = batch["structured"].to(device)
         labels = batch["labels"].to(device)
         label_mask = batch["label_mask"].to(device)
+
+        # Replace NaN/Inf in structured features with 0
+        structured = torch.nan_to_num(structured, nan=0.0, posinf=0.0, neginf=0.0)
 
         optimizer.zero_grad()
 
@@ -342,7 +346,18 @@ def train_epoch(
                     logits, clip_emb, supcon_emb,
                     labels, label_mask, text_emb,
                 )
+
+            # Check for NaN loss - skip batch if detected
+            if torch.isnan(losses["total"]) or torch.isinf(losses["total"]):
+                nan_batches += 1
+                logger.warning(f"NaN/Inf loss at batch {batch_idx}, skipping")
+                optimizer.zero_grad()
+                continue
+
             scaler.scale(losses["total"]).backward()
+            # Gradient clipping before optimizer step
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             scaler.step(optimizer)
             scaler.update()
         else:
@@ -354,7 +369,17 @@ def train_epoch(
                 logits, clip_emb, supcon_emb,
                 labels, label_mask, text_emb,
             )
+
+            # Check for NaN loss - skip batch if detected
+            if torch.isnan(losses["total"]) or torch.isinf(losses["total"]):
+                nan_batches += 1
+                logger.warning(f"NaN/Inf loss at batch {batch_idx}, skipping")
+                optimizer.zero_grad()
+                continue
+
             losses["total"].backward()
+            # Gradient clipping
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
 
         scheduler.step()
@@ -371,12 +396,17 @@ def train_epoch(
                 "loss": f"{losses['total'].item():.4f}",
                 "cls": f"{losses['cls'].item():.4f}",
                 "lr": f"{current_lr:.2e}",
+                "nan": nan_batches,
             })
 
     epoch_time = time.time() - start_time
-    avg_losses = {k: v / num_batches for k, v in total_losses.items()}
+    avg_losses = {k: v / max(num_batches, 1) for k, v in total_losses.items()}
     avg_losses["time"] = epoch_time
     avg_losses["lr"] = scheduler.get_last_lr()[0]
+    avg_losses["nan_batches"] = nan_batches
+
+    if nan_batches > 0:
+        logger.warning(f"Epoch {epoch}: {nan_batches} batches skipped due to NaN/Inf loss")
 
     return avg_losses
 
