@@ -133,7 +133,7 @@ def get_debug_config() -> TrainingConfig:
     config.classifier.eval_interval = 1
     config.classifier.save_interval = 1
     config.classifier.warmup_epochs = 1
-    config.classifier.freeze_mae_epochs = 1
+    config.classifier.freeze_mae_epochs = 100  # Keep MAE frozen to avoid OOM
     return config
 
 

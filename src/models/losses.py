@@ -139,9 +139,9 @@ class SupConLoss(nn.Module):
         embeddings = F.normalize(embeddings, dim=-1)
         sim = torch.matmul(embeddings, embeddings.T) / self.temperature  # [B, B]
 
-        # Mask out self-similarity
+        # Mask out self-similarity (-1e4 safe for FP16, max ~65504)
         self_mask = torch.eye(batch_size, device=device).bool()
-        sim = sim.masked_fill(self_mask, -1e9)
+        sim = sim.masked_fill(self_mask, -1e4)
 
         # For numerical stability
         sim_max, _ = sim.max(dim=1, keepdim=True)

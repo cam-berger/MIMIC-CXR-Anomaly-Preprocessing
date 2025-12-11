@@ -331,6 +331,12 @@ class MultimodalClassifier(nn.Module):
             nn.LayerNorm(contrastive_dim),
         )
 
+        # Text projection head for CLIP (text_emb -> contrastive_dim)
+        self.text_clip_proj = nn.Sequential(
+            nn.Linear(embed_dim, contrastive_dim),
+            nn.LayerNorm(contrastive_dim),
+        )
+
         # Supervised contrastive projection head
         self.supcon_proj = nn.Sequential(
             nn.Linear(512, contrastive_dim),
@@ -467,8 +473,11 @@ class MultimodalClassifier(nn.Module):
         clip_emb = F.normalize(self.clip_proj(fused), dim=-1)  # [B, 128]
         supcon_emb = F.normalize(self.supcon_proj(fused), dim=-1)  # [B, 128]
 
+        # Project text embedding to contrastive space for CLIP loss
+        text_clip_emb = F.normalize(self.text_clip_proj(text_emb), dim=-1)  # [B, 128]
+
         if return_embeddings:
-            return logits, clip_emb, supcon_emb, fused, img_emb, text_emb
+            return logits, clip_emb, supcon_emb, fused, img_emb, text_clip_emb
 
         return logits, clip_emb, supcon_emb
 
