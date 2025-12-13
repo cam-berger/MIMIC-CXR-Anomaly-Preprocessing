@@ -89,8 +89,8 @@ class ClassifierConfig:
 
     # Loss weights
     cls_weight: float = 1.0
-    clip_weight: float = 0.3
-    supcon_weight: float = 0.3
+    clip_weight: float = 0.3  # Re-enabled with FP32 numerical stability fixes
+    supcon_weight: float = 0.3  # Re-enabled with FP32 numerical stability fixes
 
     # Data
     num_workers: int = 4
@@ -212,6 +212,9 @@ def create_dataloaders(
             augment=False,
         )
 
+    # Use 'spawn' to avoid HDF5 fork issues when num_workers > 0
+    mp_context = 'spawn' if config.classifier.num_workers > 0 else None
+
     train_loader = DataLoader(
         train_dataset,
         batch_size=config.classifier.batch_size,
@@ -220,6 +223,7 @@ def create_dataloaders(
         pin_memory=config.classifier.pin_memory,
         drop_last=True,
         collate_fn=collate_multimodal,
+        multiprocessing_context=mp_context,
     )
 
     val_loader = None
@@ -231,6 +235,7 @@ def create_dataloaders(
             num_workers=config.classifier.num_workers,
             pin_memory=config.classifier.pin_memory,
             collate_fn=collate_multimodal,
+            multiprocessing_context=mp_context,
         )
 
     logger.info(f"Training samples: {len(train_dataset):,}")
@@ -300,6 +305,26 @@ def get_lr_scheduler(
     return optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
 
 
+def _params_finite(model: nn.Module) -> bool:
+    """Check if all model parameters are finite (no NaN/Inf)."""
+    for p in model.parameters():
+        if p.requires_grad and not torch.isfinite(p).all():
+            return False
+    return True
+
+
+def _copy_params(model: nn.Module) -> Dict[str, torch.Tensor]:
+    """Create a CPU copy of model parameters for checkpoint."""
+    return {n: p.data.clone().cpu() for n, p in model.named_parameters() if p.requires_grad}
+
+
+def _restore_params(model: nn.Module, saved: Dict[str, torch.Tensor]) -> None:
+    """Restore model parameters from checkpoint."""
+    for n, p in model.named_parameters():
+        if n in saved and p.requires_grad:
+            p.data.copy_(saved[n].to(p.device))
+
+
 def train_epoch(
     model: MultimodalClassifier,
     dataloader: DataLoader,
@@ -311,14 +336,19 @@ def train_epoch(
     device: str,
     epoch: int,
 ) -> Dict[str, float]:
-    """Train for one epoch."""
+    """Train for one epoch with bulletproof NaN handling."""
     model.train()
     model.set_epoch(epoch)
 
     total_losses = {"total": 0.0, "cls": 0.0, "clip": 0.0, "supcon": 0.0}
     num_batches = 0
     nan_batches = 0
+    nan_study_ids = []  # Track which studies cause NaN for debugging
+    weight_reverts = 0
     start_time = time.time()
+
+    # Weight integrity fuse: save last-good params checkpoint
+    last_good_params = _copy_params(model)
 
     progress = tqdm(dataloader, desc=f"Epoch {epoch}")
     for batch_idx, batch in enumerate(progress):
@@ -329,11 +359,13 @@ def train_epoch(
         structured = batch["structured"].to(device)
         labels = batch["labels"].to(device)
         label_mask = batch["label_mask"].to(device)
+        study_ids = batch["study_id"].tolist()  # For NaN debugging
 
         # Replace NaN/Inf in structured features with 0
         structured = torch.nan_to_num(structured, nan=0.0, posinf=0.0, neginf=0.0)
 
-        optimizer.zero_grad()
+        # Clear gradients (set_to_none=True is faster and cleaner)
+        optimizer.zero_grad(set_to_none=True)
 
         # Forward pass
         if scaler is not None:
@@ -347,20 +379,48 @@ def train_epoch(
                     labels, label_mask, text_emb,
                 )
 
-            # Check for NaN loss - skip batch if detected
-            if torch.isnan(losses["total"]) or torch.isinf(losses["total"]):
+            # ===== HARD GATE: Never backward/step on invalid batch =====
+            total_loss = losses["total"]
+            is_finite = torch.isfinite(total_loss)
+            is_valid = losses.get("valid", True)
+
+            if (not is_finite) or (not is_valid):
                 nan_batches += 1
-                logger.warning(f"NaN/Inf loss at batch {batch_idx}, skipping")
-                optimizer.zero_grad()
+                nan_study_ids.extend(study_ids)
+                logger.warning(
+                    f"NaN/Inf loss at batch {batch_idx}, skipping | "
+                    f"study_ids: {study_ids[:4]}... | finite={is_finite}, valid={is_valid}"
+                )
+                optimizer.zero_grad(set_to_none=True)
                 continue
 
-            scaler.scale(losses["total"]).backward()
+            # Backward pass (only for valid batches)
+            scaler.scale(total_loss).backward()
+
             # Gradient clipping before optimizer step
             scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+
+            # Optimizer step
             scaler.step(optimizer)
             scaler.update()
+
+            # ===== WEIGHT INTEGRITY FUSE: Check params after step =====
+            if not _params_finite(model):
+                weight_reverts += 1
+                logger.error(
+                    f"[WEIGHT CORRUPTION] Non-finite params after batch {batch_idx}! "
+                    f"Reverting to last-good checkpoint. study_ids: {study_ids[:4]}..."
+                )
+                _restore_params(model, last_good_params)
+                optimizer.zero_grad(set_to_none=True)
+                continue
+
+            # Update last-good checkpoint
+            last_good_params = _copy_params(model)
+
         else:
+            # Non-mixed-precision path
             logits, clip_emb, supcon_emb, _, _, text_emb = model(
                 images, text_tokens, structured, attention_mask,
                 return_embeddings=True,
@@ -370,30 +430,57 @@ def train_epoch(
                 labels, label_mask, text_emb,
             )
 
-            # Check for NaN loss - skip batch if detected
-            if torch.isnan(losses["total"]) or torch.isinf(losses["total"]):
+            # ===== HARD GATE: Never backward/step on invalid batch =====
+            total_loss = losses["total"]
+            is_finite = torch.isfinite(total_loss)
+            is_valid = losses.get("valid", True)
+
+            if (not is_finite) or (not is_valid):
                 nan_batches += 1
-                logger.warning(f"NaN/Inf loss at batch {batch_idx}, skipping")
-                optimizer.zero_grad()
+                nan_study_ids.extend(study_ids)
+                logger.warning(
+                    f"NaN/Inf loss at batch {batch_idx}, skipping | "
+                    f"study_ids: {study_ids[:4]}... | finite={is_finite}, valid={is_valid}"
+                )
+                optimizer.zero_grad(set_to_none=True)
                 continue
 
-            losses["total"].backward()
+            # Backward pass (only for valid batches)
+            total_loss.backward()
+
             # Gradient clipping
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+
+            # Optimizer step
             optimizer.step()
+
+            # ===== WEIGHT INTEGRITY FUSE: Check params after step =====
+            if not _params_finite(model):
+                weight_reverts += 1
+                logger.error(
+                    f"[WEIGHT CORRUPTION] Non-finite params after batch {batch_idx}! "
+                    f"Reverting to last-good checkpoint. study_ids: {study_ids[:4]}..."
+                )
+                _restore_params(model, last_good_params)
+                optimizer.zero_grad(set_to_none=True)
+                continue
+
+            # Update last-good checkpoint
+            last_good_params = _copy_params(model)
 
         scheduler.step()
 
-        # Track metrics
+        # Track metrics (skip 'valid' flag which is not a tensor)
         for k, v in losses.items():
-            total_losses[k] += v.item()
+            if k != "valid":
+                total_losses[k] += v.item()
         num_batches += 1
 
         # Update progress bar
         if batch_idx % config.log_interval == 0:
             current_lr = scheduler.get_last_lr()[0]
             progress.set_postfix({
-                "loss": f"{losses['total'].item():.4f}",
+                "loss": f"{total_loss.item():.4f}",
                 "cls": f"{losses['cls'].item():.4f}",
                 "lr": f"{current_lr:.2e}",
                 "nan": nan_batches,
@@ -404,9 +491,16 @@ def train_epoch(
     avg_losses["time"] = epoch_time
     avg_losses["lr"] = scheduler.get_last_lr()[0]
     avg_losses["nan_batches"] = nan_batches
+    avg_losses["weight_reverts"] = weight_reverts
 
     if nan_batches > 0:
         logger.warning(f"Epoch {epoch}: {nan_batches} batches skipped due to NaN/Inf loss")
+        # Log unique study_ids that caused NaN (for debugging which samples are bad)
+        unique_nan_studies = list(set(nan_study_ids))[:20]  # First 20 unique
+        logger.warning(f"Epoch {epoch}: NaN study_ids sample: {unique_nan_studies}")
+
+    if weight_reverts > 0:
+        logger.error(f"Epoch {epoch}: {weight_reverts} weight corruptions reverted!")
 
     return avg_losses
 
@@ -445,9 +539,10 @@ def validate(
             labels, label_mask, text_emb,
         )
 
-        # Track losses
+        # Track losses (skip 'valid' boolean flag)
         for k, v in losses.items():
-            total_losses[k] += v.item()
+            if k != 'valid':
+                total_losses[k] += v.item()
         num_batches += 1
 
         # Collect predictions
@@ -462,7 +557,13 @@ def validate(
     all_logits = torch.cat(all_logits, dim=0).numpy()
     all_labels = torch.cat(all_labels, dim=0).numpy()
     all_masks = torch.cat(all_masks, dim=0).numpy()
-    probs = 1 / (1 + np.exp(-all_logits))
+
+    # Handle NaN/Inf in logits
+    if np.any(~np.isfinite(all_logits)):
+        logger.warning("NaN/Inf detected in validation logits - model may be corrupted")
+        all_logits = np.nan_to_num(all_logits, nan=0.0, posinf=10.0, neginf=-10.0)
+
+    probs = 1 / (1 + np.exp(-np.clip(all_logits, -20, 20)))  # Clip to prevent overflow
 
     label_names = MultimodalClassificationDataset.PATHOLOGY_LABELS
     aurocs = {}
@@ -474,6 +575,11 @@ def validate(
         if valid_mask.sum() > 0:
             y_true = all_labels[valid_mask, i]
             y_pred = probs[valid_mask, i]
+
+            # Skip if predictions contain NaN
+            if np.any(~np.isfinite(y_pred)):
+                logger.warning(f"Skipping {label_name} due to NaN predictions")
+                continue
 
             # Need both classes present
             if len(np.unique(y_true)) > 1:
@@ -780,7 +886,7 @@ def main():
         config.classifier.clip_weight = args.clip_weight
     if args.supcon_weight:
         config.classifier.supcon_weight = args.supcon_weight
-    if args.num_workers:
+    if args.num_workers is not None:
         config.classifier.num_workers = args.num_workers
 
     # Create directories

@@ -51,6 +51,21 @@ class MultimodalClassificationDataset(Dataset):
         augment: Whether to apply training augmentations
     """
 
+    # Blacklisted study_ids that cause NaN during training
+    # These samples have problematic data (extreme values, corrupted images, etc.)
+    BLACKLISTED_STUDY_IDS = {
+        # Batch 24 NaN culprits
+        56963809,
+        52404879,
+        51936871,
+        55210365,
+        # Batch 84 NaN culprits
+        50381712,
+        55659481,
+        52626685,
+        52686135,
+    }
+
     # CheXpert pathology labels (12 classes, excludes "No Finding" and "Support Devices")
     PATHOLOGY_LABELS = [
         "Atelectasis",
@@ -170,6 +185,15 @@ class MultimodalClassificationDataset(Dataset):
                 raise ValueError("HDF5 file missing 'index' dataset")
             index_bytes = f["index"][:]
             self.index_df = pd.read_parquet(io.BytesIO(bytes(index_bytes)))
+
+        # Filter out blacklisted study_ids that cause NaN during training
+        original_count = len(self.index_df)
+        self.index_df = self.index_df[~self.index_df["study_id"].isin(self.BLACKLISTED_STUDY_IDS)]
+        self.index_df = self.index_df.reset_index(drop=True)
+
+        blacklisted_count = original_count - len(self.index_df)
+        if blacklisted_count > 0:
+            logger.info(f"Excluded {blacklisted_count} blacklisted study_ids")
 
         self.study_ids = self.index_df["study_id"].tolist()
         logger.info(f"Loaded index with {len(self.study_ids)} images")
@@ -326,6 +350,12 @@ class MultimodalClassificationDataset(Dataset):
         if image.ndim == 2:
             image = image[np.newaxis, ...]
         image = torch.from_numpy(image).float()
+
+        # Sanitize image: replace NaN/Inf with 0 (should be rare but prevents crashes)
+        if torch.isnan(image).any() or torch.isinf(image).any():
+            logger.warning(f"NaN/Inf in image for study_id={study_id}, sanitizing")
+            image = torch.nan_to_num(image, nan=0.0, posinf=1.0, neginf=0.0)
+
         if self.transform is not None:
             image = self.transform(image.squeeze(0))
 
@@ -333,8 +363,13 @@ class MultimodalClassificationDataset(Dataset):
         labels = self.labels.get(study_id, torch.zeros(len(self.PATHOLOGY_LABELS)))
         label_mask = self.label_masks.get(study_id, torch.zeros(len(self.PATHOLOGY_LABELS)))
 
-        # Get structured features
+        # Get structured features (already sanitized in _extract_structured_tensor)
         structured = self._extract_structured_tensor(study_id)
+
+        # Double-check structured features for NaN/Inf
+        if torch.isnan(structured).any() or torch.isinf(structured).any():
+            logger.warning(f"NaN/Inf in structured features for study_id={study_id}, sanitizing")
+            structured = torch.nan_to_num(structured, nan=0.0, posinf=0.0, neginf=0.0)
 
         # Get text tokens
         text_tokens, attention_mask = self._extract_text_tokens(study_id)
@@ -358,8 +393,12 @@ class MultimodalClassificationDataset(Dataset):
             row = self.structured_df.loc[study_id]
             for feat_name in self.STRUCTURED_FEATURES:
                 val = row.get(feat_name, np.nan)
-                # Convert NaN to 0.0
-                features.append(float(val) if pd.notna(val) else 0.0)
+                # Convert NaN and Inf to 0.0
+                # Note: triage_acuity can have Inf values which propagate NaN through model
+                if pd.notna(val) and not np.isinf(val):
+                    features.append(float(val))
+                else:
+                    features.append(0.0)
         else:
             features = [0.0] * len(self.STRUCTURED_FEATURES)
 

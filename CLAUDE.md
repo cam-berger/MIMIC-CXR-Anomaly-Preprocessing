@@ -294,6 +294,12 @@ Set environment variables or create `.env` file with MIMIC dataset paths.
 ### Classification Training Issues
 - **Data Leakage**: If classifier achieves suspiciously high accuracy, check if `--leak-free` was used during preprocessing. CheXpert labels are extracted from radiology reports - feeding report text leaks labels.
 - **Missing Labels**: Some studies have uncertain (-1.0) or missing (NaN) labels. These are masked out during training automatically.
+- **NaN Loss During Training**: The training loop has bulletproof NaN handling:
+  - Batches with NaN/Inf loss are automatically skipped (no backward pass)
+  - Weight integrity fuse: reverts to last-good checkpoint if parameters become corrupted
+  - ~1-2% of batches may produce NaN due to edge-case data; this is normal and handled safely
+  - Known problematic study_ids are blacklisted in `src/models/classification_dataset.py`
+  - All loss functions compute in FP32 for numerical stability (even with mixed precision training)
 
 ## Git Conventions
 

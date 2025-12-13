@@ -20,22 +20,28 @@ class CLIPLoss(nn.Module):
     Aligns image and text embeddings in a shared space by:
     1. Computing similarity matrix between all image-text pairs
     2. Using InfoNCE loss in both directions (image->text and text->image)
-    3. Learning temperature for scaling similarities
+    3. Learning logit_scale (like OpenAI CLIP) instead of temperature
+
+    Uses FP32 for numerical stability even when model is in FP16.
 
     Args:
-        temperature: Initial temperature for scaling (learned)
+        init_temperature: Initial temperature (converted to logit_scale)
         label_smoothing: Label smoothing factor
+        max_logit_scale: Maximum logit scale (minimum effective temperature)
     """
 
     def __init__(
         self,
-        temperature: float = 0.07,
+        init_temperature: float = 0.07,
         label_smoothing: float = 0.0,
+        max_logit_scale: float = 100.0,
     ):
         super().__init__()
-        # Learnable temperature
-        self.temperature = nn.Parameter(torch.tensor(temperature))
+        # Learn logit_scale (like OpenAI CLIP) instead of temperature
+        # logit_scale = 1/temperature, stored as log for positivity
+        self.logit_scale = nn.Parameter(torch.log(torch.tensor(1.0 / init_temperature)))
         self.label_smoothing = label_smoothing
+        self.max_logit_scale = max_logit_scale
 
     def forward(
         self,
@@ -43,7 +49,7 @@ class CLIPLoss(nn.Module):
         text_emb: torch.Tensor,
     ) -> torch.Tensor:
         """
-        Compute CLIP contrastive loss.
+        Compute CLIP contrastive loss in FP32 for numerical stability.
 
         Args:
             img_emb: Normalized image embeddings [B, D]
@@ -52,27 +58,38 @@ class CLIPLoss(nn.Module):
         Returns:
             Scalar loss value
         """
-        # Ensure embeddings are normalized
-        img_emb = F.normalize(img_emb, dim=-1)
-        text_emb = F.normalize(text_emb, dim=-1)
+        # Compute in FP32 for numerical stability (critical for mixed precision training)
+        with torch.cuda.amp.autocast(enabled=False):
+            img_emb = img_emb.float()
+            text_emb = text_emb.float()
 
-        # Compute similarity matrix
-        # [B, B] where element (i,j) is similarity between image i and text j
-        logits = torch.matmul(img_emb, text_emb.T) / self.temperature
+            # Ensure embeddings are normalized
+            img_emb = F.normalize(img_emb, dim=-1)
+            text_emb = F.normalize(text_emb, dim=-1)
 
-        # Labels: diagonal elements are positive pairs
-        batch_size = img_emb.shape[0]
-        labels = torch.arange(batch_size, device=img_emb.device)
+            # Get logit_scale (always positive via exp, clamped for safety)
+            logit_scale = self.logit_scale.exp().clamp(max=self.max_logit_scale)
 
-        # Symmetric loss: image->text and text->image
-        loss_i2t = F.cross_entropy(
-            logits, labels, label_smoothing=self.label_smoothing
-        )
-        loss_t2i = F.cross_entropy(
-            logits.T, labels, label_smoothing=self.label_smoothing
-        )
+            # Compute similarity matrix scaled by logit_scale
+            # [B, B] where element (i,j) is similarity between image i and text j
+            logits = logit_scale * torch.matmul(img_emb, text_emb.T)
 
-        return (loss_i2t + loss_t2i) / 2
+            # Clamp logits to safe range to prevent exp() overflow
+            logits = logits.clamp(-50, 50)
+
+            # Labels: diagonal elements are positive pairs
+            batch_size = img_emb.shape[0]
+            labels = torch.arange(batch_size, device=img_emb.device)
+
+            # Symmetric loss: image->text and text->image
+            loss_i2t = F.cross_entropy(
+                logits, labels, label_smoothing=self.label_smoothing
+            )
+            loss_t2i = F.cross_entropy(
+                logits.T, labels, label_smoothing=self.label_smoothing
+            )
+
+            return (loss_i2t + loss_t2i) / 2
 
 
 class SupConLoss(nn.Module):
@@ -87,19 +104,24 @@ class SupConLoss(nn.Module):
     Reference: "Supervised Contrastive Learning" (Khosla et al., 2020)
     Extended for multi-label by using soft positives based on label overlap.
 
+    Uses FP32 for numerical stability and F.log_softmax for proper handling.
+
     Args:
         temperature: Temperature for scaling similarities
-        base_temperature: Base temperature for normalization
+        base_temperature: Base temperature for normalization (fixed)
+        min_temperature: Minimum temperature to prevent explosion
     """
 
     def __init__(
         self,
         temperature: float = 0.07,
         base_temperature: float = 0.07,
+        min_temperature: float = 0.01,
     ):
         super().__init__()
         self.temperature = temperature
         self.base_temperature = base_temperature
+        self.min_temperature = min_temperature
 
     def forward(
         self,
@@ -108,11 +130,11 @@ class SupConLoss(nn.Module):
         mask: torch.Tensor = None,
     ) -> torch.Tensor:
         """
-        Compute supervised contrastive loss.
+        Compute supervised contrastive loss in FP32 for numerical stability.
 
         Args:
             embeddings: Normalized embeddings [B, D]
-            labels: Multi-hot labels [B, num_classes]
+            labels: Multi-hot labels [B, num_classes] (float32)
             mask: Label validity mask [B, num_classes] (1 = valid, 0 = invalid)
 
         Returns:
@@ -121,54 +143,59 @@ class SupConLoss(nn.Module):
         device = embeddings.device
         batch_size = embeddings.shape[0]
 
-        # Apply mask to labels if provided
-        if mask is not None:
-            labels = labels * mask
+        # Compute in FP32 for numerical stability
+        with torch.cuda.amp.autocast(enabled=False):
+            embeddings = embeddings.float()
+            labels = labels.float()
+            if mask is not None:
+                mask = mask.float()
 
-        # Compute label similarity (soft positives)
-        # Using Jaccard-like similarity: |intersection| / |union|
-        intersection = torch.matmul(labels, labels.T)  # [B, B]
-        union = (
-            labels.sum(dim=1, keepdim=True)
-            + labels.sum(dim=1).unsqueeze(0)
-            - intersection
-        )
-        label_sim = intersection / (union + 1e-8)  # [B, B]
+            # Apply mask to labels if provided
+            if mask is not None:
+                labels = labels * mask
 
-        # Compute embedding similarity
-        embeddings = F.normalize(embeddings, dim=-1)
-        sim = torch.matmul(embeddings, embeddings.T) / self.temperature  # [B, B]
+            # Compute label similarity (soft positives)
+            # Using Jaccard-like similarity: |intersection| / |union|
+            intersection = torch.matmul(labels, labels.T)  # [B, B]
+            union = (
+                labels.sum(dim=1, keepdim=True)
+                + labels.sum(dim=1).unsqueeze(0)
+                - intersection
+            )
+            label_sim = intersection / (union + 1e-8)  # [B, B]
 
-        # Mask out self-similarity (-1e4 safe for FP16, max ~65504)
-        self_mask = torch.eye(batch_size, device=device).bool()
-        sim = sim.masked_fill(self_mask, -1e4)
+            # Clamp temperature to safe range
+            temp = max(self.temperature, self.min_temperature)
 
-        # For numerical stability
-        sim_max, _ = sim.max(dim=1, keepdim=True)
-        sim = sim - sim_max.detach()
+            # Compute embedding similarity
+            embeddings = F.normalize(embeddings, dim=-1)
+            sim = torch.matmul(embeddings, embeddings.T) / temp  # [B, B]
 
-        # Compute log softmax
-        exp_sim = torch.exp(sim)
-        log_prob = sim - torch.log(exp_sim.sum(dim=1, keepdim=True) + 1e-8)
+            # Mask out self-similarity with large negative value
+            self_mask = torch.eye(batch_size, device=device).bool()
+            sim = sim.masked_fill(self_mask, -1e4)
 
-        # Weight by label similarity (excluding self)
-        positive_weight = label_sim.masked_fill(self_mask, 0)
+            # Use F.log_softmax for numerical stability (handles overflow internally)
+            log_prob = F.log_softmax(sim, dim=1)
 
-        # Compute mean of log-likelihood weighted by positive similarity
-        # Only consider pairs with some label overlap
-        has_positive = positive_weight.sum(dim=1) > 0
+            # Weight by label similarity (excluding self)
+            positive_weight = label_sim.masked_fill(self_mask, 0)
 
-        if has_positive.sum() == 0:
-            return torch.tensor(0.0, device=device, requires_grad=True)
+            # Compute mean of log-likelihood weighted by positive similarity
+            # Only consider pairs with some label overlap
+            has_positive = positive_weight.sum(dim=1) > 0
 
-        mean_log_prob = (positive_weight * log_prob).sum(dim=1) / (
-            positive_weight.sum(dim=1) + 1e-8
-        )
+            if has_positive.sum() == 0:
+                return torch.tensor(0.0, device=device, requires_grad=True)
 
-        # Average over samples with positives, scale by temperature
-        loss = -(self.temperature / self.base_temperature) * mean_log_prob[has_positive]
+            mean_log_prob = (positive_weight * log_prob).sum(dim=1) / (
+                positive_weight.sum(dim=1) + 1e-8
+            )
 
-        return loss.mean()
+            # Average over samples with positives, scale by temperature ratio
+            loss = -(temp / self.base_temperature) * mean_log_prob[has_positive]
+
+            return loss.mean()
 
 
 class AsymmetricFocalLoss(nn.Module):
@@ -209,7 +236,7 @@ class AsymmetricFocalLoss(nn.Module):
         mask: torch.Tensor = None,
     ) -> torch.Tensor:
         """
-        Compute asymmetric focal loss.
+        Compute asymmetric focal loss in FP32 for numerical stability.
 
         Args:
             logits: Raw logits [B, num_classes]
@@ -219,35 +246,47 @@ class AsymmetricFocalLoss(nn.Module):
         Returns:
             Scalar loss value
         """
-        # Compute probabilities
-        probs = torch.sigmoid(logits)
-        probs_pos = probs
-        probs_neg = 1 - probs
+        # Compute in FP32 for numerical stability (critical for mixed precision training)
+        # gamma_neg=4 can cause probs**4 to underflow in FP16 when probs < 0.05
+        with torch.cuda.amp.autocast(enabled=False):
+            logits = logits.float()
+            targets = targets.float()
+            if mask is not None:
+                mask = mask.float()
 
-        # Asymmetric clipping for negatives
-        if self.clip is not None and self.clip > 0:
-            probs_neg = (probs_neg + self.clip).clamp(max=1)
+            # Compute probabilities
+            probs = torch.sigmoid(logits)
+            probs_pos = probs
+            probs_neg = 1 - probs
 
-        # Compute positive and negative losses
-        pos_loss = targets * torch.log(probs_pos.clamp(min=1e-8))
-        neg_loss = (1 - targets) * torch.log(probs_neg.clamp(min=1e-8))
+            # Asymmetric clipping for negatives
+            if self.clip is not None and self.clip > 0:
+                probs_neg = (probs_neg + self.clip).clamp(max=1)
 
-        # Apply focal weighting
-        if not self.disable_focal:
-            if self.gamma_neg > 0:
-                neg_loss = neg_loss * (probs ** self.gamma_neg)
-            if self.gamma_pos > 0:
-                pos_loss = pos_loss * ((1 - probs) ** self.gamma_pos)
+            # Compute positive and negative losses with better numerical stability
+            # Use clamp with slightly larger epsilon to avoid log(0) issues
+            pos_loss = targets * torch.log(probs_pos.clamp(min=1e-6))
+            neg_loss = (1 - targets) * torch.log(probs_neg.clamp(min=1e-6))
 
-        loss = -(pos_loss + neg_loss)
+            # Apply focal weighting
+            if not self.disable_focal:
+                if self.gamma_neg > 0:
+                    # Clamp probs to avoid 0**gamma which can cause issues
+                    focal_weight_neg = probs.clamp(min=1e-6) ** self.gamma_neg
+                    neg_loss = neg_loss * focal_weight_neg
+                if self.gamma_pos > 0:
+                    focal_weight_pos = (1 - probs).clamp(min=1e-6) ** self.gamma_pos
+                    pos_loss = pos_loss * focal_weight_pos
 
-        # Apply mask if provided
-        if mask is not None:
-            loss = loss * mask
-            # Average over valid labels only
-            return loss.sum() / (mask.sum() + 1e-8)
+            loss = -(pos_loss + neg_loss)
 
-        return loss.mean()
+            # Apply mask if provided
+            if mask is not None:
+                loss = loss * mask
+                # Average over valid labels only
+                return loss.sum() / (mask.sum() + 1e-8)
+
+            return loss.mean()
 
 
 class FocalLoss(nn.Module):
@@ -272,28 +311,54 @@ class FocalLoss(nn.Module):
         targets: torch.Tensor,
         mask: torch.Tensor = None,
     ) -> torch.Tensor:
-        """Compute focal loss."""
-        probs = torch.sigmoid(logits)
+        """Compute focal loss in FP32 for numerical stability."""
+        # Compute in FP32 for numerical stability
+        with torch.cuda.amp.autocast(enabled=False):
+            logits = logits.float()
+            targets = targets.float()
+            if mask is not None:
+                mask = mask.float()
 
-        # Binary cross entropy
-        bce = F.binary_cross_entropy_with_logits(
-            logits, targets, reduction="none"
-        )
+            probs = torch.sigmoid(logits)
 
-        # Focal weighting
-        pt = probs * targets + (1 - probs) * (1 - targets)
-        focal_weight = (1 - pt) ** self.gamma
+            # Binary cross entropy
+            bce = F.binary_cross_entropy_with_logits(
+                logits, targets, reduction="none"
+            )
 
-        # Alpha weighting
-        alpha_weight = self.alpha * targets + (1 - self.alpha) * (1 - targets)
+            # Focal weighting
+            pt = probs * targets + (1 - probs) * (1 - targets)
+            focal_weight = (1 - pt).clamp(min=1e-6) ** self.gamma
 
-        loss = alpha_weight * focal_weight * bce
+            # Alpha weighting
+            alpha_weight = self.alpha * targets + (1 - self.alpha) * (1 - targets)
 
-        if mask is not None:
-            loss = loss * mask
-            return loss.sum() / (mask.sum() + 1e-8)
+            loss = alpha_weight * focal_weight * bce
 
-        return loss.mean()
+            if mask is not None:
+                loss = loss * mask
+                return loss.sum() / (mask.sum() + 1e-8)
+
+            return loss.mean()
+
+
+def _safe_loss(name: str, loss: torch.Tensor) -> tuple[torch.Tensor, bool]:
+    """
+    Check if loss is NaN/Inf and return flag.
+
+    Args:
+        name: Loss name for logging
+        loss: Loss tensor to check
+
+    Returns:
+        Tuple of (loss, is_valid) where is_valid=False means NaN/Inf detected
+    """
+    is_nan = torch.isnan(loss) or torch.isinf(loss)
+    if is_nan:
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.warning(f"[WARNING] {name} loss was NaN/Inf.")
+    return loss, not is_nan
 
 
 class MultiTaskLoss(nn.Module):
@@ -306,6 +371,7 @@ class MultiTaskLoss(nn.Module):
     3. Supervised contrastive loss
 
     Supports learnable loss weights (uncertainty weighting).
+    Includes NaN sanitization as a safety net.
 
     Args:
         cls_weight: Weight for classification loss
@@ -350,7 +416,7 @@ class MultiTaskLoss(nn.Module):
         text_emb: torch.Tensor,
     ) -> dict[str, torch.Tensor]:
         """
-        Compute combined loss.
+        Compute combined loss with NaN detection.
 
         Args:
             logits: Classification logits [B, num_classes]
@@ -361,12 +427,58 @@ class MultiTaskLoss(nn.Module):
             text_emb: Text embeddings for CLIP loss [B, D]
 
         Returns:
-            Dictionary with individual and total losses
+            Dictionary with individual losses, total loss, and 'valid' flag.
+            If valid=False, the training loop should skip this batch.
         """
+        device = logits.device
+
+        # ===== EARLY VALIDATION: Check inputs for NaN/Inf before computing losses =====
+        # This catches issues upstream (data or model forward) before they propagate
+        inputs_valid = True
+
+        if not torch.isfinite(logits).all():
+            import logging
+            logging.getLogger(__name__).warning("[EARLY CHECK] Non-finite logits detected")
+            inputs_valid = False
+
+        if not torch.isfinite(clip_emb).all():
+            import logging
+            logging.getLogger(__name__).warning("[EARLY CHECK] Non-finite clip_emb detected")
+            inputs_valid = False
+
+        if not torch.isfinite(text_emb).all():
+            import logging
+            logging.getLogger(__name__).warning("[EARLY CHECK] Non-finite text_emb detected")
+            inputs_valid = False
+
+        if not torch.isfinite(supcon_emb).all():
+            import logging
+            logging.getLogger(__name__).warning("[EARLY CHECK] Non-finite supcon_emb detected")
+            inputs_valid = False
+
+        # If any inputs are non-finite, return zero losses with valid=False
+        if not inputs_valid:
+            zero_loss = torch.tensor(0.0, device=device, requires_grad=True)
+            return {
+                "total": zero_loss,
+                "cls": zero_loss,
+                "clip": zero_loss,
+                "supcon": zero_loss,
+                "valid": False,
+            }
+
         # Individual losses
         loss_cls = self.cls_loss(logits, labels, label_mask)
         loss_clip = self.clip_loss(clip_emb, text_emb)
         loss_supcon = self.supcon_loss(supcon_emb, labels, label_mask)
+
+        # Check for NaN/Inf in any loss
+        loss_cls, cls_valid = _safe_loss("cls", loss_cls)
+        loss_clip, clip_valid = _safe_loss("clip", loss_clip)
+        loss_supcon, supcon_valid = _safe_loss("supcon", loss_supcon)
+
+        # All losses must be valid for the batch to be valid
+        all_valid = cls_valid and clip_valid and supcon_valid
 
         # Combine losses
         if self.learn_weights:
@@ -391,6 +503,7 @@ class MultiTaskLoss(nn.Module):
             "cls": loss_cls,
             "clip": loss_clip,
             "supcon": loss_supcon,
+            "valid": all_valid,
         }
 
 
