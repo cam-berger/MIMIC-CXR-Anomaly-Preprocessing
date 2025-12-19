@@ -345,6 +345,7 @@ def train_epoch(
     nan_batches = 0
     nan_study_ids = []  # Track which studies cause NaN for debugging
     weight_reverts = 0
+    consecutive_corruptions = 0  # Track consecutive weight corruptions for circuit breaker
     start_time = time.time()
 
     # Weight integrity fuse: save last-good params checkpoint
@@ -408,13 +409,34 @@ def train_epoch(
             # ===== WEIGHT INTEGRITY FUSE: Check params after step =====
             if not _params_finite(model):
                 weight_reverts += 1
+                consecutive_corruptions += 1
                 logger.error(
                     f"[WEIGHT CORRUPTION] Non-finite params after batch {batch_idx}! "
                     f"Reverting to last-good checkpoint. study_ids: {study_ids[:4]}..."
                 )
+
+                # Restore model weights
                 _restore_params(model, last_good_params)
+
+                # CRITICAL FIX: Reset GradScaler to break cascade failures
+                # When scaler state is corrupted, subsequent batches will all fail
+                scaler = GradScaler()
+
+                # Reset optimizer state completely - Adam will reinitialize on next step
                 optimizer.zero_grad(set_to_none=True)
+                for group in optimizer.param_groups:
+                    for p in group['params']:
+                        if p in optimizer.state:
+                            del optimizer.state[p]  # Clear entire state, Adam will reinit
+
+                # Circuit breaker: stop epoch if too many consecutive corruptions
+                if consecutive_corruptions >= 10:
+                    logger.error(f"[CIRCUIT BREAKER] {consecutive_corruptions} consecutive corruptions! Breaking epoch.")
+                    break
+
                 continue
+            else:
+                consecutive_corruptions = 0  # Reset counter on successful batch
 
             # Update last-good checkpoint
             last_good_params = _copy_params(model)
@@ -457,13 +479,30 @@ def train_epoch(
             # ===== WEIGHT INTEGRITY FUSE: Check params after step =====
             if not _params_finite(model):
                 weight_reverts += 1
+                consecutive_corruptions += 1
                 logger.error(
                     f"[WEIGHT CORRUPTION] Non-finite params after batch {batch_idx}! "
                     f"Reverting to last-good checkpoint. study_ids: {study_ids[:4]}..."
                 )
+
+                # Restore model weights
                 _restore_params(model, last_good_params)
+
+                # Reset optimizer state completely - Adam will reinitialize on next step
                 optimizer.zero_grad(set_to_none=True)
+                for group in optimizer.param_groups:
+                    for p in group['params']:
+                        if p in optimizer.state:
+                            del optimizer.state[p]  # Clear entire state, Adam will reinit
+
+                # Circuit breaker: stop epoch if too many consecutive corruptions
+                if consecutive_corruptions >= 10:
+                    logger.error(f"[CIRCUIT BREAKER] {consecutive_corruptions} consecutive corruptions! Breaking epoch.")
+                    break
+
                 continue
+            else:
+                consecutive_corruptions = 0  # Reset counter on successful batch
 
             # Update last-good checkpoint
             last_good_params = _copy_params(model)
@@ -515,40 +554,53 @@ def validate(
     """Validate model and compute metrics."""
     model.eval()
 
+    # Clear GPU cache before validation to prevent OOM
+    if device == "cuda":
+        torch.cuda.empty_cache()
+
     total_losses = {"total": 0.0, "cls": 0.0, "clip": 0.0, "supcon": 0.0}
     all_logits = []
     all_labels = []
     all_masks = []
     num_batches = 0
 
-    for batch in tqdm(dataloader, desc="Validating"):
-        images = batch["image"].to(device)
-        text_tokens = batch["text_tokens"].to(device)
-        attention_mask = batch["attention_mask"].to(device)
-        structured = batch["structured"].to(device)
-        labels = batch["labels"].to(device)
-        label_mask = batch["label_mask"].to(device)
+    with torch.no_grad():
+        for batch in tqdm(dataloader, desc="Validating"):
+            images = batch["image"].to(device)
+            text_tokens = batch["text_tokens"].to(device)
+            attention_mask = batch["attention_mask"].to(device)
+            structured = batch["structured"].to(device)
+            labels = batch["labels"].to(device)
+            label_mask = batch["label_mask"].to(device)
 
-        # Forward pass
-        logits, clip_emb, supcon_emb, _, _, text_emb = model(
-            images, text_tokens, structured, attention_mask,
-            return_embeddings=True,
-        )
-        losses = loss_fn(
-            logits, clip_emb, supcon_emb,
-            labels, label_mask, text_emb,
-        )
+            # Forward pass
+            logits, clip_emb, supcon_emb, _, _, text_emb = model(
+                images, text_tokens, structured, attention_mask,
+                return_embeddings=True,
+            )
+            losses = loss_fn(
+                logits, clip_emb, supcon_emb,
+                labels, label_mask, text_emb,
+            )
 
-        # Track losses (skip 'valid' boolean flag)
-        for k, v in losses.items():
-            if k != 'valid':
-                total_losses[k] += v.item()
-        num_batches += 1
+            # Track losses (skip 'valid' boolean flag)
+            for k, v in losses.items():
+                if k != 'valid':
+                    total_losses[k] += v.item()
+            num_batches += 1
 
-        # Collect predictions
-        all_logits.append(logits.cpu())
-        all_labels.append(labels.cpu())
-        all_masks.append(label_mask.cpu())
+            # Collect predictions (move to CPU immediately)
+            all_logits.append(logits.cpu())
+            all_labels.append(labels.cpu())
+            all_masks.append(label_mask.cpu())
+
+            # Explicitly delete GPU tensors to free memory
+            del images, text_tokens, attention_mask, structured, labels, label_mask
+            del logits, clip_emb, supcon_emb, text_emb, losses
+
+            # Clear cache periodically (every 50 batches)
+            if device == "cuda" and num_batches % 50 == 0:
+                torch.cuda.empty_cache()
 
     # Average losses
     avg_losses = {k: v / num_batches for k, v in total_losses.items()}

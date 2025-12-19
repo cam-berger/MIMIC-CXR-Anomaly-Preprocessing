@@ -610,6 +610,155 @@ output/checkpoints/
 
 ---
 
+## Classifier Training (Step 4)
+
+After MAE pretraining, the classifier is trained on the **anomalous cohort** (~32k studies with CheXpert pathology labels) to detect 12 chest X-ray findings.
+
+### train_classifier.py
+
+```bash
+python train_classifier.py [OPTIONS]
+
+Options:
+  --config {debug,fast,base}  Preset configuration (default: base)
+  --train-dir PATH      Path to preprocessed training data (anomalous cohort)
+  --val-dir PATH        Path to preprocessed validation data
+  --chexpert-csv PATH   CheXpert labels CSV (mimic-cxr-2.0.0-chexpert.csv.gz)
+  --mae-checkpoint PATH Pretrained MAE model
+  --resume PATH         Resume from classifier checkpoint
+  --img-size SIZE       Input image size (default: 1024)
+  --epochs N            Number of training epochs (default: 30)
+  --batch-size N        Batch size per GPU (default: 16)
+  --num-workers N       DataLoader workers (default: 0 for stability)
+  --device {cuda,cpu}   Training device
+
+Examples:
+  # Debug run with frozen encoder
+  python train_classifier.py --config debug --epochs 2 --batch-size 2
+
+  # Full training (frozen encoder, stable)
+  python train_classifier.py --config debug \
+    --train-dir output/preprocessed/anomalous_train \
+    --val-dir output/preprocessed/anomalous_val \
+    --chexpert-csv /path/to/mimic-cxr-2.0.0-chexpert.csv.gz \
+    --mae-checkpoint output/models/mae_final.pt \
+    --img-size 1024 --epochs 30 --batch-size 16
+```
+
+### Architecture
+
+The multimodal classifier combines three modalities:
+
+```
+┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐
+│  Chest X-ray    │    │   Clinical      │    │   Structured    │
+│    Image        │    │   Text          │    │     Data        │
+└────────┬────────┘    └────────┬────────┘    └────────┬────────┘
+         │                      │                      │
+         ▼                      ▼                      ▼
+┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐
+│   MAE Encoder   │    │  ClinicalBERT   │    │   MLP Encoder   │
+│  (frozen/fine)  │    │   Encoder       │    │                 │
+└────────┬────────┘    └────────┬────────┘    └────────┬────────┘
+         │                      │                      │
+         └──────────────────────┼──────────────────────┘
+                                │
+                                ▼
+                     ┌─────────────────┐
+                     │  Cross-Attention │
+                     │     Fusion       │
+                     └────────┬────────┘
+                              │
+                              ▼
+                     ┌─────────────────┐
+                     │  Classification  │
+                     │     Head         │
+                     └────────┬────────┘
+                              │
+                              ▼
+                       12 CheXpert Labels
+```
+
+**Loss Functions:**
+- **Asymmetric Focal Loss**: Handles class imbalance
+- **CLIP Loss**: Image-text alignment
+- **Supervised Contrastive Loss**: Feature learning
+
+### Configuration Presets
+
+| Preset | freeze_mae_epochs | Learning Rate | Use Case |
+|--------|------------------|---------------|----------|
+| `debug` | 100 (always frozen) | 1e-4 | Stable training, limited VRAM |
+| `fast` | 2 | 5e-5 | Quick experiments |
+| `base` | 5 | 1e-4 | Production training |
+
+**Important:** Use `--config debug` (freeze_mae_epochs=100) to keep MAE encoder frozen. Unfreezing requires ~90GB VRAM for backpropagation through the full ViT.
+
+### Memory Requirements (1024×1024, BS=16)
+
+| Configuration | MAE Frozen | MAE Unfrozen |
+|---------------|------------|--------------|
+| ViT-Base | ~28 GB | ~90 GB (OOM on <97GB) |
+
+### Training Results
+
+Best validation results achieved with frozen MAE encoder (batch size 16, 30 epochs):
+
+| Finding | AUROC | Performance |
+|---------|-------|-------------|
+| Edema | 0.838 | Excellent |
+| Consolidation | 0.789 | Excellent |
+| Cardiomegaly | 0.782 | Excellent |
+| Pleural Effusion | 0.762 | Excellent |
+| Pneumothorax | 0.730 | Good |
+| Pneumonia | 0.721 | Good |
+| Enlarged Cardiomediastinum | 0.697 | Good |
+| Lung Opacity | 0.659 | Moderate |
+| Lung Lesion | 0.569 | Moderate |
+| Fracture | 0.489 | Weak |
+| Pleural Other | 0.435 | Weak |
+| Atelectasis | 0.334 | Weak |
+| **Mean AUROC** | **0.650** | |
+| **Mean AUPRC** | **0.871** | |
+
+### Steps for Improvement
+
+1. **Finetune MAE Encoder**: Currently frozen due to memory constraints. With >90GB VRAM:
+   - Use `--config base` (unfreezes after epoch 5)
+   - Reduce batch size to 8 or lower
+   - Expect 5-10% AUROC improvement
+
+2. **Class Weighting**: Underperforming classes (Atelectasis, Fracture, Pleural Other) may benefit from:
+   - Increased loss weights for rare findings
+   - Oversampling positive examples
+   - Focal loss gamma tuning
+
+3. **Data Augmentation**: Add stronger augmentation for challenging classes:
+   - RandAugment or AutoAugment
+   - CutMix/MixUp
+   - Progressive resizing
+
+4. **Architectural Changes**:
+   - Add attention pooling instead of mean pooling
+   - Increase text encoder capacity
+   - Try different fusion strategies (early, late, hierarchical)
+
+5. **Ensemble Methods**:
+   - Train multiple models with different seeds
+   - Combine frozen and finetuned models
+   - Use test-time augmentation
+
+### Output Files
+
+```
+output/models/
+├── classifier_best.pt    # Best validation AUROC checkpoint
+├── classifier_final.pt   # Final epoch checkpoint
+└── classifier_training.log  # Training logs with metrics
+```
+
+---
+
 ## References
 
 ### Datasets
