@@ -8,6 +8,8 @@ Includes:
 - MultiTaskLoss: Combined loss for multi-task learning
 """
 
+import math
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -42,6 +44,23 @@ class CLIPLoss(nn.Module):
         self.logit_scale = nn.Parameter(torch.log(torch.tensor(1.0 / init_temperature)))
         self.label_smoothing = label_smoothing
         self.max_logit_scale = max_logit_scale
+        # Store max in log-space for clamping the raw parameter
+        # math.log(100) = 4.605, which is a safe maximum before exp() issues
+        self._max_logit_scale_log = math.log(max_logit_scale)
+
+    def clamp_logit_scale(self) -> None:
+        """
+        Clamp the raw logit_scale parameter to prevent overflow.
+
+        CRITICAL: Call this after optimizer.step() to prevent the parameter
+        from growing unboundedly. Without this, the raw parameter can overflow
+        during training even though forward() clamps the exp() result.
+
+        The parameter is clamped in log-space: logit_scale <= log(max_logit_scale)
+        which ensures exp(logit_scale) <= max_logit_scale.
+        """
+        with torch.no_grad():
+            self.logit_scale.clamp_(max=self._max_logit_scale_log)
 
     def forward(
         self,
@@ -505,6 +524,19 @@ class MultiTaskLoss(nn.Module):
             "supcon": loss_supcon,
             "valid": all_valid,
         }
+
+    def clamp_logit_scale(self) -> None:
+        """
+        Clamp the CLIPLoss logit_scale parameter to prevent overflow.
+
+        CRITICAL: Call this after optimizer.step() to prevent cascading
+        weight corruption. The CLIP logit_scale parameter can grow unboundedly
+        during training, causing exp(logit_scale) to overflow to Inf, which
+        then corrupts model parameters during the optimizer update.
+
+        This method delegates to CLIPLoss.clamp_logit_scale().
+        """
+        self.clip_loss.clamp_logit_scale()
 
 
 class LabelSmoothingBCE(nn.Module):

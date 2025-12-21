@@ -79,8 +79,8 @@ class ClassifierConfig:
 
     # Training
     epochs: int = 50
-    batch_size: int = 32
-    base_lr: float = 1e-4
+    batch_size: int = 16  # Reduced from 32 for stability
+    base_lr: float = 5e-5  # Reduced from 1e-4 to prevent gradient explosion
     min_lr: float = 1e-6
     weight_decay: float = 0.05
     warmup_epochs: int = 5
@@ -405,6 +405,11 @@ def train_epoch(
             # Optimizer step
             scaler.step(optimizer)
             scaler.update()
+
+            # CRITICAL: Clamp CLIP logit_scale to prevent parameter overflow
+            # The raw logit_scale parameter can grow unboundedly during AdamW updates,
+            # causing exp(logit_scale) to overflow to Inf and corrupt model weights
+            loss_fn.clamp_logit_scale()
 
             # ===== WEIGHT INTEGRITY FUSE: Check params after step =====
             if not _params_finite(model):
@@ -890,6 +895,8 @@ def main():
     parser.add_argument("--cls-weight", type=float, default=None)
     parser.add_argument("--clip-weight", type=float, default=None)
     parser.add_argument("--supcon-weight", type=float, default=None)
+    parser.add_argument("--freeze-mae-epochs", type=int, default=None,
+                        help="Number of epochs to keep MAE encoder frozen (default: 5, use 100 to keep frozen)")
 
     # Resumption
     parser.add_argument(
@@ -938,6 +945,8 @@ def main():
         config.classifier.clip_weight = args.clip_weight
     if args.supcon_weight:
         config.classifier.supcon_weight = args.supcon_weight
+    if args.freeze_mae_epochs is not None:
+        config.classifier.freeze_mae_epochs = args.freeze_mae_epochs
     if args.num_workers is not None:
         config.classifier.num_workers = args.num_workers
 
