@@ -18,16 +18,22 @@ A data preprocessing pipeline that prepares chest X-ray images and clinical data
 
 This pipeline takes raw medical data from multiple sources and transforms it into a clean, organized format ready for machine learning. Specifically, it:
 
-1. **Identifies "normal" chest X-rays** (~33,000 studies) - X-rays from patients who were healthy and sent home
-2. **Identifies "abnormal" chest X-rays** (~200,000 studies) - X-rays showing various medical conditions
+1. **Identifies "normal" chest X-rays** (~20,000 studies) - X-rays from patients who were healthy and sent home
+2. **Identifies "abnormal" chest X-rays** (~32,500 studies) - X-rays showing various pathologies with CheXpert labels
 3. **Combines multiple data types** for each X-ray:
    - The image itself
    - Lab results (blood tests, etc.)
    - Vital signs (heart rate, blood pressure, etc.)
-   - The radiologist's written report
-   - Diagnoses and procedures
+   - The radiologist's written report (excluded in leak-free mode)
 
 The output is ready-to-use datasets for training anomaly detection models.
+
+### Dataset Summary
+
+| Cohort | Purpose | Final Size | Train/Val Split |
+|--------|---------|------------|-----------------|
+| **Normal** | MAE pretraining (unsupervised) | ~20,000 | 17,000 / 3,000 |
+| **Anomalous** | Classification (supervised) | ~32,500 | 27,576 / 4,922 |
 
 ---
 
@@ -86,6 +92,17 @@ This project uses four datasets from [PhysioNet](https://physionet.org/), all pa
 - **Key data**: The "Impression" section of radiology reports (with prior references removed)
 - **Why we need it**: Expert interpretation in natural language
 
+### Data Provenance
+
+| Dataset | Version | PhysioNet ID | Citation |
+|---------|---------|--------------|----------|
+| MIMIC-CXR-JPG | 2.1.0 | [mimic-cxr-jpg](https://physionet.org/content/mimic-cxr-jpg/2.1.0/) | Johnson et al., 2019 |
+| MIMIC-IV | 3.1 | [mimiciv](https://physionet.org/content/mimiciv/3.1/) | Johnson et al., 2023 |
+| MIMIC-IV-ED | 2.2 | [mimic-iv-ed](https://physionet.org/content/mimic-iv-ed/2.2/) | Johnson et al., 2023 |
+| CXR-PRO | 1.0.0 | [cxr-pro](https://physionet.org/content/cxr-pro/1.0.0/) | Ramesh et al., 2022 |
+
+**Access Requirements**: All datasets require PhysioNet credentialed access and completion of the CITI training course.
+
 ### How They Link Together
 
 All datasets share a **`subject_id`** (patient identifier). Here's how records connect:
@@ -121,15 +138,15 @@ The pipeline has two main steps:
 
 A "cohort" is a defined group of patients/studies for analysis. We build two:
 
-**Normal Cohort (~33k studies)**
+**Normal Cohort** (for MAE pretraining)
 ```
-Start: 377,000 X-ray studies
+Start: 377,110 X-ray studies
   │
   ├─ Filter: CheXpert "No Finding" = 1.0 → ~95,000
   │    (Automated label says no disease detected)
   │
-  ├─ Filter: Match to ED visit within 24 hours → ~52,000
-  │    (We need clinical context)
+  ├─ Filter: Match to ED visit within ±24 hours → ~52,000
+  │    (Need clinical context from ED visit)
   │
   ├─ Filter: Patient was sent home → ~22,000
   │    (Admitted patients might have been sick)
@@ -137,17 +154,24 @@ Start: 377,000 X-ray studies
   ├─ Filter: No critical diagnoses (sepsis, MI, etc.) → ~20,000
   │    (Extra safety check)
   │
-  └─ Filter: Age ≥ 18 → ~20,000 (final normal cohort)
+  └─ Filter: Age ≥ 18 → ~20,000 final
+      └─ Split: 17,000 train / 3,000 val
 ```
 
-**Anomalous Cohort (~200k studies)**
+**Anomalous Cohort** (for classification)
 ```
-Start: 377,000 X-ray studies
+Start: 377,110 X-ray studies
   │
-  ├─ Filter: Any pathology label = 1.0 → ~200,000
-  │    (CheXpert detected something abnormal)
+  ├─ Filter: Any CheXpert pathology = 1.0 → ~200,000
+  │    (At least one finding detected)
   │
-  └─ Filter: Age ≥ 18 → ~200,000 (final anomalous cohort)
+  ├─ Filter: Match to ED visit within ±24 hours → ~55,000
+  │    (Need clinical context from ED visit)
+  │
+  ├─ Filter: Age ≥ 18 → ~52,000
+  │
+  └─ Filter: Valid for all modalities → ~32,500 final
+      └─ Split: 27,576 train / 4,922 val
 ```
 
 Each cohort includes all linked data: demographics, vitals, labs, diagnoses, reports.
@@ -192,6 +216,33 @@ text.parquet
 ```
 
 The text processing can optionally use Claude AI to generate summaries that incorporate clinical context (age, vitals, labs, diagnoses).
+
+### Data Leakage Policy
+
+**Critical for research validity**: CheXpert labels are NLP-extracted from radiology reports. Using report text to predict these labels is trivial (the model just "reads" the diagnosis). We enforce strict temporal boundaries:
+
+**Anchor Time** = CXR acquisition timestamp
+
+| Data Source | Included | Condition |
+|-------------|----------|-----------|
+| Demographics (age, gender) | ✅ | Always available |
+| ED triage vitals | ✅ | Recorded at ED arrival (before imaging) |
+| Labs | ✅ | Only if `charttime ≤ anchor_time` |
+| Chief complaint | ✅ | Recorded at triage (before imaging) |
+| ED diagnoses (ICD codes) | ⚠️ | Use with caution—may reflect post-imaging workup |
+| Radiology report text | ❌ | **Excluded in leak-free mode** (post-imaging) |
+| Hospital procedures | ❌ | Occur after ED evaluation |
+
+**Usage:**
+```bash
+# For classification training: ALWAYS use --leak-free
+python preprocess.py --leak-free --cohort anomalous_train.parquet
+
+# For MAE pretraining: leak-free not required (no labels predicted)
+python preprocess.py --cohort normal_train.parquet
+```
+
+In `--leak-free` mode, text features contain only clinical context (demographics, vitals, labs, chief complaint)—no radiology findings.
 
 ---
 
@@ -612,7 +663,7 @@ output/checkpoints/
 
 ## Classifier Training (Step 4)
 
-After MAE pretraining, the classifier is trained on the **anomalous cohort** (~32k studies with CheXpert pathology labels) to detect 12 chest X-ray findings.
+After MAE pretraining, the classifier is trained on the **anomalous cohort** (32,498 studies with CheXpert pathology labels) to detect 12 chest X-ray findings.
 
 ### train_classifier.py
 
@@ -835,6 +886,45 @@ output/models/
 ### Key Papers
 - [MIMIC-CXR Database](https://www.nature.com/articles/s41597-019-0322-0)
 - [CheXpert Labeler](https://arxiv.org/abs/1901.07031)
+- [Masked Autoencoders (MAE)](https://arxiv.org/abs/2111.06377)
+- [Asymmetric Loss for Multi-Label Classification](https://arxiv.org/abs/2009.14119)
+
+### How to Cite
+
+If you use this pipeline or the MIMIC datasets, please cite:
+
+```bibtex
+@article{johnson2019mimic,
+  title={MIMIC-CXR, a de-identified publicly available database of chest radiographs with free-text reports},
+  author={Johnson, Alistair EW and Pollard, Tom J and Greenbaum, Nathaniel R and Lungren, Matthew P and Deng, Chih-ying and Peng, Yifan and Lu, Zhiyong and Mark, Roger G and Berkowitz, Seth J and Horng, Steven},
+  journal={Scientific Data},
+  volume={6},
+  number={1},
+  pages={317},
+  year={2019},
+  publisher={Nature Publishing Group}
+}
+
+@article{johnson2023mimiciv,
+  title={MIMIC-IV, a freely accessible electronic health record dataset},
+  author={Johnson, Alistair EW and Bulgarelli, Lucas and Shen, Lu and Gayles, Alvin and Shammout, Ayad and Horng, Steven and Pollard, Tom J and Hao, Sicheng and Moody, Benjamin and Gow, Brian and others},
+  journal={Scientific Data},
+  volume={10},
+  number={1},
+  pages={1},
+  year={2023},
+  publisher={Nature Publishing Group}
+}
+
+@article{irvin2019chexpert,
+  title={CheXpert: A large chest radiograph dataset with uncertainty labels and expert comparison},
+  author={Irvin, Jeremy and Rajpurkar, Pranav and Ko, Michael and Yu, Yifan and Ciurea-Ilcus, Silviana and Chute, Chris and Marklund, Henrik and Haghgoo, Behzad and Ball, Robyn and Shpanskaya, Katie and others},
+  journal={Proceedings of the AAAI Conference on Artificial Intelligence},
+  volume={33},
+  pages={590--597},
+  year={2019}
+}
+```
 
 ---
 

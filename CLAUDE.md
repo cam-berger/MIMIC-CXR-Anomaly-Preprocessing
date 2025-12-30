@@ -119,8 +119,8 @@ Understanding these IDs is critical for working with MIMIC data:
 
 **Stage 1: Cohort Building** (`build_cohort.py`)
 - Filters CXR studies by CheXpert labels
-- `--normal-only`: "No Finding" = 1.0 for MAE pretraining (~33k studies)
-- `--anomalous-only`: Any pathology = 1.0 for classification (~32k studies)
+- `--normal-only`: "No Finding" = 1.0 for MAE pretraining (~20k studies after filtering)
+- `--anomalous-only`: Any pathology = 1.0 for classification (~32.5k studies after filtering)
 - Links to ED visits within 24-hour window
 - Outputs: `output/cohorts/{normal,anomalous}_{train,val}.parquet`
 

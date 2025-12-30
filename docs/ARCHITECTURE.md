@@ -23,7 +23,7 @@ The MIMIC-CXR pipeline is structured as a three-step process:
 
 **Step 1: Cohort Building**
 - Filter-based cohort building using radiology and clinical criteria
-- Supports both normal cohorts (~33k for MAE pretraining) and anomalous cohorts (~32k for classification)
+- Supports both normal cohorts (~20k for MAE pretraining) and anomalous cohorts (~32.5k for classification)
 - Modular filter architecture for extensibility
 - Output: Parquet cohorts with metadata and CheXpert labels
 
