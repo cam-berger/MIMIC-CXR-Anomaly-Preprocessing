@@ -22,6 +22,53 @@ from .mae import MaskedAutoencoder, mae_vit_base_patch16
 logger = logging.getLogger(__name__)
 
 
+# =============================================================================
+# FIX #3: Safe Normalization Utility
+# =============================================================================
+
+def safe_normalize(x: torch.Tensor, dim: int = -1, eps: float = 1e-8) -> torch.Tensor:
+    """
+    Safe L2 normalization that handles zero vectors without producing NaN.
+
+    Standard F.normalize can return NaN when the input has zero L2 norm (division by zero).
+    This function explicitly handles that case by returning zeros for zero-norm vectors.
+
+    Args:
+        x: Input tensor to normalize
+        dim: Dimension along which to normalize (default: -1)
+        eps: Epsilon for numerical stability (default: 1e-8)
+
+    Returns:
+        Normalized tensor where each vector along `dim` has unit L2 norm.
+        Zero-norm vectors remain zero (rather than becoming NaN).
+
+    Example:
+        >>> x = torch.tensor([[0., 0., 0.], [3., 4., 0.]])  # First vector is zero
+        >>> normalized = safe_normalize(x, dim=-1)
+        >>> normalized
+        tensor([[0.0000, 0.0000, 0.0000],
+                [0.6000, 0.8000, 0.0000]])  # Second vector has unit norm
+
+    Note:
+        This function is critical for CLIP and SupCon losses, which require normalized
+        embeddings. Without this, zero-norm embeddings (e.g., from projection layers
+        with all-zero inputs) cause NaN in cosine similarity computations.
+
+        See: tests/baseline_metrics.md for NaN/Inf root cause analysis
+    """
+    # Compute L2 norm along specified dimension
+    norm = x.norm(p=2, dim=dim, keepdim=True)
+
+    # Normalize (add eps to prevent division by zero)
+    normalized = x / (norm + eps)
+
+    # Replace any remaining NaN with zeros (belt-and-suspenders safety)
+    # This handles edge cases like Inf inputs or extremely small eps
+    normalized = torch.nan_to_num(normalized, nan=0.0, posinf=0.0, neginf=0.0)
+
+    return normalized
+
+
 class TextEncoder(nn.Module):
     """
     ClinicalBERT encoder for radiology text.
@@ -207,6 +254,16 @@ class CrossAttentionFusion(nn.Module):
         Returns:
             Fused embedding [B, embed_dim]
         """
+        # FIX #2: Sanitize inputs before attention to prevent NaN propagation
+        # Critical for numerical stability - a single NaN in embedding can corrupt entire batch
+        img_emb = torch.nan_to_num(img_emb, nan=0.0, posinf=0.0, neginf=0.0)
+        text_emb = torch.nan_to_num(text_emb, nan=0.0, posinf=0.0, neginf=0.0)
+
+        # Clamp to safe range to prevent overflow in attention softmax
+        # Attention computes q @ k.T * scale, which can overflow with large values
+        img_emb = img_emb.clamp(-10.0, 10.0)
+        text_emb = text_emb.clamp(-10.0, 10.0)
+
         # Add sequence dimension for attention [B, 1, D]
         img_seq = img_emb.unsqueeze(1)
         text_seq = text_emb.unsqueeze(1)
@@ -231,9 +288,18 @@ class CrossAttentionFusion(nn.Module):
         img_attended = img_attended.squeeze(1)
         text_attended = text_attended.squeeze(1)
 
+        # FIX #2: Sanitize attention outputs before fusion
+        # Attention can still produce NaN despite input sanitization (e.g., numerical issues in softmax)
+        img_attended = torch.nan_to_num(img_attended, nan=0.0)
+        text_attended = torch.nan_to_num(text_attended, nan=0.0)
+
         # Concatenate and fuse
         combined = torch.cat([img_attended, text_attended], dim=-1)
         fused = self.fusion_mlp(combined)
+
+        # FIX #2: Final safety check - ensure output is finite
+        # Belt-and-suspenders protection against any remaining NaN/Inf
+        fused = torch.nan_to_num(fused, nan=0.0, posinf=0.0, neginf=0.0)
 
         return fused
 
@@ -470,11 +536,13 @@ class MultimodalClassifier(nn.Module):
 
         # Task outputs
         logits = self.classifier(fused)  # [B, num_labels]
-        clip_emb = F.normalize(self.clip_proj(fused), dim=-1)  # [B, 128]
-        supcon_emb = F.normalize(self.supcon_proj(fused), dim=-1)  # [B, 128]
+        # FIX #3: Use safe_normalize instead of F.normalize to handle zero-norm embeddings
+        clip_emb = safe_normalize(self.clip_proj(fused), dim=-1)  # [B, 128]
+        supcon_emb = safe_normalize(self.supcon_proj(fused), dim=-1)  # [B, 128]
 
         # Project text embedding to contrastive space for CLIP loss
-        text_clip_emb = F.normalize(self.text_clip_proj(text_emb), dim=-1)  # [B, 128]
+        # FIX #3: Use safe_normalize instead of F.normalize to handle zero-norm embeddings
+        text_clip_emb = safe_normalize(self.text_clip_proj(text_emb), dim=-1)  # [B, 128]
 
         if return_embeddings:
             return logits, clip_emb, supcon_emb, fused, img_emb, text_clip_emb

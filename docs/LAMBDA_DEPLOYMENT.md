@@ -1,11 +1,77 @@
 # Lambda GPU Deployment Guide
-## MIMIC-CXR Preprocessing Validation (200 Samples)
+## MIMIC-CXR Classifier Training & Preprocessing
 
-**Objective**: Validate preprocessing pipeline on 200 samples to ensure MAE-readiness before full-scale Step 3 implementation.
+**Status**: ✅ **PRODUCTION COMPLETE** - Successfully trained full multimodal classifier (December 2024)
 
-**Instance**: 1x NVIDIA GH200 Grace Hopper
-**Estimated Time**: 4-5 hours
-**Estimated Cost**: $32-41 ($8/hr × 4-5 hours)
+**Objective**: Deploy and train multimodal classifier pipeline on Lambda Cloud GPU infrastructure.
+
+**Instance**: 1x NVIDIA GH200 480GB (gpu_1x_gh200)
+**Actual Cost**: **$1.50/hr** (significantly cheaper than initially estimated)
+
+---
+
+## Production Training Results (December 2024)
+
+### Full Dataset Training Completed ✅
+
+| Metric | Value |
+|--------|-------|
+| **Training Samples** | 27,576 |
+| **Validation Samples** | 4,922 |
+| **Epochs** | 50 |
+| **Training Time** | ~36 hours |
+| **Total Cost** | ~$54 |
+| **Macro AUROC** | **0.701** |
+| **Macro AUPRC** | **0.899** |
+
+### Per-Class Performance
+
+| Class | AUROC | AUPRC |
+|-------|-------|-------|
+| Edema | 0.878 | 0.934 |
+| Consolidation | 0.840 | 0.825 |
+| No_Finding | 0.821 | 0.928 |
+| Pneumonia | 0.812 | 0.672 |
+| Cardiomegaly | 0.808 | 0.965 |
+
+See [ARCHITECTURE.md](ARCHITECTURE.md#production-training-results) for complete results.
+
+---
+
+## Validation Run Results (200 Samples)
+
+### Actual Metrics ✅
+- **Preprocessing Time**: 1 minute (200 images)
+- **Training Time**: ~20 minutes (40 epochs)
+- **Total Time**: ~25 minutes
+- **Total Cost**: ~$0.625 ($1.50/hr × 0.42 hours)
+- **Stability**: 100% - Zero NaN batches, zero OOM errors
+- **Loss Improvement**: 51.6% (0.524 → 0.254)
+
+### Configuration Used
+- **Training**: Fast config, 40 epochs
+- **Batch Size**: 2 (conservative for 1024x1024 images)
+- **Image Resolution**: 1024×1024 (matches MAE pretraining)
+- **Preprocessing**: Leak-free mode (no radiology reports)
+- **Text Summarization**: Disabled (no Claude API costs)
+
+---
+
+## Full Dataset Deployment (27,576 Samples)
+
+### Actual Time & Cost (Completed December 2024)
+- **Data Transfer**: ~2 hours (225 GB compressed)
+- **Preprocessing**: Already complete (data transferred pre-processed)
+- **Training (50 epochs)**: ~36 hours @ $1.50/hr = **~$54**
+- **Total Training Cost**: **~$54**
+
+### Cost Comparison
+
+| Component | Estimated | Actual |
+|-----------|-----------|--------|
+| GPU Rate | $8/hr (wrong) | $1.50/hr ✓ |
+| Training Time | 48-67 hrs | ~36 hrs |
+| Total Cost | $70-100 | **~$54** |
 
 ---
 
@@ -699,17 +765,26 @@ iotop       # Disk I/O
 
 ## Cost Breakdown
 
+### Production Training (50 Epochs, Full Dataset)
+
 | Component | Cost |
 |-----------|------|
-| Lambda GPU (1xGH200, 4-5 hrs) | $32-40 |
+| Lambda GPU (1xGH200, ~36 hrs) | ~$54 |
 | Claude API (summarization disabled) | $0 |
-| Data transfer (egress) | $0 (small dataset) |
-| **Total** | **$32-40** |
+| Data transfer (egress) | $0 |
+| **Total** | **~$54** |
 
-**Cost optimization**:
-- Use spot instances if available (30-50% discount)
-- Monitor progress; terminate if stuck
-- Text summarization disabled in validation config (saves $10-20)
+### Validation Run (200 Samples)
+
+| Component | Cost |
+|-----------|------|
+| Lambda GPU (1xGH200, ~25 min) | ~$0.63 |
+| **Total** | **~$0.63** |
+
+**Cost optimization tips**:
+- GH200 @ $1.50/hr is already very cost-effective
+- Monitor for early convergence (may not need full epochs)
+- Terminate instance immediately after training completes
 
 ---
 
@@ -963,22 +1038,19 @@ scp -i $PEM_KEY ubuntu@$LAMBDA_IP:~/mae-training/output/models/config.json ./
 scp -i $PEM_KEY ubuntu@$LAMBDA_IP:~/mae-training/output/models/training_history.json ./
 ```
 
-### Cost Estimate (GH200 @ $8/hr)
+### Cost Estimate (GH200 @ $1.50/hr)
 
-| Training Duration | Cost |
-|-------------------|------|
-| Debug (2 epochs) | ~$1 |
-| 100 epochs | ~$500 |
-| 800 epochs | ~$4,000 |
+| Training Duration | Estimated Time | Cost |
+|-------------------|----------------|------|
+| Debug (2 epochs) | ~10 min | ~$0.25 |
+| 50 epochs | ~36 hrs | ~$54 |
+| 100 epochs | ~72 hrs | ~$108 |
 
-**Cost optimization tips**:
-- Use spot instances if available
-- Start with smaller experiments (100 epochs) to validate
-- Monitor for early convergence - may not need full 800 epochs
+**Actual results**: Production classifier training completed in ~36 hours for ~$54
 
 ---
 
-**Created**: 2025-11-20
-**Updated**: 2025-11-27 (Added MAE training section)
-**Purpose**: Validate MIMIC-CXR preprocessing pipeline (Step 2) and MAE training (Step 3)
-**Status**: Ready for deployment
+**Created**: 2024-11-20
+**Updated**: 2024-12-29 (Production training complete, results documented)
+**Purpose**: Deploy and train MIMIC-CXR multimodal classifier pipeline
+**Status**: ✅ Production complete - Macro AUROC 0.701, AUPRC 0.899

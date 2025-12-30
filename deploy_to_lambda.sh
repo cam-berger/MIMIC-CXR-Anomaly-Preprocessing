@@ -5,7 +5,7 @@
 set -e
 
 # Configuration
-LAMBDA_IP="192.222.57.66"
+LAMBDA_IP="192.222.58.66"
 LAMBDA_USER="ubuntu"
 SSH_KEY="/home/dev/Downloads/berger-cm.pem"
 LOCAL_BASE="/home/dev/Documents/Portfolio/MIMIC/MIMIC-CXR-Anomaly-Preprocessing"

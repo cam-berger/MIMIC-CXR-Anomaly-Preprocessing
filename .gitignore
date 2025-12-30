@@ -52,6 +52,20 @@ logs/
 *.h5
 *.hdf5
 
+# Model files (large binaries)
+*.pt
+*.pth
+*.onnx
+
+# Archives (deployment artifacts)
+*.tar.gz
+*.tar
+*.zip
+
+# Validation/test data subsets
+validation_data_subset/
+validation_data_subset_*/
+
 # Keep example/template files
 !**/example_*.csv
 !**/template_*.csv

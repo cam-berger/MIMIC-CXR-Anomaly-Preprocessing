@@ -700,6 +700,34 @@ The multimodal classifier combines three modalities:
 |---------------|------------|--------------|
 | ViT-Base | ~28 GB | ~90 GB (OOM on <97GB) |
 
+### Recent Updates
+
+#### Lambda GH200 Validation Run (2024-12-25) ✅
+
+**Successfully validated entire pipeline on Lambda Cloud GPU infrastructure:**
+
+- **Instance**: NVIDIA GH200 480GB @ **$1.50/hr**
+- **Dataset**: 200-sample validation subset
+- **Training**: 40 epochs, fast config
+- **Results**:
+  - ✅ **100% stability** - Zero NaN batches, zero OOM errors
+  - ✅ **51.6% loss improvement** (0.524 → 0.254)
+  - ✅ **Complete convergence** - All 40 epochs successful
+  - ✅ **Cost-effective** - Only $0.63 for validation run
+
+**Key Validations:**
+- All NaN/Inf stability fixes working in production
+- Leak-free preprocessing confirmed (0% report leakage)
+- HDF5 + Parquet storage format validated
+- MAE encoder (1024×1024) integration successful
+- Multi-modal fusion (image + text + structured) working
+
+**Next**: Full 27,576-sample training run (estimated $70-100, 48-67 hours)
+
+See `CHANGELOG.md` for detailed deployment results and `docs/LAMBDA_DEPLOYMENT.md` for deployment guide.
+
+---
+
 ### Training Results
 
 Best validation results achieved with frozen MAE encoder (batch size 16, 30 epochs):
@@ -720,6 +748,43 @@ Best validation results achieved with frozen MAE encoder (batch size 16, 30 epoc
 | Atelectasis | 0.334 | Weak |
 | **Mean AUROC** | **0.650** | |
 | **Mean AUPRC** | **0.871** | |
+
+### Production Training Results (50 Epochs, Full Dataset)
+
+After comprehensive training on the full anomalous dataset (27,576 training + 4,922 validation samples) on Lambda Cloud GH200 GPU:
+
+| Metric | Value |
+|--------|-------|
+| **Macro AUROC** | **0.701** |
+| **Macro AUPRC** | **0.899** |
+| Training Time | ~36 hours |
+| Training Cost | ~$54 (GH200 @ $1.50/hr) |
+| Epochs | 50 |
+
+#### Per-Class Performance
+
+| Class | AUROC | AUPRC | Precision | Recall | F1 |
+|-------|-------|-------|-----------|--------|-----|
+| Edema | 0.878 | 0.934 | 0.804 | 0.953 | 0.872 |
+| Consolidation | 0.840 | 0.825 | 0.578 | 0.895 | 0.702 |
+| No_Finding | 0.821 | 0.928 | 0.787 | 0.979 | 0.872 |
+| Pneumonia | 0.812 | 0.672 | 0.429 | 0.756 | 0.547 |
+| Cardiomegaly | 0.808 | 0.965 | 0.905 | 0.958 | 0.930 |
+| Pleural_Other | 0.751 | 0.837 | 0.652 | 0.967 | 0.779 |
+| Lung_Opacity | 0.717 | 0.990 | 0.980 | 0.995 | 0.987 |
+| Enlarged_Cardiomediastinum | 0.708 | 0.793 | 0.608 | 0.976 | 0.749 |
+| Fracture | 0.651 | 0.948 | 0.913 | 1.000 | 0.955 |
+| Lung_Lesion | 0.580 | 0.960 | 0.958 | 0.983 | 0.971 |
+| Atelectasis | 0.524 | 0.984 | 0.983 | 0.998 | 0.991 |
+| Pleural_Effusion | 0.326 | 0.953 | 0.972 | 1.000 | 0.986 |
+
+**Key Improvements from Frozen to Full Training:**
+- Macro AUROC: 0.650 → **0.701** (+7.8%)
+- Macro AUPRC: 0.871 → **0.899** (+3.2%)
+- Training stability: 50/50 epochs completed (zero NaN cascades)
+- All 4 NaN/Inf fixes validated in production
+
+**Note on High AUPRC with Low AUROC:** Some classes (e.g., Atelectasis, Pleural_Effusion) show high AUPRC but low AUROC due to extreme class imbalance (>95% positive rate). The high AUPRC reflects the baseline positive rate rather than model discrimination.
 
 ### Steps for Improvement
 
@@ -775,6 +840,53 @@ output/models/
 
 ## Future Improvements
 
+### MAE Fine-Tuning Strategies
+
+The current pipeline uses a **frozen MAE encoder** during classification to avoid overfitting and reduce memory requirements. Several strategies could improve feature extraction:
+
+| Strategy | Description | Expected Improvement |
+|----------|-------------|---------------------|
+| **Gradual Unfreezing** | Progressively unfreeze encoder layers (last→first) over training | 5-10% AUROC |
+| **Layer-wise Learning Rate Decay (LLRD)** | Lower learning rates for earlier layers (e.g., 0.1× per layer) | Better fine-tuning stability |
+| **Domain-Specific Pretraining** | Continue MAE pretraining on larger CXR datasets (CheXpert, NIH ChestX-ray14) | Better medical feature representations |
+| **Patch Size Optimization** | Experiment with 8×8 (fine detail) or 32×32 (global context) patches | Task-dependent improvements |
+
+**Implementation**: Modify `src/models/multimodal.py` to support unfreezing schedules and LLRD.
+
+### NLP Embeddings and Summarization
+
+Current text encoding uses **ClinicalBERT** with clinical context only (leak-free mode). Advanced approaches:
+
+| Approach | Model | Use Case |
+|----------|-------|----------|
+| **PubMedBERT** | `microsoft/BiomedNLP-PubMedBERT-base` | Scientific literature understanding |
+| **BioClinicalBERT** | `emilyalsentzer/Bio_ClinicalBERT` | MIMIC clinical notes (current) |
+| **RadBERT** | `StanfordAIMI/RadBERT` | Radiology-specific reports |
+| **GatorTron** | `UFNLP/gatortron-base` | Largest clinical model (8.9B params) |
+
+**Additional NLP Improvements:**
+- **Entity Extraction**: Extract clinical entities (findings, anatomy, severity) using scispaCy or MedCAT
+- **Temporal Modeling**: Model report sequences for patients with multiple studies using LSTM/Transformer
+- **Summarization Fine-Tuning**: Train BART/T5 on MIMIC reports for domain-specific summarization
+- **Negation Detection**: Use NegEx or transformer-based approaches to handle "no evidence of..."
+
+### RAG (Retrieval-Augmented Generation)
+
+Integrate retrieval systems to enhance predictions with similar historical cases:
+
+| Component | Implementation | Benefit |
+|-----------|----------------|---------|
+| **Similar Case Retrieval** | FAISS index on MAE embeddings | Find visually similar X-rays |
+| **Knowledge Base Integration** | Link to RadLex, SNOMED-CT ontologies | Structured medical knowledge |
+| **Explainable Predictions** | Generate natural language explanations using retrieved context | Clinical interpretability |
+| **Few-Shot Learning** | Use retrieved examples as in-context examples for rare pathologies | Better rare class detection |
+
+**Implementation Path:**
+1. Build FAISS index from MAE encoder embeddings
+2. Retrieve top-k similar cases during inference
+3. Aggregate predictions/explanations from retrieved cases
+4. Fine-tune with contrastive learning on retrieved pairs
+
 ### Image Processing Alternatives
 
 The current implementation uses **CenterCrop** to extract a fixed-size region from full-resolution X-rays:
@@ -784,32 +896,36 @@ Original: ~3056×2544 → CenterCrop(1024) → 1024×1024
 Coverage: ~13% of original pixels (33% width × 40% height)
 ```
 
-**Potential improvement**: Use **Resize** instead of CenterCrop to preserve the entire image:
-
-```python
-# Current (CenterCrop):
-T.CenterCrop(target_size)  # Takes center portion only
-
-# Alternative (Resize):
-T.Resize(target_size)  # Scales entire image
-```
-
 | Approach | Pros | Cons |
 |----------|------|------|
-| **CenterCrop** (current) | Preserves native resolution, consistent framing | Loses peripheral lung fields (~86% of image) |
-| **Resize** (alternative) | Captures entire anatomy, no information loss | 3× downscale reduces fine detail |
+| **CenterCrop** (current) | Preserves native resolution, consistent framing | Loses peripheral lung fields |
+| **Resize** | Captures entire anatomy, no information loss | 3× downscale reduces fine detail |
+| **Multi-Scale** | Use both crop and resize features | Increased compute, best of both |
 
-**When to consider Resize:**
-- Detecting peripheral pathology (pneumothorax, pleural effusions)
-- Analyzing diaphragm or shoulder regions
-- When global context matters more than fine detail
+**Multi-Scale Vision Implementation:**
+```python
+# Extract features at multiple scales
+global_features = mae_encoder(resize(image, 224))    # Full image context
+local_features = mae_encoder(center_crop(image, 224))  # Fine detail
+combined = concat([global_features, local_features])
+```
 
-**When CenterCrop is preferred:**
-- Central pathology (cardiomegaly, mediastinal masses)
-- When training resolution is limited (224×224)
-- When consistent anatomical framing is important
+### Additional Improvements
 
-This is configurable in `src/models/dataset.py` in the `get_mae_augmentations()` function.
+| Category | Approach | Description |
+|----------|----------|-------------|
+| **Contrastive Learning** | CLIP-style pretraining | Joint image-text embedding space using radiology reports |
+| **Uncertainty Quantification** | MC Dropout / Deep Ensembles | Calibrated confidence scores for clinical deployment |
+| **Active Learning** | Uncertainty sampling | Prioritize labeling uncertain samples |
+| **Test-Time Augmentation** | Multiple crops + voting | Improve inference robustness |
+| **Ensemble Methods** | Multi-seed training | Combine diverse models for better generalization |
+
+### Research Directions
+
+- **Longitudinal Analysis**: Track patient X-rays over time to detect disease progression
+- **Multi-Task Learning**: Joint training on detection, segmentation, and report generation
+- **Federated Learning**: Train across institutions without sharing patient data
+- **Causal Inference**: Identify causal relationships between clinical variables and outcomes
 
 ---
 

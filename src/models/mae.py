@@ -519,7 +519,10 @@ class MaskedAutoencoder(nn.Module):
         if self.norm_pix_loss:
             mean = target.mean(dim=-1, keepdim=True)
             var = target.var(dim=-1, keepdim=True)
-            target = (target - mean) / (var + 1e-6) ** 0.5
+            # FIX #4: Increased epsilon from 1e-6 to 1e-5 for FP16 safety
+            # Prevents division by near-zero for low-variance patches (e.g., constant background regions)
+            # See: tests/baseline_metrics.md for NaN/Inf analysis
+            target = (target - mean) / (var + 1e-5) ** 0.5
 
         loss = (pred - target) ** 2
         loss = loss.mean(dim=-1)  # Mean per patch

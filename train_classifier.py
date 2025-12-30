@@ -423,9 +423,18 @@ def train_epoch(
                 # Restore model weights
                 _restore_params(model, last_good_params)
 
-                # CRITICAL FIX: Reset GradScaler to break cascade failures
-                # When scaler state is corrupted, subsequent batches will all fail
-                scaler = GradScaler()
+                # FIX #1: Reset GradScaler state to break cascade failures
+                # CRITICAL: Do NOT create new GradScaler() - that loses state synchronization!
+                # Instead, reset using load_state_dict() to restore initial state
+                # See: tests/baseline_metrics.md for cascade failure analysis
+                initial_state = {
+                    'scale': 65536.0,  # Default initial scale (2^16)
+                    'growth_factor': 2.0,
+                    'backoff_factor': 0.5,
+                    'growth_interval': 2000,
+                    '_growth_tracker': 0,
+                }
+                scaler.load_state_dict(initial_state)
 
                 # Reset optimizer state completely - Adam will reinitialize on next step
                 optimizer.zero_grad(set_to_none=True)

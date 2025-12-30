@@ -14,6 +14,9 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+# FIX #3: Import safe_normalize for NaN-safe embedding normalization
+from .multimodal import safe_normalize
+
 
 class CLIPLoss(nn.Module):
     """
@@ -83,8 +86,9 @@ class CLIPLoss(nn.Module):
             text_emb = text_emb.float()
 
             # Ensure embeddings are normalized
-            img_emb = F.normalize(img_emb, dim=-1)
-            text_emb = F.normalize(text_emb, dim=-1)
+            # FIX #3: Use safe_normalize instead of F.normalize to handle zero-norm embeddings
+            img_emb = safe_normalize(img_emb, dim=-1)
+            text_emb = safe_normalize(text_emb, dim=-1)
 
             # Get logit_scale (always positive via exp, clamped for safety)
             logit_scale = self.logit_scale.exp().clamp(max=self.max_logit_scale)
@@ -187,7 +191,8 @@ class SupConLoss(nn.Module):
             temp = max(self.temperature, self.min_temperature)
 
             # Compute embedding similarity
-            embeddings = F.normalize(embeddings, dim=-1)
+            # FIX #3: Use safe_normalize instead of F.normalize to handle zero-norm embeddings
+            embeddings = safe_normalize(embeddings, dim=-1)
             sim = torch.matmul(embeddings, embeddings.T) / temp  # [B, B]
 
             # Mask out self-similarity with large negative value

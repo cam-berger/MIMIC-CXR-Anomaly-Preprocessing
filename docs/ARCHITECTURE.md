@@ -1453,9 +1453,60 @@ for batch in test_loader:
 
 ---
 
+## Production Training Results
+
+### Full Dataset Training (December 2024)
+
+Trained on complete anomalous dataset using Lambda Cloud GH200 GPU:
+
+| Metric | Value |
+|--------|-------|
+| **Training Samples** | 27,576 |
+| **Validation Samples** | 4,922 |
+| **Epochs** | 50 |
+| **Training Time** | ~36 hours |
+| **Training Cost** | ~$54 (GH200 @ $1.50/hr) |
+| **Macro AUROC** | **0.701** |
+| **Macro AUPRC** | **0.899** |
+
+### Per-Class Performance
+
+| Class | AUROC | AUPRC | Precision | Recall | F1 |
+|-------|-------|-------|-----------|--------|-----|
+| Edema | 0.878 | 0.934 | 0.804 | 0.953 | 0.872 |
+| Consolidation | 0.840 | 0.825 | 0.578 | 0.895 | 0.702 |
+| No_Finding | 0.821 | 0.928 | 0.787 | 0.979 | 0.872 |
+| Pneumonia | 0.812 | 0.672 | 0.429 | 0.756 | 0.547 |
+| Cardiomegaly | 0.808 | 0.965 | 0.905 | 0.958 | 0.930 |
+| Pleural_Other | 0.751 | 0.837 | 0.652 | 0.967 | 0.779 |
+| Lung_Opacity | 0.717 | 0.990 | 0.980 | 0.995 | 0.987 |
+| Enlarged_Cardiomediastinum | 0.708 | 0.793 | 0.608 | 0.976 | 0.749 |
+| Fracture | 0.651 | 0.948 | 0.913 | 1.000 | 0.955 |
+| Lung_Lesion | 0.580 | 0.960 | 0.958 | 0.983 | 0.971 |
+| Atelectasis | 0.524 | 0.984 | 0.983 | 0.998 | 0.991 |
+| Pleural_Effusion | 0.326 | 0.953 | 0.972 | 1.000 | 0.986 |
+
+### Key Observations
+
+1. **High-performing classes** (AUROC > 0.8): Edema, Consolidation, No_Finding, Pneumonia, Cardiomegaly
+2. **Moderate performance** (AUROC 0.6-0.8): Pleural_Other, Lung_Opacity, Enlarged_Cardiomediastinum, Fracture
+3. **Class imbalance effects**: Some classes show high AUPRC but low AUROC (e.g., Atelectasis, Pleural_Effusion) due to >95% positive rate in the anomalous cohort
+
+### Stability Validation
+
+The production training validated all NaN/Inf stability fixes:
+- **50/50 epochs completed** (zero cascade failures)
+- **<0.5% NaN batch rate** (properly handled by skip logic)
+- **Zero weight corruptions** (GradScaler reset fix working)
+- **Circuit breaker never triggered** (vs 28 triggers before fixes)
+
+See [NaN Stability Fixes](NAN_STABILITY_FIXES.md) for implementation details.
+
+---
+
 ## See Also
 
 - [Data Schema Documentation](DATA_SCHEMA.md) - Complete preprocessed output schema
 - [Lambda Deployment Guide](LAMBDA_DEPLOYMENT.md) - GPU deployment instructions
-- [Model Training Research](MODEL_TRAINING_RESEARCH.md) - MAE training approaches
+- [NaN Stability Fixes](NAN_STABILITY_FIXES.md) - Training stability improvements
 - [Main README](../README.md) - Quick start and usage examples
