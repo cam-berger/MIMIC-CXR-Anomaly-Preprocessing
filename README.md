@@ -4,6 +4,7 @@ A data preprocessing pipeline that prepares chest X-ray images and clinical data
 
 ## Table of Contents
 - [What This Project Does](#what-this-project-does)
+- [Results](#results)
 - [Background: The Problem We're Solving](#background-the-problem-were-solving)
 - [The Data: MIMIC Datasets](#the-data-mimic-datasets)
 - [How It Works](#how-it-works)
@@ -11,6 +12,8 @@ A data preprocessing pipeline that prepares chest X-ray images and clinical data
 - [Project Structure](#project-structure)
 - [Detailed Walkthrough](#detailed-walkthrough)
 - [CLI Reference](#cli-reference)
+- [Future Improvements](#future-improvements)
+- [References](#references)
 
 ---
 
@@ -34,6 +37,31 @@ The output is ready-to-use datasets for training anomaly detection models.
 |--------|---------|------------|-----------------|
 | **Normal** | MAE pretraining (unsupervised) | ~20,000 | 17,000 / 3,000 |
 | **Anomalous** | Classification (supervised) | ~32,500 | 27,576 / 4,922 |
+
+---
+
+## Results
+
+Production model trained on Lambda Cloud GH200 GPU (December 2024):
+
+| Metric | Value |
+|--------|-------|
+| **Macro AUROC** | **0.701** |
+| **Macro AUPRC** | **0.899** |
+| Training Time | ~36 hours |
+| Training Cost | ~$54 |
+
+### Top Performing Classes
+
+| Class | AUROC | AUPRC |
+|-------|-------|-------|
+| Edema | 0.878 | 0.934 |
+| Consolidation | 0.840 | 0.825 |
+| No_Finding | 0.821 | 0.928 |
+| Pneumonia | 0.812 | 0.672 |
+| Cardiomegaly | 0.808 | 0.965 |
+
+See [docs/RESULTS.md](docs/RESULTS.md) for complete per-class metrics, confusion matrices, and threshold analysis.
 
 ---
 
@@ -751,118 +779,15 @@ The multimodal classifier combines three modalities:
 |---------------|------------|--------------|
 | ViT-Base | ~28 GB | ~90 GB (OOM on <97GB) |
 
-### Recent Updates
+### Training Details
 
-#### Lambda GH200 Validation Run (2024-12-25) ✅
+See [docs/RESULTS.md](docs/RESULTS.md) for:
+- Complete per-class performance metrics
+- Confusion matrix analysis
+- Threshold optimization
+- ROC and PR curves
 
-**Successfully validated entire pipeline on Lambda Cloud GPU infrastructure:**
-
-- **Instance**: NVIDIA GH200 480GB @ **$1.50/hr**
-- **Dataset**: 200-sample validation subset
-- **Training**: 40 epochs, fast config
-- **Results**:
-  - ✅ **100% stability** - Zero NaN batches, zero OOM errors
-  - ✅ **51.6% loss improvement** (0.524 → 0.254)
-  - ✅ **Complete convergence** - All 40 epochs successful
-  - ✅ **Cost-effective** - Only $0.63 for validation run
-
-**Key Validations:**
-- All NaN/Inf stability fixes working in production
-- Leak-free preprocessing confirmed (0% report leakage)
-- HDF5 + Parquet storage format validated
-- MAE encoder (1024×1024) integration successful
-- Multi-modal fusion (image + text + structured) working
-
-**Next**: Full 27,576-sample training run (estimated $70-100, 48-67 hours)
-
-See `CHANGELOG.md` for detailed deployment results and `docs/LAMBDA_DEPLOYMENT.md` for deployment guide.
-
----
-
-### Training Results
-
-Best validation results achieved with frozen MAE encoder (batch size 16, 30 epochs):
-
-| Finding | AUROC | Performance |
-|---------|-------|-------------|
-| Edema | 0.838 | Excellent |
-| Consolidation | 0.789 | Excellent |
-| Cardiomegaly | 0.782 | Excellent |
-| Pleural Effusion | 0.762 | Excellent |
-| Pneumothorax | 0.730 | Good |
-| Pneumonia | 0.721 | Good |
-| Enlarged Cardiomediastinum | 0.697 | Good |
-| Lung Opacity | 0.659 | Moderate |
-| Lung Lesion | 0.569 | Moderate |
-| Fracture | 0.489 | Weak |
-| Pleural Other | 0.435 | Weak |
-| Atelectasis | 0.334 | Weak |
-| **Mean AUROC** | **0.650** | |
-| **Mean AUPRC** | **0.871** | |
-
-### Production Training Results (50 Epochs, Full Dataset)
-
-After comprehensive training on the full anomalous dataset (27,576 training + 4,922 validation samples) on Lambda Cloud GH200 GPU:
-
-| Metric | Value |
-|--------|-------|
-| **Macro AUROC** | **0.701** |
-| **Macro AUPRC** | **0.899** |
-| Training Time | ~36 hours |
-| Training Cost | ~$54 (GH200 @ $1.50/hr) |
-| Epochs | 50 |
-
-#### Per-Class Performance
-
-| Class | AUROC | AUPRC | Precision | Recall | F1 |
-|-------|-------|-------|-----------|--------|-----|
-| Edema | 0.878 | 0.934 | 0.804 | 0.953 | 0.872 |
-| Consolidation | 0.840 | 0.825 | 0.578 | 0.895 | 0.702 |
-| No_Finding | 0.821 | 0.928 | 0.787 | 0.979 | 0.872 |
-| Pneumonia | 0.812 | 0.672 | 0.429 | 0.756 | 0.547 |
-| Cardiomegaly | 0.808 | 0.965 | 0.905 | 0.958 | 0.930 |
-| Pleural_Other | 0.751 | 0.837 | 0.652 | 0.967 | 0.779 |
-| Lung_Opacity | 0.717 | 0.990 | 0.980 | 0.995 | 0.987 |
-| Enlarged_Cardiomediastinum | 0.708 | 0.793 | 0.608 | 0.976 | 0.749 |
-| Fracture | 0.651 | 0.948 | 0.913 | 1.000 | 0.955 |
-| Lung_Lesion | 0.580 | 0.960 | 0.958 | 0.983 | 0.971 |
-| Atelectasis | 0.524 | 0.984 | 0.983 | 0.998 | 0.991 |
-| Pleural_Effusion | 0.326 | 0.953 | 0.972 | 1.000 | 0.986 |
-
-**Key Improvements from Frozen to Full Training:**
-- Macro AUROC: 0.650 → **0.701** (+7.8%)
-- Macro AUPRC: 0.871 → **0.899** (+3.2%)
-- Training stability: 50/50 epochs completed (zero NaN cascades)
-- All 4 NaN/Inf fixes validated in production
-
-**Note on High AUPRC with Low AUROC:** Some classes (e.g., Atelectasis, Pleural_Effusion) show high AUPRC but low AUROC due to extreme class imbalance (>95% positive rate). The high AUPRC reflects the baseline positive rate rather than model discrimination.
-
-### Steps for Improvement
-
-1. **Finetune MAE Encoder**: Currently frozen due to memory constraints. With >90GB VRAM:
-   - Use `--config base` (unfreezes after epoch 5)
-   - Reduce batch size to 8 or lower
-   - Expect 5-10% AUROC improvement
-
-2. **Class Weighting**: Underperforming classes (Atelectasis, Fracture, Pleural Other) may benefit from:
-   - Increased loss weights for rare findings
-   - Oversampling positive examples
-   - Focal loss gamma tuning
-
-3. **Data Augmentation**: Add stronger augmentation for challenging classes:
-   - RandAugment or AutoAugment
-   - CutMix/MixUp
-   - Progressive resizing
-
-4. **Architectural Changes**:
-   - Add attention pooling instead of mean pooling
-   - Increase text encoder capacity
-   - Try different fusion strategies (early, late, hierarchical)
-
-5. **Ensemble Methods**:
-   - Train multiple models with different seeds
-   - Combine frozen and finetuned models
-   - Use test-time augmentation
+See [docs/LAMBDA_DEPLOYMENT.md](docs/LAMBDA_DEPLOYMENT.md) for deployment guide
 
 ### Output Files
 
