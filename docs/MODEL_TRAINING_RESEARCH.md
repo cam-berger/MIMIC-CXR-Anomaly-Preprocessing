@@ -1,5 +1,7 @@
 # Model Training Research: MAE, Fine-Tuning, and Anomaly Detection
 
+> **Note**: This document was written during the research/planning phase. For actual implementation results, see [RESULTS.md](RESULTS.md). Production training achieved **Macro AUROC 0.701, AUPRC 0.899**.
+
 This document explores implementation approaches for training anomaly detection models on chest X-rays using the preprocessed MIMIC-CXR data.
 
 ## Table of Contents
@@ -17,13 +19,13 @@ This document explores implementation approaches for training anomaly detection 
 Our approach follows a three-phase training strategy:
 
 ```
-Phase 1: Self-Supervised Pretraining (Normal cohort ~33k)
+Phase 1: Self-Supervised Pretraining (Normal cohort ~20k)
     │
     │   Train on unlabeled normal X-rays
     │   Model learns "what normal looks like"
     │
     ▼
-Phase 2: Fine-Tuning (Anomalous cohort ~200k)
+Phase 2: Fine-Tuning (Anomalous cohort ~32.5k)
     │
     │   Add classification head
     │   Train on labeled abnormal examples

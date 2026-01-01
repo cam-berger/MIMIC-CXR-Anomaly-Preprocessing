@@ -4,9 +4,29 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
-## [Unreleased]
+## [1.0.0] - 2024-12-29
 
-### Validated - Lambda GH200 Production Deployment (2024-12-25)
+### Production Training Complete
+
+**Full multimodal classifier trained on Lambda Cloud GH200 GPU.**
+
+| Metric | Value |
+|--------|-------|
+| **Macro AUROC** | **0.701** |
+| **Macro AUPRC** | **0.899** |
+| Training Samples | 27,576 |
+| Validation Samples | 4,922 |
+| Epochs | 50 |
+| Training Time | ~36 hours |
+| Training Cost | ~$54 |
+
+See [RESULTS.md](RESULTS.md) for complete metrics.
+
+---
+
+## [0.9.0] - 2024-12-25
+
+### Validated - Lambda GH200 Validation Deployment
 
 **Successfully validated NaN/Inf stability fixes on Lambda Cloud GH200 GPU instance with 40-epoch production training run.**
 

@@ -3,10 +3,10 @@
 
 **Status**: ✅ **PRODUCTION COMPLETE** - Successfully trained full multimodal classifier (December 2024)
 
-**Objective**: Deploy and train multimodal classifier pipeline on Lambda Cloud GPU infrastructure.
+> **Note**: Production training is complete. This document is retained as reference for future deployments. For results, see [RESULTS.md](RESULTS.md).
 
 **Instance**: 1x NVIDIA GH200 480GB (gpu_1x_gh200)
-**Actual Cost**: **$1.50/hr** (significantly cheaper than initially estimated)
+**Actual Cost**: **$1.50/hr**
 
 ---
 
