@@ -13,6 +13,7 @@ A data preprocessing pipeline that prepares chest X-ray images and clinical data
 - [Detailed Walkthrough](#detailed-walkthrough)
 - [CLI Reference](#cli-reference)
 - [Future Improvements](#future-improvements)
+- [MAE Reconstruction Analysis](#mae-reconstruction-analysis)
 - [References](#references)
 
 ---
@@ -941,6 +942,60 @@ combined = concat([global_features, local_features])
 - **Multi-Task Learning**: Joint training on detection, segmentation, and report generation
 - **Federated Learning**: Train across institutions without sharing patient data
 - **Causal Inference**: Identify causal relationships between clinical variables and outcomes
+
+---
+
+## MAE Reconstruction Analysis
+
+The MAE model learns to reconstruct "normal" chest X-rays during pretraining. When presented with anomalous images, the model struggles to accurately reconstruct abnormal regions, producing higher reconstruction error. This error signal serves as the basis for anomaly detection.
+
+### Reconstruction Error by Pathology
+
+We analyzed reconstruction error across all 13 pathology classes in the validation set:
+
+| Rank | Pathology | MSE | Detectability |
+|------|-----------|-----|---------------|
+| 1 | Pleural Other | 0.000907 | Highest |
+| 2 | Pneumothorax | 0.000873 | |
+| 3 | Pneumonia | 0.000867 | |
+| 4 | Fracture | 0.000864 | |
+| 5 | Lung Lesion | 0.000816 | |
+| 6 | Edema | 0.000814 | |
+| 7 | Atelectasis | 0.000622 | |
+| 8 | Pleural Effusion | 0.000618 | |
+| 9 | Lung Opacity | 0.000544 | |
+| 10 | Cardiomegaly | 0.000511 | |
+| 11 | Enlarged Cardiomediastinum | 0.000509 | |
+| 12 | Support Devices | 0.000418 | |
+| 13 | Consolidation | 0.000356 | Lowest |
+
+### Key Findings
+
+**High reconstruction error** (Pleural Other, Pneumothorax, Pneumonia, Fracture):
+- These conditions introduce visual patterns that deviate significantly from normal anatomy
+- Sharp discontinuities (fractures) or absence of lung markings (pneumothorax) are particularly hard to reconstruct
+- Best candidates for MAE-based anomaly detection
+
+**Moderate reconstruction error** (Lung Lesion, Edema, Atelectasis, Pleural Effusion):
+- Intermediate difficulty involving opacity changes or fluid accumulation
+- Distributed error patterns across lung fields
+
+**Lower reconstruction error** (Cardiomegaly, Support Devices, Consolidation):
+- May have more predictable patterns or overlap with variations learned from normal images
+- Cardiomegaly shows error concentrated around cardiac border
+
+### Visual Comparisons
+
+Each comparison shows the original image, MAE reconstruction, squared error heatmap, and anomaly overlay:
+
+| Pathology | Example |
+|-----------|---------|
+| Atelectasis | ![Atelectasis](docs/assets/reconstruction_comparisons/Atelectasis.png) |
+| Cardiomegaly | ![Cardiomegaly](docs/assets/reconstruction_comparisons/Cardiomegaly.png) |
+| Pneumothorax | ![Pneumothorax](docs/assets/reconstruction_comparisons/Pneumothorax.png) |
+| Support Devices | ![Support Devices](docs/assets/reconstruction_comparisons/Support_Devices.png) |
+
+See [docs/MAE_RECONSTRUCTION_ANALYSIS.md](docs/MAE_RECONSTRUCTION_ANALYSIS.md) for complete visual comparisons of all 13 pathology classes with detailed clinical descriptions.
 
 ---
 
