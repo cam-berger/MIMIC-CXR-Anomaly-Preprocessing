@@ -43,7 +43,7 @@ The output is ready-to-use datasets for training anomaly detection models.
 
 ## Results
 
-Production model trained on Lambda Cloud GH200 GPU (December 2024):
+Production model trained on Lambda Cloud GH200 GPU (December 2025):
 
 | Metric | Value |
 |--------|-------|
