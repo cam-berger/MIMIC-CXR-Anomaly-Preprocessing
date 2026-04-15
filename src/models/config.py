@@ -206,3 +206,50 @@ def get_large_config() -> TrainingConfig:
     config.mae.epochs = 1600
     config.mae.batch_size = 32
     return config
+
+
+# ---------------------------------------------------------------------------
+# Classifier configuration
+# ---------------------------------------------------------------------------
+
+@dataclass
+class ClassifierConfig:
+    """Configuration for multimodal classifier training."""
+
+    # Model
+    embed_dim: int = 768
+    # NOTE: struct_input_dim is overridden at runtime from
+    # len(MultimodalClassificationDataset.STRUCTURED_FEATURES) to stay in
+    # sync with any changes to the feature list.
+    struct_input_dim: int = 44
+    struct_hidden_dim: int = 256
+    contrastive_dim: int = 128
+    num_labels: int = 12
+    img_size: int = 224
+
+    # Training
+    epochs: int = 50
+    batch_size: int = 16
+    base_lr: float = 5e-5
+    min_lr: float = 1e-6
+    weight_decay: float = 0.05
+    warmup_epochs: int = 5
+    freeze_mae_epochs: int = 5
+    lr_decay: float = 0.9
+
+    # Loss weights
+    cls_weight: float = 1.0
+    clip_weight: float = 0.3
+    supcon_weight: float = 0.3
+
+    # Data
+    num_workers: int = 4
+    pin_memory: bool = True
+
+    # Logging/saving
+    log_interval: int = 50
+    eval_interval: int = 1
+    save_interval: int = 5
+
+    # Mixed precision
+    mixed_precision: bool = True

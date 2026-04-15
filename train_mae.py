@@ -85,13 +85,15 @@ def set_seed(seed: int) -> None:
     np.random.seed(seed)
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
 
 
 def get_lr_scheduler(
     optimizer: optim.Optimizer,
     config: MAEConfig,
     steps_per_epoch: int,
-) -> optim.lr_scheduler._LRScheduler:
+) -> optim.lr_scheduler.LRScheduler:
     """
     Create learning rate scheduler with warmup and cosine decay.
 
@@ -230,7 +232,7 @@ def train_epoch(
     model: MaskedAutoencoder,
     dataloader: DataLoader,
     optimizer: optim.Optimizer,
-    scheduler: optim.lr_scheduler._LRScheduler,
+    scheduler: optim.lr_scheduler.LRScheduler,
     scaler: Optional[GradScaler],
     config: MAEConfig,
     device: str,
@@ -260,11 +262,14 @@ def train_epoch(
             with autocast():
                 loss, pred, mask = model(images)
             scaler.scale(loss).backward()
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             scaler.step(optimizer)
             scaler.update()
         else:
             loss, pred, mask = model(images)
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
 
         scheduler.step()
@@ -324,7 +329,7 @@ def validate(
 def save_checkpoint(
     model: MaskedAutoencoder,
     optimizer: optim.Optimizer,
-    scheduler: optim.lr_scheduler._LRScheduler,
+    scheduler: optim.lr_scheduler.LRScheduler,
     scaler: Optional[GradScaler],
     epoch: int,
     config: TrainingConfig,
@@ -367,7 +372,7 @@ def load_checkpoint(
     checkpoint_path: Path,
     model: MaskedAutoencoder,
     optimizer: Optional[optim.Optimizer] = None,
-    scheduler: Optional[optim.lr_scheduler._LRScheduler] = None,
+    scheduler: Optional[optim.lr_scheduler.LRScheduler] = None,
     scaler: Optional[GradScaler] = None,
 ) -> int:
     """Load checkpoint and return starting epoch."""

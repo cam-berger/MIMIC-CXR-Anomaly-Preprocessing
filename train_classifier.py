@@ -56,6 +56,7 @@ from src.models.classification_dataset import (
     collate_multimodal,
 )
 from src.models.losses import MultiTaskLoss, AsymmetricFocalLoss, CLIPLoss, SupConLoss
+from src.models.config import ClassifierConfig
 
 logging.basicConfig(
     level=logging.INFO,
@@ -63,46 +64,6 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S",
 )
 logger = logging.getLogger(__name__)
-
-
-@dataclass
-class ClassifierConfig:
-    """Configuration for multimodal classifier training."""
-
-    # Model
-    embed_dim: int = 768
-    struct_input_dim: int = 44
-    struct_hidden_dim: int = 256
-    contrastive_dim: int = 128
-    num_labels: int = 12
-    img_size: int = 224
-
-    # Training
-    epochs: int = 50
-    batch_size: int = 16  # Reduced from 32 for stability
-    base_lr: float = 5e-5  # Reduced from 1e-4 to prevent gradient explosion
-    min_lr: float = 1e-6
-    weight_decay: float = 0.05
-    warmup_epochs: int = 5
-    freeze_mae_epochs: int = 5
-    lr_decay: float = 0.9  # Layer-wise LR decay factor
-
-    # Loss weights
-    cls_weight: float = 1.0
-    clip_weight: float = 0.3  # Re-enabled with FP32 numerical stability fixes
-    supcon_weight: float = 0.3  # Re-enabled with FP32 numerical stability fixes
-
-    # Data
-    num_workers: int = 4
-    pin_memory: bool = True
-
-    # Logging/saving
-    log_interval: int = 50
-    eval_interval: int = 1
-    save_interval: int = 5
-
-    # Mixed precision
-    mixed_precision: bool = True
 
 
 @dataclass
@@ -157,6 +118,8 @@ def set_seed(seed: int) -> None:
     np.random.seed(seed)
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
 
 
 def create_model(config: TrainingConfig) -> MultimodalClassifier:
@@ -288,7 +251,7 @@ def get_lr_scheduler(
     optimizer: optim.Optimizer,
     config: ClassifierConfig,
     steps_per_epoch: int,
-) -> optim.lr_scheduler._LRScheduler:
+) -> optim.lr_scheduler.LRScheduler:
     """Create learning rate scheduler with warmup and cosine decay."""
     warmup_steps = config.warmup_epochs * steps_per_epoch
     total_steps = config.epochs * steps_per_epoch
@@ -329,7 +292,7 @@ def train_epoch(
     model: MultimodalClassifier,
     dataloader: DataLoader,
     optimizer: optim.Optimizer,
-    scheduler: optim.lr_scheduler._LRScheduler,
+    scheduler: optim.lr_scheduler.LRScheduler,
     scaler: Optional[GradScaler],
     loss_fn: MultiTaskLoss,
     config: ClassifierConfig,
@@ -345,11 +308,20 @@ def train_epoch(
     nan_batches = 0
     nan_study_ids = []  # Track which studies cause NaN for debugging
     weight_reverts = 0
-    consecutive_corruptions = 0  # Track consecutive weight corruptions for circuit breaker
+    consecutive_corruptions = 0
     start_time = time.time()
 
     # Weight integrity fuse: save last-good params checkpoint
     last_good_params = _copy_params(model)
+
+    # GradScaler initial state for reset on weight corruption
+    _scaler_initial_state = {
+        'scale': 65536.0,
+        'growth_factor': 2.0,
+        'backoff_factor': 0.5,
+        'growth_interval': 2000,
+        '_growth_tracker': 0,
+    }
 
     progress = tqdm(dataloader, desc=f"Epoch {epoch}")
     for batch_idx, batch in enumerate(progress):
@@ -360,176 +332,102 @@ def train_epoch(
         structured = batch["structured"].to(device)
         labels = batch["labels"].to(device)
         label_mask = batch["label_mask"].to(device)
-        study_ids = batch["study_id"].tolist()  # For NaN debugging
+        study_ids = batch["study_id"].tolist()
 
         # Replace NaN/Inf in structured features with 0
         structured = torch.nan_to_num(structured, nan=0.0, posinf=0.0, neginf=0.0)
 
-        # Clear gradients (set_to_none=True is faster and cleaner)
         optimizer.zero_grad(set_to_none=True)
 
-        # Forward pass
+        # ── Forward pass ────────────────────────────────────────────────────
         if scaler is not None:
             with autocast():
                 logits, clip_emb, supcon_emb, _, _, text_emb = model(
                     images, text_tokens, structured, attention_mask,
                     return_embeddings=True,
                 )
-                losses = loss_fn(
-                    logits, clip_emb, supcon_emb,
-                    labels, label_mask, text_emb,
-                )
-
-            # ===== HARD GATE: Never backward/step on invalid batch =====
-            total_loss = losses["total"]
-            is_finite = torch.isfinite(total_loss)
-            is_valid = losses.get("valid", True)
-
-            if (not is_finite) or (not is_valid):
-                nan_batches += 1
-                nan_study_ids.extend(study_ids)
-                logger.warning(
-                    f"NaN/Inf loss at batch {batch_idx}, skipping | "
-                    f"study_ids: {study_ids[:4]}... | finite={is_finite}, valid={is_valid}"
-                )
-                optimizer.zero_grad(set_to_none=True)
-                continue
-
-            # Backward pass (only for valid batches)
-            scaler.scale(total_loss).backward()
-
-            # Gradient clipping before optimizer step
-            scaler.unscale_(optimizer)
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-
-            # Optimizer step
-            scaler.step(optimizer)
-            scaler.update()
-
-            # CRITICAL: Clamp CLIP logit_scale to prevent parameter overflow
-            # The raw logit_scale parameter can grow unboundedly during AdamW updates,
-            # causing exp(logit_scale) to overflow to Inf and corrupt model weights
-            loss_fn.clamp_logit_scale()
-
-            # ===== WEIGHT INTEGRITY FUSE: Check params after step =====
-            if not _params_finite(model):
-                weight_reverts += 1
-                consecutive_corruptions += 1
-                logger.error(
-                    f"[WEIGHT CORRUPTION] Non-finite params after batch {batch_idx}! "
-                    f"Reverting to last-good checkpoint. study_ids: {study_ids[:4]}..."
-                )
-
-                # Restore model weights
-                _restore_params(model, last_good_params)
-
-                # FIX #1: Reset GradScaler state to break cascade failures
-                # CRITICAL: Do NOT create new GradScaler() - that loses state synchronization!
-                # Instead, reset using load_state_dict() to restore initial state
-                # See: tests/baseline_metrics.md for cascade failure analysis
-                initial_state = {
-                    'scale': 65536.0,  # Default initial scale (2^16)
-                    'growth_factor': 2.0,
-                    'backoff_factor': 0.5,
-                    'growth_interval': 2000,
-                    '_growth_tracker': 0,
-                }
-                scaler.load_state_dict(initial_state)
-
-                # Reset optimizer state completely - Adam will reinitialize on next step
-                optimizer.zero_grad(set_to_none=True)
-                for group in optimizer.param_groups:
-                    for p in group['params']:
-                        if p in optimizer.state:
-                            del optimizer.state[p]  # Clear entire state, Adam will reinit
-
-                # Circuit breaker: stop epoch if too many consecutive corruptions
-                if consecutive_corruptions >= 10:
-                    logger.error(f"[CIRCUIT BREAKER] {consecutive_corruptions} consecutive corruptions! Breaking epoch.")
-                    break
-
-                continue
-            else:
-                consecutive_corruptions = 0  # Reset counter on successful batch
-
-            # Update last-good checkpoint
-            last_good_params = _copy_params(model)
-
+                losses = loss_fn(logits, clip_emb, supcon_emb, labels, label_mask, text_emb)
         else:
-            # Non-mixed-precision path
             logits, clip_emb, supcon_emb, _, _, text_emb = model(
                 images, text_tokens, structured, attention_mask,
                 return_embeddings=True,
             )
-            losses = loss_fn(
-                logits, clip_emb, supcon_emb,
-                labels, label_mask, text_emb,
+            losses = loss_fn(logits, clip_emb, supcon_emb, labels, label_mask, text_emb)
+
+        # ── Hard gate: never backward/step on an invalid batch ───────────
+        total_loss = losses["total"]
+        if not torch.isfinite(total_loss) or not losses.get("valid", True):
+            nan_batches += 1
+            nan_study_ids.extend(study_ids)
+            logger.warning(
+                f"NaN/Inf loss at batch {batch_idx}, skipping | "
+                f"study_ids: {study_ids[:4]}... | "
+                f"finite={torch.isfinite(total_loss)}, valid={losses.get('valid', True)}"
             )
+            optimizer.zero_grad(set_to_none=True)
+            continue
 
-            # ===== HARD GATE: Never backward/step on invalid batch =====
-            total_loss = losses["total"]
-            is_finite = torch.isfinite(total_loss)
-            is_valid = losses.get("valid", True)
-
-            if (not is_finite) or (not is_valid):
-                nan_batches += 1
-                nan_study_ids.extend(study_ids)
-                logger.warning(
-                    f"NaN/Inf loss at batch {batch_idx}, skipping | "
-                    f"study_ids: {study_ids[:4]}... | finite={is_finite}, valid={is_valid}"
-                )
-                optimizer.zero_grad(set_to_none=True)
-                continue
-
-            # Backward pass (only for valid batches)
-            total_loss.backward()
-
-            # Gradient clipping
+        # ── Backward pass + optimizer step ──────────────────────────────
+        if scaler is not None:
+            scaler.scale(total_loss).backward()
+            scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-
-            # Optimizer step
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            total_loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
 
-            # ===== WEIGHT INTEGRITY FUSE: Check params after step =====
-            if not _params_finite(model):
-                weight_reverts += 1
-                consecutive_corruptions += 1
+        # CRITICAL: Clamp CLIP logit_scale to prevent parameter overflow.
+        # exp(logit_scale) overflows to Inf if logit_scale grows unboundedly.
+        loss_fn.clamp_logit_scale()
+
+        # ── Weight integrity fuse ────────────────────────────────────────
+        if not _params_finite(model):
+            weight_reverts += 1
+            consecutive_corruptions += 1
+            logger.error(
+                f"[WEIGHT CORRUPTION] Non-finite params after batch {batch_idx}! "
+                f"Reverting to last-good checkpoint. study_ids: {study_ids[:4]}..."
+            )
+            _restore_params(model, last_good_params)
+
+            # FIX #1: Reset GradScaler via load_state_dict (not new GradScaler())
+            # Creating a new object loses optimizer state synchronization and
+            # causes cascade failures. See tests/baseline_metrics.md.
+            if scaler is not None:
+                scaler.load_state_dict(_scaler_initial_state)
+
+            optimizer.zero_grad(set_to_none=True)
+            for group in optimizer.param_groups:
+                for p in group['params']:
+                    if p in optimizer.state:
+                        del optimizer.state[p]
+
+            if consecutive_corruptions >= 10:
                 logger.error(
-                    f"[WEIGHT CORRUPTION] Non-finite params after batch {batch_idx}! "
-                    f"Reverting to last-good checkpoint. study_ids: {study_ids[:4]}..."
+                    f"[CIRCUIT BREAKER] {consecutive_corruptions} consecutive corruptions! "
+                    f"Breaking epoch."
                 )
+                break
+            continue
+        else:
+            consecutive_corruptions = 0
 
-                # Restore model weights
-                _restore_params(model, last_good_params)
-
-                # Reset optimizer state completely - Adam will reinitialize on next step
-                optimizer.zero_grad(set_to_none=True)
-                for group in optimizer.param_groups:
-                    for p in group['params']:
-                        if p in optimizer.state:
-                            del optimizer.state[p]  # Clear entire state, Adam will reinit
-
-                # Circuit breaker: stop epoch if too many consecutive corruptions
-                if consecutive_corruptions >= 10:
-                    logger.error(f"[CIRCUIT BREAKER] {consecutive_corruptions} consecutive corruptions! Breaking epoch.")
-                    break
-
-                continue
-            else:
-                consecutive_corruptions = 0  # Reset counter on successful batch
-
-            # Update last-good checkpoint
+        # Update last-good checkpoint every 10 batches (CPU copy is ~344 MB
+        # for ViT-Base; doing it every batch adds measurable overhead)
+        if num_batches % 10 == 0:
             last_good_params = _copy_params(model)
 
         scheduler.step()
 
-        # Track metrics (skip 'valid' flag which is not a tensor)
+        # ── Metrics ─────────────────────────────────────────────────────
         for k, v in losses.items():
             if k != "valid":
                 total_losses[k] += v.item()
         num_batches += 1
 
-        # Update progress bar
         if batch_idx % config.log_interval == 0:
             current_lr = scheduler.get_last_lr()[0]
             progress.set_postfix({
@@ -548,8 +446,7 @@ def train_epoch(
 
     if nan_batches > 0:
         logger.warning(f"Epoch {epoch}: {nan_batches} batches skipped due to NaN/Inf loss")
-        # Log unique study_ids that caused NaN (for debugging which samples are bad)
-        unique_nan_studies = list(set(nan_study_ids))[:20]  # First 20 unique
+        unique_nan_studies = list(set(nan_study_ids))[:20]
         logger.warning(f"Epoch {epoch}: NaN study_ids sample: {unique_nan_studies}")
 
     if weight_reverts > 0:
@@ -608,13 +505,11 @@ def validate(
             all_labels.append(labels.cpu())
             all_masks.append(label_mask.cpu())
 
-            # Explicitly delete GPU tensors to free memory
+            # Explicitly delete GPU tensors to free memory. empty_cache() is
+            # intentionally NOT called in-loop: it only releases the allocator
+            # cache back to the OS (not live tensors) and adds overhead.
             del images, text_tokens, attention_mask, structured, labels, label_mask
             del logits, clip_emb, supcon_emb, text_emb, losses
-
-            # Clear cache periodically (every 50 batches)
-            if device == "cuda" and num_batches % 50 == 0:
-                torch.cuda.empty_cache()
 
     # Average losses
     avg_losses = {k: v / num_batches for k, v in total_losses.items()}
@@ -666,7 +561,7 @@ def validate(
 def save_checkpoint(
     model: MultimodalClassifier,
     optimizer: optim.Optimizer,
-    scheduler: optim.lr_scheduler._LRScheduler,
+    scheduler: optim.lr_scheduler.LRScheduler,
     scaler: Optional[GradScaler],
     epoch: int,
     config: TrainingConfig,
@@ -709,7 +604,7 @@ def load_checkpoint(
     checkpoint_path: Path,
     model: MultimodalClassifier,
     optimizer: Optional[optim.Optimizer] = None,
-    scheduler: Optional[optim.lr_scheduler._LRScheduler] = None,
+    scheduler: Optional[optim.lr_scheduler.LRScheduler] = None,
     scaler: Optional[GradScaler] = None,
 ) -> int:
     """Load checkpoint and return starting epoch."""
@@ -730,16 +625,29 @@ def load_checkpoint(
     return checkpoint["epoch"]
 
 
-def train(config: TrainingConfig) -> MultimodalClassifier:
-    """Main training loop."""
+def train(
+    config: TrainingConfig,
+    resume_path: Optional[Path] = None,
+) -> MultimodalClassifier:
+    """Main training loop.
+
+    Args:
+        config: Training configuration.
+        resume_path: Optional checkpoint path to resume training from.
+    """
     set_seed(config.seed)
     device = config.device
 
+    # Create dataloaders first so we can read the true structured feature
+    # dimension from the dataset (avoids shape mismatches if STRUCTURED_FEATURES
+    # changes).
+    train_loader, val_loader = create_dataloaders(config)
+    config.classifier.struct_input_dim = len(
+        MultimodalClassificationDataset.STRUCTURED_FEATURES
+    )
+
     # Create model
     model = create_model(config)
-
-    # Create dataloaders
-    train_loader, val_loader = create_dataloaders(config)
 
     # Create optimizer with layer-wise LR decay
     optimizer = create_optimizer_with_llrd(model, config.classifier)
@@ -765,6 +673,11 @@ def train(config: TrainingConfig) -> MultimodalClassifier:
     }
     best_auroc = 0.0
     start_epoch = 0
+
+    # Resume from checkpoint if provided
+    if resume_path is not None:
+        start_epoch = load_checkpoint(resume_path, model, optimizer, scheduler, scaler)
+        logger.info(f"Resuming classifier training from epoch {start_epoch}")
 
     # Log training info
     logger.info("=" * 60)
@@ -978,7 +891,7 @@ def main():
     logger.info(f"Saved configuration to {config_path}")
 
     # Train
-    model = train(config)
+    model = train(config, resume_path=args.resume)
     logger.info("Training complete!")
 
 
