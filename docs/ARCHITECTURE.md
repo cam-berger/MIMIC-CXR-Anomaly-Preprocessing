@@ -991,21 +991,21 @@ If we feed radiology report text to predict CheXpert labels, the model can trivi
 
 ### The Solution: Leak-Free Mode
 
-The preprocessing pipeline supports `--leak-free` mode which uses **only pre-imaging clinical context**:
+The preprocessing pipeline supports `--leak-free` mode which uses **only information available when the X-ray is taken**:
 
 **Included (Safe):**
 - Demographics (age, gender)
 - Chief complaint
 - Triage vitals (HR, BP, SpO2, RR, Temp)
 - Triage acuity
-- Labs (WBC, Hgb, Cr, etc.)
-- ED diagnoses (ICD codes from clinical exam)
-- Disposition
+- Labs (WBC, Hgb, Cr, etc.) drawn up to the study time (`labs_time_window_after_hours = 0`)
 
 **Excluded (Leaked):**
 - Radiology report text
 - Report impressions/findings
 - Any text derived from radiologist interpretation
+- ED and hospital discharge diagnoses (ICD codes), procedures, disposition: recorded after the study, and codes such as 486/J18 (pneumonia), J90 (pleural effusion) or I50 (heart failure) encode the labels. Before September 2026 these were included; `text.parquet` from earlier runs must be regenerated.
+- Labs drawn after the study (they can be ordered because of the X-ray's findings)
 
 ### Example Comparison
 
@@ -1015,9 +1015,11 @@ Patient: 69 year old female
 Chief complaint: Dyspnea
 Vitals: Temp 98.7°F, HR 108bpm, RR 26/min, SpO2 99%, SBP 115mmHg, DBP 48mmHg
 Triage acuity: 1 (Resuscitation)
-ED diagnoses: 49121, 486
-Disposition: ADMITTED
 ```
+
+The earlier version of this example also contained `ED diagnoses: 49121, 486`.
+ICD-9 486 is "Pneumonia, organism unspecified", the same finding as the report
+below.
 
 **Radiology Report** (LEAKED - DO NOT USE):
 ```
@@ -1045,9 +1047,9 @@ python preprocess.py \
 The `--leak-free` flag triggers:
 
 1. **Skip report loading** - Radiology reports are not merged into the dataset
-2. **Clinical context only** - Text features come from `format_clinical_context()`:
-   - Demographics, vitals, labs, ICD codes
-   - NO radiology findings
+2. **Clinical context only** - Text features come from `format_clinical_context(row, include_outcomes=False)`:
+   - Demographics, chief complaint, triage vitals/acuity, labs
+   - NO radiology findings, discharge diagnoses, procedures or disposition
 3. **Claude summarization** - Uses `CLINICAL_CONTEXT_PROMPT` which explicitly instructs:
    - Summarize clinical presentation only
    - Do NOT speculate about imaging findings
@@ -1114,65 +1116,67 @@ The classification system combines multiple data modalities for supervised patho
 
 #### TextEncoder (`src/models/multimodal.py`)
 
-Encodes clinical text using pretrained ClinicalBERT:
+Encodes clinical text with Bio_ClinicalBERT, the same model whose tokenizer
+produced `text.parquet` token ids (`PreprocessingConfig.tokenizer_model`). Ids
+from a different vocabulary map to unrelated wordpieces without any error, so
+`train_classifier.py` checks the stored ids against the encoder's [CLS] id and
+vocabulary size before training.
 
 ```python
 class TextEncoder(nn.Module):
-    """Encodes tokenized clinical text using ClinicalBERT."""
-
-    def __init__(self, hidden_size: int = 768, freeze: bool = True):
-        # Uses microsoft/BiomedNLP-PubMedBERT-base-uncased-abstract-fulltext
+    def __init__(self, model_name="emilyalsentzer/Bio_ClinicalBERT", freeze=True, output_dim=None):
         self.bert = AutoModel.from_pretrained(model_name)
-        if freeze:
-            for param in self.bert.parameters():
-                param.requires_grad = False
+        # frozen: requires_grad=False and kept in eval mode (no dropout)
+
+    def encode_tokens(self, input_ids, attention_mask=None):
+        return self.bert(input_ids, attention_mask=attention_mask).last_hidden_state  # [B, L, 768]
 
     def forward(self, input_ids, attention_mask=None):
-        outputs = self.bert(input_ids, attention_mask=attention_mask)
-        # Mean pooling over non-padded tokens
-        return mean_pooled_embedding  # [B, 768]
+        return self.encode_tokens(input_ids, attention_mask)[:, 0]  # [CLS] -> [B, 768]
 ```
 
 #### StructuredEncoder (`src/models/multimodal.py`)
 
-Encodes vitals, labs, and demographics:
+Normalizes and encodes vitals, labs, and demographics. The dataset returns raw
+values with NaN for missing; the encoder log-transforms heavy-tailed labs
+(`LOG_TRANSFORM_FEATURES`), standardizes with training-set statistics fitted by
+`fit_normalization` (stored as buffers, so they are saved in checkpoints),
+clips to ±5, sets missing values to 0 and appends a missingness indicator per
+feature. Raw values such as NT-proBNP (up to 70,000) would otherwise overflow
+fp16 (max 65,504) under mixed precision.
 
 ```python
 class StructuredEncoder(nn.Module):
-    """Encodes structured clinical data (vitals, labs, demographics)."""
+    def normalize(self, x):                      # [B, F] raw, NaN = missing
+        observed = torch.isfinite(x)
+        z = ((log_transform(x) - self.feature_mean) / self.feature_std).clamp(-5, 5)
+        z = torch.where(observed, z, 0)
+        return torch.cat([z, (~observed).float()], dim=-1)   # [B, 2F]
 
-    def __init__(self, input_size: int, hidden_size: int = 256):
-        self.encoder = nn.Sequential(
-            nn.Linear(input_size, hidden_size * 2),
-            nn.LayerNorm(hidden_size * 2),
-            nn.GELU(),
-            nn.Dropout(0.1),
-            nn.Linear(hidden_size * 2, hidden_size),
-            nn.LayerNorm(hidden_size),
-            nn.GELU(),
-        )
+    def forward(self, x):
+        return self.encoder(self.normalize(x))   # MLP -> [B, 256]
 ```
 
 #### CrossAttentionFusion (`src/models/multimodal.py`)
 
-Fuses image and text embeddings via cross-attention:
+Fuses image and text at the token level. Attention over a single pooled
+vector is degenerate (the softmax weight is always 1, so query/key projections
+never train), so each modality's [CLS] token attends over the other modality's
+tokens:
 
 ```python
 class CrossAttentionFusion(nn.Module):
-    """Cross-attention fusion between image and text embeddings."""
-
-    def __init__(self, embed_dim: int = 768, num_heads: int = 8):
-        # Image attends to text
-        self.cross_attn = nn.MultiheadAttention(embed_dim, num_heads, batch_first=True)
-        self.norm1 = nn.LayerNorm(embed_dim)
-        self.ffn = nn.Sequential(...)
-        self.norm2 = nn.LayerNorm(embed_dim)
-
-    def forward(self, img_emb, text_emb):
-        # img_emb queries, text_emb provides keys/values
-        attn_out, _ = self.cross_attn(img_emb, text_emb, text_emb)
-        return self.norm2(self.ffn(self.norm1(img_emb + attn_out)))
+    def forward(self, img_tokens, text_tokens, text_attention_mask=None):
+        # img_tokens [B, 1+N, D] (MAE encode_tokens), text_tokens [B, L, D]
+        img_att = norm(mha_i2t(img_tokens[:, :1], text_tokens, text_tokens,
+                               key_padding_mask=padding) + img_tokens[:, :1])
+        text_att = norm(mha_t2i(text_tokens[:, :1], img_tokens[:, 1:], img_tokens[:, 1:])
+                        + text_tokens[:, :1])
+        return fusion_mlp(cat([img_att, text_att]))  # [B, D]
 ```
+
+No NaN/Inf masking happens inside the model: a non-finite embedding reaches the
+loss, and the training loop skips the batch before backward.
 
 ### Loss Functions (`src/models/losses.py`)
 
@@ -1308,26 +1312,22 @@ python train_classifier.py --config base \
 
 ### Optimizer: Layer-wise Learning Rate Decay (LLRD)
 
-Different learning rates for different network depths:
+`MultimodalClassifier.get_layer_groups()` + `create_optimizer_with_llrd()`
+(MAE/BEiT fine-tuning recipe, `lr_decay=0.9`, 12 blocks):
 
-```python
-def create_optimizer(model, base_lr, llrd_factor=0.9):
-    """
-    MAE encoder layers get progressively lower LR
-    - Layer 0: base_lr * 0.9^11
-    - Layer 11: base_lr * 0.9^0 = base_lr
-    - New heads: base_lr (highest)
-    """
-    param_groups = []
+| Group | LR |
+|-------|----|
+| Patch embedding + CLS token | `base_lr * 0.9^13` |
+| Encoder block *i* | `base_lr * 0.9^(12 - i)` (block 0: 0.28x, block 11: 0.9x) |
+| Encoder final norm | `base_lr` |
+| Heads, fusion, structured encoder, `text_clip_proj` | `base_lr` |
+| CLIP logit scale (from `MultiTaskLoss`) | `base_lr`, no weight decay |
 
-    # MAE encoder with LLRD
-    for i, layer in enumerate(model.image_encoder.encoder.blocks):
-        lr = base_lr * (llrd_factor ** (num_layers - i - 1))
-        param_groups.append({"params": layer.parameters(), "lr": lr})
-
-    # New modules at base LR
-    param_groups.append({"params": model.classifier.parameters(), "lr": base_lr})
-```
+Every trainable parameter outside the pretrained encoders lands in the head
+group, and `check_trainable_params_in_optimizer` fails fast if any trainable
+parameter is missing from the optimizer. The MAE encoder groups hold LR 0 while
+frozen (`freeze_mae_epochs`) and warm up linearly over `unfreeze_warmup_epochs`
+after unfreezing, because they start with empty Adam state.
 
 ---
 
@@ -1494,13 +1494,19 @@ Trained on complete anomalous dataset using Lambda Cloud GH200 GPU:
 
 ### Stability Validation
 
-The production training validated all NaN/Inf stability fixes:
-- **50/50 epochs completed** (zero cascade failures)
-- **<0.5% NaN batch rate** (properly handled by skip logic)
-- **Zero weight corruptions** (GradScaler reset fix working)
-- **Circuit breaker never triggered** (vs 28 triggers before fixes)
+The production training completed all 50 epochs without cascade failures
+(<0.5% skipped batches, no weight corruptions, no circuit-breaker triggers),
+with the MAE encoder frozen. The September 2026 review traced the earlier
+cascade (onset in epoch 2, recurring at the start of every later epoch) to
+parameters missing from the optimizer, whose gradients were never cleared.
+The December 2024 safeguards were replaced with a fix at the source; see
+[CHANGELOG](CHANGELOG.md) and `src/training/loop.py`.
 
-See [NaN Stability Fixes](NAN_STABILITY_FIXES.md) for implementation details.
+**Caveat on these results**: they predate fixes to the text tokenizer, the
+cross-attention fusion, structured-feature normalization and the image crop.
+Per-class AUROCs for classes with >95% positive rates rest on very few
+negatives (e.g. 2 for Pleural_Effusion). See
+[NEXT_ITERATION_PLAN.md](NEXT_ITERATION_PLAN.md).
 
 ---
 
@@ -1508,5 +1514,6 @@ See [NaN Stability Fixes](NAN_STABILITY_FIXES.md) for implementation details.
 
 - [Data Schema Documentation](DATA_SCHEMA.md) - Complete preprocessed output schema
 - [Lambda Deployment Guide](LAMBDA_DEPLOYMENT.md) - GPU deployment instructions
-- [NaN Stability Fixes](NAN_STABILITY_FIXES.md) - Training stability improvements
+- [Changelog](CHANGELOG.md) - Training stability fixes and other changes
+- [Next Iteration Plan](NEXT_ITERATION_PLAN.md) - Review findings and next experiments
 - [Main README](../README.md) - Quick start and usage examples

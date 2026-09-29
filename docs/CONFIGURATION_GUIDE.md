@@ -69,81 +69,50 @@ ANTHROPIC_API_KEY=sk-ant-api03-...
 
 ### Available Presets
 
-Three training configurations are available in `src/models/config.py`:
+Classifier presets live in `src/models/config.py` (`get_classifier_config`); unset fields use `ClassifierConfig` defaults:
 
-| Config | Purpose | Epochs | Batch | LR | Image Size |
-|--------|---------|--------|-------|-----|------------|
-| `debug` | Quick testing | 2 | 2 | 1e-4 | 224 |
-| `fast` | Development | 10 | 8 | 5e-5 | 384 |
-| `base` | Production | 30 | 16 | 3e-5 | 512 |
+| Config | Purpose | Epochs | Batch | LR | Warmup | MAE frozen for | Image Size |
+|--------|---------|--------|-------|-----|--------|----------------|------------|
+| `debug` | Quick testing | 2 | 4 | 5e-5 | 1 | 100 epochs (always) | 224 |
+| `fast` | Development | 10 | 16 | 5e-5 | 2 | 2 epochs | 224 |
+| `base` | Production | 50 | 16 | 5e-5 | 5 | 5 epochs | 224 |
+
+The image size defaults to 224 in every preset; pass `--img-size` (e.g. 1024, as in the December 2024 production run) explicitly.
 
 ### Using Configurations
 
 ```bash
 # Debug: Quick validation (2 epochs)
-python train_classifier.py --config debug
+python train_classifier.py --config debug --train-dir ... --chexpert-csv ...
 
-# Fast: Development testing (10 epochs)
-python train_classifier.py --config fast
+# Base: Production training at 1024px with a pretrained MAE
+python train_classifier.py --config base --img-size 1024 \
+    --train-dir output/preprocessed/anomalous_train \
+    --val-dir output/preprocessed/anomalous_val \
+    --chexpert-csv /path/to/mimic-cxr-2.0.0-chexpert.csv.gz \
+    --mae-checkpoint output/models/mae_final.pt
 
-# Base: Production training (30 epochs)
-python train_classifier.py --config base
+# Resume: configuration and data paths come from the checkpoint
+python train_classifier.py --resume output/checkpoints/classifier_latest.pt
 ```
 
-### Configuration Details
+On resume, flags that would change the run (epochs, batch size, LR, image
+size/mode, loss weights, freeze schedule, text model) are rejected; hardware
+flags (`--device`, `--num-workers`) can change.
 
-#### Debug Config
-```python
-{
-    "epochs": 2,
-    "batch_size": 2,
-    "learning_rate": 1e-4,
-    "img_size": 224,
-    "freeze_mae": True,      # Always frozen for speed
-    "warmup_epochs": 0,
-    "weight_decay": 0.01,
-}
-```
+### Key ClassifierConfig Fields
 
-#### Fast Config
-```python
-{
-    "epochs": 10,
-    "batch_size": 8,
-    "learning_rate": 5e-5,
-    "img_size": 384,
-    "freeze_mae": True,
-    "warmup_epochs": 1,
-    "weight_decay": 0.01,
-}
-```
-
-#### Base Config
-```python
-{
-    "epochs": 30,
-    "batch_size": 16,
-    "learning_rate": 3e-5,
-    "img_size": 512,
-    "freeze_mae": True,       # Frozen first 5 epochs
-    "unfreeze_epoch": 5,      # Then gradually unfreezes
-    "warmup_epochs": 2,
-    "weight_decay": 0.05,
-}
-```
-
-### Custom Configuration
-
-Override any parameter via command line:
-
-```bash
-python train_classifier.py \
-    --config base \
-    --epochs 50 \
-    --batch-size 8 \
-    --learning-rate 1e-5 \
-    --img-size 1024
-```
+| Field | Default | Description |
+|-------|---------|-------------|
+| `img_size` | 224 | Input resolution |
+| `image_mode` | `resize` | `resize` (whole radiograph) or `center_crop` (legacy crop from native resolution; ~13% of the image at 1024) |
+| `text_model_name` | `emilyalsentzer/Bio_ClinicalBERT` | Must match the preprocessing tokenizer (`PreprocessingConfig.tokenizer_model`); checked at startup |
+| `freeze_mae_epochs` | 5 | Epochs before the MAE encoder unfreezes |
+| `unfreeze_warmup_epochs` | 1 | LR warmup for the encoder after it unfreezes |
+| `lr_decay` | 0.9 | Per-block layer-wise LR decay (block *i* of 12 gets `0.9^(12-i)`) |
+| `grad_clip` | 1.0 | Gradient clipping (over the optimizer's parameters) |
+| `max_consecutive_skips` | 50 | Fail after this many skipped (non-finite) batches in a row |
+| `cls_weight` / `clip_weight` / `supcon_weight` | 1.0 / 0.3 / 0.3 | Loss weights (0 disables a term) |
 
 ---
 
@@ -201,29 +170,36 @@ python preprocess.py \
 
 ### MAE Pretraining (`train_mae.py`)
 
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `--img-size` | 1024 | Input image resolution |
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--config` | `base` | Preset (debug: ViT-S, bs 8; fast: ViT-S, bs 32; base: ViT-B, bs 64, 800 epochs) |
+| `--img-size` | 224 | Input resolution (production used 1024) |
+| `--image-mode` | `resize` | `resize` or `center_crop` (legacy) |
 | `--patch-size` | 16 | ViT patch size |
-| `--mask-ratio` | 0.75 | Percentage of patches to mask |
-| `--epochs` | 800 | Total training epochs |
-| `--batch-size` | 4 | Samples per batch |
-| `--learning-rate` | 1.5e-4 | Base learning rate |
-| `--weight-decay` | 0.05 | AdamW weight decay |
-| `--warmup-epochs` | 40 | Linear warmup epochs |
+| `--mask-ratio` | 0.75 | Fraction of patches masked |
+| `--epochs` | preset | Total training epochs |
+| `--batch-size` | preset | Samples per batch |
+| `--lr` | 1.5e-4 | AdamW learning rate (not scaled by batch size) |
+| `--num-workers` | 8 | Data loader workers (0 = main process) |
+| `--resume` | - | Checkpoint to resume (config and paths come from it) |
+
+Weight decay (0.05), warmup (40 epochs), gradient clipping (`grad_clip=1.0`) and the augmentations (`crop_scale`, `horizontal_flip`, `rotation_degrees`, `gaussian_blur`) are `MAEConfig` fields.
 
 ### Classifier Training (`train_classifier.py`)
 
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `--config` | `base` | Preset configuration (debug/fast/base) |
-| `--epochs` | 30 | Total training epochs |
-| `--batch-size` | 16 | Samples per batch |
-| `--learning-rate` | 3e-5 | Base learning rate |
-| `--img-size` | 512 | Input image resolution |
-| `--freeze-mae` | True | Freeze MAE encoder initially |
-| `--unfreeze-epoch` | 5 | Epoch to start unfreezing |
-| `--llrd-factor` | 0.9 | Layer-wise LR decay factor |
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--config` | `base` | Preset (debug/fast/base) |
+| `--epochs` | preset | Total training epochs |
+| `--batch-size` | preset | Samples per batch |
+| `--lr` | 5e-5 | Base learning rate (head; encoder blocks get layer-wise decay) |
+| `--img-size` | 224 | Input resolution |
+| `--image-mode` | `resize` | `resize` or `center_crop` (legacy) |
+| `--text-model` | Bio_ClinicalBERT | Text encoder; must match the preprocessing tokenizer |
+| `--freeze-mae-epochs` | preset | Epochs before the MAE encoder unfreezes (100 = always frozen) |
+| `--cls-weight` / `--clip-weight` / `--supcon-weight` | 1.0 / 0.3 / 0.3 | Loss weights |
+| `--mae-checkpoint` | - | Pretrained MAE weights (missing encoder weights raise an error) |
+| `--resume` | - | Checkpoint to resume (config and paths come from it) |
 
 ### Loss Function Weights
 

@@ -145,7 +145,6 @@ For each lab: `lab_{test}_mean`, `lab_{test}_min`, `lab_{test}_max`, `lab_{test}
 | `magnesium` | Serum magnesium |
 | `platelets` | Platelet count |
 | `potassium` | Serum potassium |
-| `procalcitonin` | Procalcitonin |
 | `sodium` | Serum sodium |
 | `troponin` | Troponin (cardiac marker) |
 | `wbc` | White blood cell count |

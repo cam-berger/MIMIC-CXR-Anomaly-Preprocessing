@@ -6,7 +6,7 @@ This document provides guidance for AI assistants working with the MIMIC-CXR Ano
 
 This is a **medical imaging pipeline** for chest X-ray anomaly detection using multimodal deep learning. The pipeline processes MIMIC datasets (images, labs, vitals, reports) and trains models to detect pathologies in chest X-rays.
 
-**Production Results (December 2024)**: Achieved **Macro AUROC 0.701, AUPRC 0.899** on 12 CheXpert pathology classes after 50 epochs of training on Lambda GH200 GPU (~$54 cost).
+**Production Results (December 2024)**: Achieved **Macro AUROC 0.701, AUPRC 0.899** on 12 CheXpert pathology classes after 50 epochs of training on Lambda GH200 GPU (~$54 cost). These results predate the September 2026 fixes (text tokenizer mismatch, degenerate cross-attention, unnormalized labs, 1024px center crop, frozen MAE); treat them as a baseline to beat, not as the model's capability. See `docs/NEXT_ITERATION_PLAN.md`.
 
 **Key Goal**: Train multimodal classifiers combining imaging, clinical text, and structured data for robust pathology detection.
 
@@ -85,7 +85,9 @@ MIMIC-CXR-Anomaly-Preprocessing/
 │   │   ├── classification_dataset.py  # Dataset with CheXpert labels
 │   │   ├── losses.py             # Loss functions (CLIP, SupCon, Focal)
 │   │   ├── anomaly.py            # Anomaly detection (reconstruction, embedding, ensemble)
-│   │   └── config.py             # Training configurations (debug, fast, base)
+│   │   └── config.py             # Training configurations (MAE + classifier presets)
+│   ├── training/
+│   │   └── loop.py               # Shared training helpers (robust step, LR schedule, checkpoints)
 │   └── utils/
 │       └── io.py                 # Logging utilities
 ├── docs/                         # Documentation
@@ -139,9 +141,10 @@ Understanding these IDs is critical for working with MIMIC data:
 
 **Stage 4: Classification Training** (`train_classifier.py`)
 - Supervised training on anomalous X-rays with CheXpert labels
-- Multimodal: Image (MAE encoder) + Text (ClinicalBERT) + Structured
+- Multimodal: Image (MAE encoder) + Text (Bio_ClinicalBERT, same model as the preprocessing tokenizer) + Structured
 - Loss: Asymmetric Focal + CLIP + Supervised Contrastive
-- Outputs: `output/models/classifier.pt`
+- Outputs: `output/models/classifier_best.pt`, `classifier_final.pt`; checkpoints in `output/checkpoints/`
+- Resume: `python train_classifier.py --resume output/checkpoints/classifier_latest.pt` (config and data paths come from the checkpoint)
 
 ### Data Flow
 
@@ -208,11 +211,11 @@ data = PreprocessingPipeline.load_preprocessed(Path("output/preprocessed/normal_
 ### 1. Full Resolution Images
 Images are stored at native resolution (~3000x2500 pixels) in HDF5. This preserves fine-grained details needed for anomaly detection. Memory-intensive but critical for medical accuracy.
 
-### 2. NOT_DONE Token for Missing Values
-Missing labs/vitals use `"NOT_DONE"` token instead of imputation. Medical missingness is informative (test not ordered = clinical judgment). Models should learn this.
+### 2. Missing Values Are Informative
+Missing labs/vitals are not imputed as fake values. Clinical-context text uses a `"NOT_DONE"` token; the classifier receives NaN, and `StructuredEncoder` standardizes observed values (log-transforming heavy-tailed labs, with statistics fitted on the training set and saved in the checkpoint) and appends a missingness indicator per feature. Medical missingness is informative (test not ordered = clinical judgment).
 
-### 3. Center Crop for MAE Training
-Training uses center crop from full-resolution images. Chest X-rays are radiologist-centered, so center crops consistently capture lung fields.
+### 3. Full-View Resize (`image_mode="resize"`)
+Training and inference resize the whole radiograph to `img_size` (`build_image_transform` in `src/models/dataset.py`, shared by all datasets and `detect_anomalies.py`). The earlier `center_crop` mode, which crops `img_size` pixels from the native ~3056x2544 image, kept ~13% of the image at 1024px (0.65% at 224px) and cut off costophrenic angles, apices and lateral lung fields. It remains available via `--image-mode center_crop` only to reproduce old models; checkpoints saved before `image_mode` existed load as `center_crop`.
 
 ### 4. Claude Summarization (Optional)
 Text summarization uses Claude API when enabled. Includes clinical context (demographics, vitals, labs) for richer summaries. Can be disabled to reduce costs.
@@ -220,47 +223,29 @@ Text summarization uses Claude API when enabled. Includes clinical context (demo
 ### 5. Leak-Free Mode for Classification
 CheXpert labels are NLP-extracted from radiology reports. To prevent label leakage when training classifiers:
 - Use `--leak-free` flag during preprocessing
-- Text features use only clinical context (vitals, labs, chief complaint)
-- Radiology report text is excluded
+- Text features use only information available when the X-ray is taken: demographics, chief complaint, triage vitals/acuity, labs
+- Radiology report text is excluded, and so are ED/hospital discharge diagnoses, procedures and disposition (`format_clinical_context(include_outcomes=False)`): ICD codes such as J90 (pleural effusion) encode the labels
+- Labs are aggregated up to the study time only (`labs_time_window_after_hours = 0`); later labs can be ordered because of the X-ray's findings
+- Any new feature must pass the same test: would it be known at image acquisition, independently of the image's findings?
 - See `docs/ARCHITECTURE.md` section "CheXpert Label Leakage Prevention"
 
-### 6. NaN/Inf Stability Fixes (December 2024)
-**Problem**: Training experienced catastrophic cascade failures starting at Epoch 2, where GradScaler corruption caused 100% batch failure rate for remaining 27 epochs.
+### 6. Training Stability (root cause fixed September 2026)
+**Problem**: Training hit cascade failures: after one non-finite gradient, every later step corrupted the weights until the circuit breaker ended the epoch, and the same thing happened every following epoch.
 
-**Root Cause**: Creating new `GradScaler()` object lost optimizer state synchronization, causing permanent corruption.
+**Actual root cause**: `text_clip_proj` (and, after unfreezing, the MAE `cls_token`/`pos_embed`) were trainable but not in the optimizer. `optimizer.zero_grad()` never cleared their gradients and `scaler.unscale_()` never checked them, so `clip_grad_norm_(model.parameters())` spread a single stale Inf/NaN from them into every later update. The December 2024 GradScaler reset, weight-revert fuse, Adam-state wipe and CrossAttention NaN masking treated symptoms; they have been removed.
 
-**Fixes Implemented** (all validated with comprehensive test suite):
+**Current mechanism** (`src/training/loop.py`, used by both training scripts):
+- `backward_and_step`: clips over exactly the optimizer's parameters and never applies a non-finite update (GradScaler skips it under AMP; skipped explicitly in FP32). Gradients are cleared every step.
+- `check_trainable_params_in_optimizer`: fails fast if any trainable parameter is missing from the optimizer (checked every epoch, after freezing/unfreezing).
+- Batches with a non-finite loss are skipped before backward. NaNs are not masked inside the model, so they reach this check.
+- `ConsecutiveSkipGuard`: raises after `max_consecutive_skips` skipped batches in a row, instead of silently continuing.
+- The MAE encoder unfreezes with its own LR warmup (`unfreeze_warmup_epochs`) and per-block layer-wise LR decay.
+- Structured features are normalized (raw NT-proBNP up to 70,000 overflowed fp16).
+- Kept: `safe_normalize()` for zero-norm vectors (Fix #3) and the MAE `1e-5` epsilon (Fix #4).
 
-1. **Fix #1 - GradScaler Reset** (CRITICAL - `train_classifier.py:430-437`)
-   - Changed from `scaler = GradScaler()` (creates new object)
-   - To `scaler.load_state_dict(initial_state)` (resets existing object)
-   - **Impact**: Eliminates cascade failures, enables full 30-epoch training
+**Tests**: `tests/test_training_fixes.py` (regression tests for each fix, including end-to-end train/resume/inference runs), `tests/test_multimodal_stability.py`, `tests/test_nan_handling.py`.
 
-2. **Fix #2 - CrossAttention NaN Guards** (`src/models/multimodal.py:257-302`)
-   - Added input sanitization: `torch.nan_to_num()` + `clamp(-10, 10)`
-   - Added output sanitization after attention operations
-   - **Impact**: Prevents NaN propagation through attention layers
-
-3. **Fix #3 - Safe Normalization** (`src/models/multimodal.py:29-69`, `losses.py`)
-   - Created `safe_normalize()` utility to handle zero-norm vectors
-   - Replaced 6 instances of `F.normalize()` which returned NaN for zero vectors
-   - **Impact**: Stabilizes CLIP and SupCon contrastive losses
-
-4. **Fix #4 - MAE Epsilon** (`src/models/mae.py:525`)
-   - Increased epsilon from `1e-6` to `1e-5` for FP16 safety
-   - **Impact**: Handles low-variance patches without numerical issues
-
-**Test Coverage**: 21 unit tests + 8 integration tests (see `tests/` directory)
-
-**Production Results (December 2024)**:
-- **Macro AUROC: 0.701** (50 epochs, full dataset)
-- **Macro AUPRC: 0.899**
-- Training completion: 50/50 epochs (zero cascade failures)
-- NaN batch rate: <0.5% (properly handled by skip logic)
-- Weight corruptions: 0 (GradScaler reset fix validated)
-- Circuit breaker triggers: 0
-
-**Baseline Metrics**: See `tests/baseline_metrics.md` for detailed cascade failure analysis.
+**Baseline Metrics**: `tests/baseline_metrics.md` documents the original cascade (its root-cause section predates the diagnosis above).
 
 ## Key Files to Know
 
@@ -274,7 +259,8 @@ CheXpert labels are NLP-extracted from radiology reports. To prevent label leaka
 | `src/models/multimodal.py` | Classifier architecture | Classification model changes |
 | `src/models/losses.py` | Loss functions (CLIP, SupCon, Focal) | Loss modifications |
 | `src/models/dataset.py` | PyTorch datasets | Data loading changes |
-| `src/models/config.py` | Training presets (debug/fast/base) | Training hyperparameters |
+| `src/models/config.py` | Training presets (debug/fast/base) for MAE and classifier | Training hyperparameters |
+| `src/training/loop.py` | Optimizer step, LR schedule, checkpoint I/O | Training-loop behavior |
 
 ## Output Data Schema
 
@@ -334,17 +320,9 @@ Set environment variables or create `.env` file with MIMIC dataset paths.
 ### Classification Training Issues
 - **Data Leakage**: If classifier achieves suspiciously high accuracy, check if `--leak-free` was used during preprocessing. CheXpert labels are extracted from radiology reports - feeding report text leaks labels.
 - **Missing Labels**: Some studies have uncertain (-1.0) or missing (NaN) labels. These are masked out during training automatically.
-- **NaN Loss During Training** ✅ **FIXED (December 2024)**:
-  - **Previous Issue**: Catastrophic cascade failures caused 100% batch corruption after Epoch 2 due to GradScaler reset bug
-  - **Current Status**: All 4 NaN/Inf fixes implemented and validated (see section 6 above)
-  - Batches with NaN/Inf loss are automatically skipped (no backward pass)
-  - Weight integrity fuse: reverts to last-good checkpoint if parameters become corrupted
-  - GradScaler properly resets state (preserves optimizer synchronization)
-  - CrossAttention has NaN guards to prevent propagation
-  - Safe normalization prevents division-by-zero in contrastive losses
-  - ~1-2% of batches may produce NaN due to edge-case data; this is normal and handled safely
-  - Expected behavior: Zero cascade failures, <0.5% NaN rate, 30/30 epochs complete
-  - See `tests/baseline_metrics.md` for before/after analysis
+- **NaN Loss / Exploding Gradients**: see section 6. Skipped batches are logged per epoch (`skipped_loss`, `skipped_grad`). A few skipped steps early in AMP training are the GradScaler calibrating its loss scale. A long run of skips raises an error by design; investigate the data or the learning rate rather than raising the limit.
+- **"token ids do not match the text encoder"**: `text.parquet` was tokenized with a different tokenizer than `text_model_name`. Re-run text preprocessing or pass `--text-model` with the tokenizer used in preprocessing.
+- **"trainable parameter(s) are not in the optimizer"**: a new module was added outside `MultimodalClassifier.get_layer_groups()`; add it there.
 
 ## Git Conventions
 
@@ -359,6 +337,7 @@ Set environment variables or create `.env` file with MIMIC dataset paths.
 - `docs/DATA_SCHEMA.md` - Complete output schema specification
 - `docs/CONFIGURATION_GUIDE.md` - All configuration options and tradeoffs
 - `docs/LAMBDA_DEPLOYMENT.md` - GPU deployment guide with cost breakdown
-- `docs/NAN_STABILITY_FIXES.md` - NaN/Inf stability fixes documentation
+- `docs/NEXT_ITERATION_PLAN.md` - What the September 2026 review means for the results, and the plan for the next iteration
+- `docs/CHANGELOG.md` - Change history
 - `README.md` - User-facing documentation, tutorials, and future improvements
 - `tests/baseline_metrics.md` - Cascade failure analysis and fix validation

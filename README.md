@@ -635,25 +635,23 @@ Examples:
 
 ### Image Processing Strategy
 
-The MAE training uses **center crop** from full-resolution X-rays to consistently capture lung fields:
+Training and inference **resize the whole radiograph** (`--image-mode resize`, the default), so the lung apices, costophrenic angles and lateral fields stay in view:
 
 ```
 Full resolution image (~3056×2544)
          ↓
-    Center Crop (1024×1024)
+    Resize (1024×1024)        [MAE training: random resized crop, 50-100% of the image]
          ↓
-   Augmentations (flip, rotate, blur)
+   Augmentations (flip, rotate, blur; training only)
          ↓
    3-channel conversion + ImageNet normalize
          ↓
    Output: [3, 1024, 1024] tensor
 ```
 
-**Why center crop?** Chest X-rays are centered by radiologists. A center crop from full resolution:
-- Captures the entire lung field consistently
-- Avoids edge artifacts from random cropping
-- Preserves anatomical context for anomaly detection
-- Works with variable input resolutions (224 to 1024+)
+The same transform (`build_image_transform` in `src/models/dataset.py`) is used by the MAE and classifier datasets and by `detect_anomalies.py`, so inference matches training.
+
+`--image-mode center_crop` reproduces the original behavior: a 1024×1024 crop from the native-resolution image covers only ~13% of it (0.65% at 224). Models trained that way, including the December 2024 results, never saw the lung periphery. MAE checkpoints saved before `image_mode` existed are loaded as `center_crop`.
 
 ### Configuration Presets
 
@@ -905,17 +903,17 @@ Integrate retrieval systems to enhance predictions with similar historical cases
 
 ### Image Processing Alternatives
 
-The current implementation uses **CenterCrop** to extract a fixed-size region from full-resolution X-rays:
+The current implementation **resizes** the full radiograph; center cropping (the original behavior) is available via `--image-mode center_crop`:
 
 ```
-Original: ~3056×2544 → CenterCrop(1024) → 1024×1024
-Coverage: ~13% of original pixels (33% width × 40% height)
+Resize:     ~3056×2544 → 1024×1024 (whole radiograph)
+CenterCrop: ~3056×2544 → CenterCrop(1024) → ~13% of original pixels (33% width × 40% height)
 ```
 
 | Approach | Pros | Cons |
 |----------|------|------|
-| **CenterCrop** (current) | Preserves native resolution, consistent framing | Loses peripheral lung fields |
-| **Resize** | Captures entire anatomy, no information loss | 3× downscale reduces fine detail |
+| **Resize** (current) | Captures entire anatomy | 3× downscale reduces fine detail |
+| **CenterCrop** (legacy) | Preserves native resolution, consistent framing | Loses peripheral lung fields |
 | **Multi-Scale** | Use both crop and resize features | Increased compute, best of both |
 
 **Multi-Scale Vision Implementation:**
