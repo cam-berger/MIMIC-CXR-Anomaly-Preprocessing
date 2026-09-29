@@ -561,3 +561,35 @@ class TestEndToEnd:
         ])
         detect_anomalies.main()
         assert len(json.loads(results.read_text())) == 3
+
+
+# =============================================================================
+# Leak-free text
+# =============================================================================
+
+class TestLeakFreeText:
+
+    ROW = pd.Series({
+        "anchor_age": 71, "gender": "F", "triage_chiefcomplaint": "Dyspnea",
+        "triage_heartrate": 104.0, "lab_wbc_mean": 12.3,
+        "ed_diagnoses": "J90,I509", "hospital_diagnoses": "J189", "procedures": "0W9930Z",
+        "disposition": "ADMITTED",
+    })
+
+    def test_leak_free_context_excludes_post_study_outcomes(self):
+        from src.preprocessing.text import format_clinical_context
+        context = format_clinical_context(self.ROW, include_outcomes=False)
+        assert "Dyspnea" in context and "HR 104" in context and "WBC 12.3" in context
+        for leaked in ("J90", "I509", "J189", "0W9930Z", "ADMITTED"):
+            assert leaked not in context
+
+    def test_text_preprocessor_leak_free_mode_uses_it(self, tmp_path, monkeypatch):
+        from src.config.settings import Settings
+        from src.preprocessing.text import TextPreprocessor
+        monkeypatch.chdir(tmp_path)  # Settings() creates ./output directories
+        cohort = pd.DataFrame([{**self.ROW.to_dict(), "study_id": 1, "subject_id": 2}])
+        result = TextPreprocessor(Settings()).process_cohort(
+            cohort, tmp_path / "text.parquet", enable_summarization=False, leak_free=True,
+        )
+        for column in ("clinical_context", "summary"):
+            assert "J90" not in result[column].iloc[0]

@@ -72,11 +72,19 @@ def clean_report_text(text: str) -> str:
     return text
 
 
-def format_clinical_context(row: pd.Series) -> str:
+def format_clinical_context(row: pd.Series, include_outcomes: bool = True) -> str:
     """
     Format clinical context from cohort row for summarization prompt.
 
-    Includes: demographics, triage vitals, labs, diagnoses, procedures.
+    Includes: demographics, chief complaint, triage vitals, labs, and (with
+    ``include_outcomes``) diagnoses, procedures and disposition.
+
+    Args:
+        row: Cohort row
+        include_outcomes: Include information recorded after the study
+            (ED/hospital discharge diagnoses, procedures, disposition). Must be
+            False for classification: discharge ICD codes such as pleural
+            effusion, pneumonia or heart failure encode the CheXpert labels.
     """
     context_parts = []
 
@@ -145,6 +153,9 @@ def format_clinical_context(row: pd.Series) -> str:
                 labs.append(f"{name} {float(val):.1f}")
     if labs:
         context_parts.append("Labs: " + ", ".join(labs))
+
+    if not include_outcomes:
+        return "\n".join(context_parts)
 
     # ED Diagnoses
     if "ed_diagnoses" in row and pd.notna(row.get("ed_diagnoses")):
@@ -298,9 +309,13 @@ Summary:"""
             reports_df = self.cxr_pro_loader.get_reports_for_studies(study_ids)
             logger.info(f"Found reports for {len(reports_df):,} / {len(study_ids):,} studies")
 
-        # Build clinical context for each row (always needed)
+        # Build clinical context for each row (always needed). In leak-free mode
+        # it excludes discharge diagnoses, procedures and disposition, which are
+        # recorded after the study and encode the labels.
         logger.info("Building clinical context...")
-        result["clinical_context"] = result.apply(format_clinical_context, axis=1)
+        result["clinical_context"] = result.apply(
+            format_clinical_context, axis=1, include_outcomes=not leak_free
+        )
 
         if leak_free:
             # LEAK-FREE MODE: Only use clinical context, no radiology reports

@@ -224,7 +224,10 @@ class PreprocessingConfig:
 
     # Structured data (labs, vitals)
     labs_time_window_before_hours: int = 48
-    labs_time_window_after_hours: int = 24
+    # Labs drawn after the study can be ordered because of its findings (e.g.
+    # NT-proBNP after an X-ray showing edema), which leaks the label into
+    # classification features. 0 = only labs available at acquisition time.
+    labs_time_window_after_hours: int = 0
     priority_labs: tuple = (
         "wbc", "hemoglobin", "hematocrit", "platelets",
         "glucose", "creatinine", "bun", "sodium", "potassium",
