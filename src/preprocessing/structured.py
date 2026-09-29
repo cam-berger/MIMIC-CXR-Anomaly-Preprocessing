@@ -17,6 +17,7 @@ Output Parquet schema:
 """
 
 import logging
+import re
 from pathlib import Path
 from typing import Optional
 from concurrent.futures import ProcessPoolExecutor, as_completed
@@ -29,6 +30,27 @@ from ..config import Settings, get_settings
 from ..datasets import MIMICIVLoader, MIMICIVEDLoader
 
 logger = logging.getLogger(__name__)
+
+# Censored lab results: ">300", ">=1.035", "<0.01", "GREATER THAN 70000", "LESS THAN 0.01"
+_CENSORED_LAB_VALUE = re.compile(
+    r"^\s*(?:[<>]=?|(?:GREATER|LESS)\s+THAN)\s*([0-9]*\.?[0-9]+)", re.IGNORECASE
+)
+
+
+def fill_censored_lab_values(valuenum: pd.Series, value: pd.Series) -> pd.Series:
+    """
+    Fill missing numeric lab values from censored text results.
+
+    MIMIC-IV stores results beyond an assay's reporting range as text with no
+    ``valuenum`` (e.g. NT-proBNP "GREATER THAN 70000"). Dropping them removes
+    exactly the most extreme values, so they are recorded at the reporting
+    limit instead.
+    """
+    limits = pd.to_numeric(
+        value.astype("string").str.extract(_CENSORED_LAB_VALUE, expand=False),
+        errors="coerce",
+    ).astype("float64")
+    return valuenum.astype("float64").fillna(limits)
 
 
 class StructuredPreprocessor:
@@ -247,12 +269,15 @@ class StructuredPreprocessor:
             matched = merged[in_window]
 
             if not matched.empty:
-                matched_labs.append(matched[["study_id", "itemid", "valuenum"]])
+                matched_labs.append(matched[["study_id", "itemid", "value", "valuenum"]])
 
         if not matched_labs:
             return pd.DataFrame()
 
         all_matched = pd.concat(matched_labs, ignore_index=True)
+        all_matched["valuenum"] = fill_censored_lab_values(
+            all_matched["valuenum"], all_matched["value"]
+        )
 
         # Map itemid to lab type
         itemid_to_lab = {}

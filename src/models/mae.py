@@ -554,15 +554,15 @@ class MaskedAutoencoder(nn.Module):
         loss = self.forward_loss(imgs, pred, mask)
         return loss, pred, mask
 
-    def encode(self, imgs: torch.Tensor) -> torch.Tensor:
+    def encode_tokens(self, imgs: torch.Tensor) -> torch.Tensor:
         """
-        Encode images to latent representations (for anomaly detection).
+        Encode full (unmasked) images to token representations.
 
         Args:
             imgs: Input images [B, C, H, W]
 
         Returns:
-            CLS token representation [B, D]
+            Normalized tokens [B, 1 + num_patches, D]; index 0 is the CLS token
         """
         # Patch embedding
         x = self.patch_embed(imgs)
@@ -576,10 +576,19 @@ class MaskedAutoencoder(nn.Module):
         # Encoder blocks
         for block in self.encoder_blocks:
             x = block(x)
-        x = self.encoder_norm(x)
+        return self.encoder_norm(x)
 
-        # Return CLS token
-        return x[:, 0]
+    def encode(self, imgs: torch.Tensor) -> torch.Tensor:
+        """
+        Encode images to latent representations (for anomaly detection).
+
+        Args:
+            imgs: Input images [B, C, H, W]
+
+        Returns:
+            CLS token representation [B, D]
+        """
+        return self.encode_tokens(imgs)[:, 0]
 
     def reconstruct(
         self,

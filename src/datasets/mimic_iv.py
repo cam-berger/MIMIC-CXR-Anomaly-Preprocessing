@@ -49,8 +49,9 @@ class MIMICIVLoader:
         "magnesium": [50960],
         "lactate": [50813],
         "troponin": [51002, 51003],
-        "bnp": [50963],
-        "procalcitonin": [50976],
+        "bnp": [50963],  # NTproBNP
+        # No procalcitonin: MIMIC-IV has no procalcitonin lab item (50976,
+        # previously used here, is "Protein, Total").
     }
 
     # ICU care unit patterns

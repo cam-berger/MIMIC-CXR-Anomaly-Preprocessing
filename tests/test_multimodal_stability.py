@@ -1,22 +1,23 @@
 """
 Integration tests for training stability and NaN handling.
 
-Tests end-to-end training scenarios with NaN injection,
-weight corruption recovery, and GradScaler behavior.
+Runs the real training loop (train_classifier.train_epoch and
+src.training.backward_and_step) with injected NaN batches and non-finite
+gradients: bad batches must be skipped without ever corrupting weights.
 """
 
+import time
+
+import h5py
+import numpy as np
 import pytest
 import torch
-import torch.nn as nn
-from torch.cuda.amp import GradScaler, autocast
-from pathlib import Path
-import sys
+from torch.cuda.amp import GradScaler
 
-project_root = Path(__file__).parent.parent
-sys.path.insert(0, str(project_root))
-
-from src.models.multimodal import MultimodalClassifier
-from src.models.losses import MultiTaskLoss
+import train_classifier as tc
+from src.models.classification_dataset import MultimodalClassificationDataset
+from src.training import backward_and_step
+from tests.utils import make_batch, make_classifier, make_training
 
 
 # =============================================================================
@@ -24,237 +25,93 @@ from src.models.losses import MultiTaskLoss
 # =============================================================================
 
 class TestTrainingLoopStability:
-    """Tests for training loop NaN handling and weight corruption recovery."""
+    """Tests for skipping non-finite batches in the real training loop."""
 
-    def test_training_step_with_nan_batch(self, multimodal_classifier, device):
-        """Test that training can skip NaN batches without crashing."""
-        model = multimodal_classifier
-        optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
-        scaler = GradScaler()
-        loss_fn = MultiTaskLoss(num_classes=14).to(device)
+    def test_training_step_with_nan_batch(self):
+        """Batches whose forward pass produces NaN are skipped before backward."""
+        model = make_classifier(freeze_mae_epochs=0)
+        loader = [make_batch() for _ in range(9)]
+        for batch in loader[::3]:
+            batch["image"][0, 0, 0, 0] = float("nan")
+        config, loss_fn, optimizer, scheduler = make_training(model, len(loader))
 
-        batch_size = 4
-        num_batches = 10
+        metrics = tc.train_epoch(
+            model, loader, optimizer, scheduler, GradScaler(enabled=False),
+            loss_fn, config, "cpu", epoch=0,
+        )
 
-        # Simulate training loop
-        nan_count = 0
-        for i in range(num_batches):
-            # Create batch
-            img_emb = torch.randn(batch_size, 768, device=device)
-            text_emb = torch.randn(batch_size, 768, device=device)
-            structured = torch.randn(batch_size, 128, device=device)
-            labels = torch.randint(0, 2, (batch_size, 14), device=device, dtype=torch.float)
+        assert metrics["skipped_loss"] == 3
+        assert metrics["steps"] == 6
+        assert all(torch.isfinite(p).all() for p in model.parameters())
 
-            # Inject NaN into every 3rd batch
-            if i % 3 == 0:
-                structured[:, :10] = float('nan')
-                nan_count += 1
+    def test_nonfinite_gradients_are_never_applied(self):
+        """Every other step gets an Inf gradient: those steps change nothing."""
+        model = make_classifier()
+        loader = [make_batch() for _ in range(8)]
+        config, loss_fn, optimizer, scheduler = make_training(model, len(loader))
 
-            # Sanitize inputs (mimics train_classifier.py:366)
-            structured = torch.nan_to_num(structured, nan=0.0, posinf=0.0, neginf=0.0)
+        weight = model.classifier.weight
+        calls = {"n": 0}
 
-            # Forward pass
-            with autocast():
-                outputs = model(img_emb, text_emb, structured)
-                loss_dict = loss_fn(
-                    logits=outputs['logits'],
-                    labels=labels,
-                    img_emb=outputs.get('clip_emb'),
-                    text_emb=outputs.get('text_clip_emb'),
-                    supcon_emb=outputs.get('supcon_emb'),
-                )
-                total_loss = loss_dict["total"]
+        def poison_every_other(grad):
+            calls["n"] += 1
+            if calls["n"] % 2 == 0:
+                grad = grad.clone()
+                grad[0, 0] = float("inf")
+            return grad
 
-            # Check for NaN loss (hard gate)
-            if not torch.isfinite(total_loss):
-                # Skip backward pass (mimics train_classifier.py:383-396)
-                continue
+        handle = weight.register_hook(poison_every_other)
+        try:
+            metrics = tc.train_epoch(
+                model, loader, optimizer, scheduler, GradScaler(enabled=False),
+                loss_fn, config, "cpu", epoch=0,
+            )
+        finally:
+            handle.remove()
 
-            # Backward pass
-            optimizer.zero_grad()
-            scaler.scale(total_loss).backward()
-            scaler.step(optimizer)
-            scaler.update()
-
-        # Should complete without crashing
-        assert True, "Training loop should handle NaN batches"
-
-    def test_weight_corruption_detection_and_recovery(self, device):
-        """Test weight integrity fuse detects and reverts corrupted parameters."""
-        # Create simple model
-        model = nn.Linear(10, 10).to(device)
-        optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
-
-        # Helper function to check if params are finite
-        def _params_finite(model):
-            for param in model.parameters():
-                if not torch.isfinite(param).all():
-                    return False
-            return True
-
-        # Helper function to copy params
-        def _copy_params(model):
-            return {name: param.clone() for name, param in model.named_parameters()}
-
-        # Save last-good params
-        last_good_params = _copy_params(model)
-
-        # Simulate normal training step
-        x = torch.randn(4, 10, device=device)
-        y = model(x).sum()
-        y.backward()
-        optimizer.step()
-
-        # Verify params still finite
-        assert _params_finite(model), "Params should be finite after normal step"
-
-        # Update last-good checkpoint
-        last_good_params = _copy_params(model)
-
-        # Simulate weight corruption (inject NaN)
-        with torch.no_grad():
-            for param in model.parameters():
-                param[0] = float('nan')
-
-        # Detect corruption
-        params_corrupted = not _params_finite(model)
-        assert params_corrupted, "Should detect corrupted parameters"
-
-        # Revert to last-good params (mimics train_classifier.py:422-426)
-        with torch.no_grad():
-            for name, param in model.named_parameters():
-                param.copy_(last_good_params[name])
-
-        # Verify recovery
-        assert _params_finite(model), "Params should be finite after revert"
-
-    def test_gradscaler_cascade_failure_prevention(self):
-        """Test that GradScaler reset prevents cascade failures."""
-        scaler = GradScaler(init_scale=1024.0)
-
-        # Simulate normal steps
-        for _ in range(5):
-            scaler.update()
-
-        initial_scale = scaler._scale.item()
-
-        # Simulate weight corruption detection
-        # Reset scaler to prevent cascade (proposed Fix #1)
-        with torch.no_grad():
-            scaler._scale.fill_(65536.0)
-            scaler._growth_tracker = 0
-
-        reset_scale = scaler._scale.item()
-
-        # Verify reset
-        assert reset_scale == 65536.0, f"Scale should be reset to 65536, got {reset_scale}"
-        assert scaler._growth_tracker == 0, "Growth tracker should be reset"
-
-        # Continue training
-        for _ in range(5):
-            scaler.update()
-
-        # Should not crash
-        final_scale = scaler._scale.item()
-        assert torch.isfinite(torch.tensor(final_scale)), "Scale should remain finite"
+        assert metrics["skipped_grad"] == 4
+        assert metrics["steps"] == 4
+        assert all(torch.isfinite(p).all() for p in model.parameters())
 
     @pytest.mark.skipif(not torch.cuda.is_available(), reason="Requires CUDA for mixed precision")
-    def test_100_batches_with_forced_corruption(self, multimodal_classifier, device):
+    def test_amp_overflow_skips_step_and_backs_off_scale(self):
+        """Under AMP an overflow skips the update and halves the loss scale."""
+        layer = torch.nn.Linear(4, 1).cuda()
+        optimizer = torch.optim.AdamW(layer.parameters(), lr=1e-3)
+        scaler = GradScaler(init_scale=2.0 ** 16)
+        before = [p.detach().clone() for p in layer.parameters()]
+
+        with torch.autocast("cuda"):
+            loss = layer(torch.full((2, 4), 6e4, device="cuda")).float().sum() * 1e4
+        stepped, _ = backward_and_step(loss, optimizer, scaler, max_grad_norm=1.0)
+
+        assert not stepped
+        assert scaler.get_scale() == 2.0 ** 15
+        for p, b in zip(layer.parameters(), before):
+            assert torch.equal(p, b)
+
+    def test_forced_corruption_every_10_batches(self, device):
         """
-        Integration test: 100 batches with forced corruption every 10 batches.
-        Tests the complete protection mechanism (hard gate + weight fuse + scaler reset).
+        30 batches with a NaN batch every 10: the loop skips each one and keeps
+        training (previously a single bad gradient cascaded into weight
+        reverts on every later step).
         """
-        model = multimodal_classifier
-        optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
-        scaler = GradScaler()
-        loss_fn = MultiTaskLoss(num_classes=14).to(device)
+        model = make_classifier(freeze_mae_epochs=0).to(device)
+        loader = [make_batch() for _ in range(30)]
+        for i in range(10, 30, 10):
+            loader[i]["structured"][:] = float("inf")
+            loader[i]["image"][:] = float("nan")
+        config, loss_fn, optimizer, scheduler = make_training(model, len(loader))
+        loss_fn.to(device)
+        scaler = GradScaler(enabled=device.type == "cuda")
 
-        batch_size = 4
-        num_batches = 100
-        corruption_interval = 10
+        metrics = tc.train_epoch(
+            model, loader, optimizer, scheduler, scaler, loss_fn, config, str(device), epoch=0,
+        )
 
-        # Helper functions
-        def _params_finite(model):
-            for param in model.parameters():
-                if not torch.isfinite(param).all():
-                    return False
-            return True
-
-        def _copy_params(model):
-            return {name: param.clone() for name, param in model.named_parameters()}
-
-        # Track metrics
-        nan_batches = 0
-        weight_reverts = 0
-        last_good_params = _copy_params(model)
-
-        for batch_idx in range(num_batches):
-            # Create batch
-            img_emb = torch.randn(batch_size, 768, device=device)
-            text_emb = torch.randn(batch_size, 768, device=device)
-            structured = torch.randn(batch_size, 128, device=device)
-            labels = torch.randint(0, 2, (batch_size, 14), device=device, dtype=torch.float)
-
-            # Force corruption every N batches
-            if batch_idx % corruption_interval == 0 and batch_idx > 0:
-                structured[:, :] = float('inf')  # Extreme values to cause NaN
-
-            # Sanitize inputs
-            structured = torch.nan_to_num(structured, nan=0.0, posinf=0.0, neginf=0.0)
-
-            # Forward pass
-            with autocast():
-                outputs = model(img_emb, text_emb, structured)
-                loss_dict = loss_fn(
-                    logits=outputs['logits'],
-                    labels=labels,
-                    img_emb=outputs.get('clip_emb'),
-                    text_emb=outputs.get('text_clip_emb'),
-                    supcon_emb=outputs.get('supcon_emb'),
-                )
-                total_loss = loss_dict["total"]
-
-            # Hard gate: Check for NaN loss
-            if not torch.isfinite(total_loss):
-                nan_batches += 1
-                continue
-
-            # Backward pass
-            optimizer.zero_grad()
-            scaler.scale(total_loss).backward()
-            scaler.unscale_(optimizer)
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-            scaler.step(optimizer)
-
-            # Check for weight corruption before update
-            if not _params_finite(model):
-                # Revert to last-good params
-                with torch.no_grad():
-                    for name, param in model.named_parameters():
-                        param.copy_(last_good_params[name])
-
-                # Reset scaler
-                with torch.no_grad():
-                    scaler._scale.fill_(65536.0)
-                    scaler._growth_tracker = 0
-
-                weight_reverts += 1
-            else:
-                # Update last-good checkpoint
-                last_good_params = _copy_params(model)
-
-            scaler.update()
-
-        # Verify training completed
-        assert batch_idx == num_batches - 1, "Should complete all batches"
-        assert nan_batches > 0, "Should have detected some NaN batches"
-        assert _params_finite(model), "Final model params should be finite"
-
-        # Print stats
-        print(f"\n100-batch stability test:")
-        print(f"  NaN batches: {nan_batches}/{num_batches} ({100*nan_batches/num_batches:.1f}%)")
-        print(f"  Weight reverts: {weight_reverts}")
-        print(f"  Final scaler scale: {scaler._scale.item()}")
+        assert metrics["skipped_loss"] == 2
+        assert metrics["steps"] + metrics["skipped_grad"] == 28
+        assert all(torch.isfinite(p).all() for p in model.parameters())
 
 
 # =============================================================================
@@ -264,46 +121,38 @@ class TestTrainingLoopStability:
 class TestDataQualityHandling:
     """Tests for handling problematic data samples."""
 
-    def test_blacklisted_study_filtering(self):
-        """Test that blacklisted study_ids are filtered out."""
-        from src.models.classification_dataset import BLACKLISTED_STUDY_IDS
+    def make_dataset(self, preprocessed_dir):
+        return MultimodalClassificationDataset(
+            preprocessed_dir, preprocessed_dir / "chexpert.csv",
+            target_size=(32, 32), augment=False,
+        )
 
-        # Should have some blacklisted IDs
-        assert len(BLACKLISTED_STUDY_IDS) > 0, "Should have blacklisted study IDs"
+    def test_image_sanitization(self, preprocessed_dir):
+        """NaN/Inf pixels in a stored image are sanitized at load time."""
+        with h5py.File(preprocessed_dir / "images.h5", "r+") as f:
+            image = f["images/0"][:]
+            image[0, :10, :10] = np.nan
+            image[0, 10:20, :10] = np.inf
+            f["images/0"][...] = image
 
-        # Check format
-        for study_id in BLACKLISTED_STUDY_IDS:
-            assert isinstance(study_id, str), f"Study ID should be string, got {type(study_id)}"
+        sample = self.make_dataset(preprocessed_dir)[0]
+        assert torch.isfinite(sample["image"]).all(), "Image should not contain NaN/Inf"
 
-    def test_image_sanitization(self, device):
-        """Test that image NaN/Inf are sanitized at load time."""
-        # Create image with NaN/Inf
-        img = torch.rand(1, 224, 224, device=device)
-        img[0, :10, :10] = float('nan')
-        img[0, :10, 10:20] = float('inf')
+    def test_structured_features_with_missing_values(self, preprocessed_dir):
+        """Missing/Inf structured values reach the model as NaN and encode to finite features."""
+        dataset = self.make_dataset(preprocessed_dir)
+        model = make_classifier()
+        model.struct_encoder = type(model.struct_encoder)(
+            input_dim=len(dataset.STRUCTURED_FEATURES), hidden_dim=16, output_dim=16,
+            log_transform=dataset.structured_log_transform_flags(),
+        )
+        model.struct_encoder.fit_normalization(dataset.structured_matrix())
 
-        # Sanitize (mimics classification_dataset.py:355-357)
-        if torch.isnan(img).any() or torch.isinf(img).any():
-            img = torch.nan_to_num(img, nan=0.0, posinf=1.0, neginf=0.0)
-
-        # Verify sanitization
-        assert not torch.isnan(img).any(), "Image should not contain NaN"
-        assert not torch.isinf(img).any(), "Image should not contain Inf"
-        assert (img >= 0).all() and (img <= 1).all(), "Image should be in [0, 1]"
-
-    def test_structured_features_sanitization(self, device):
-        """Test that structured features NaN/Inf are sanitized."""
-        # Create structured features with NaN/Inf
-        structured = torch.randn(4, 128, device=device)
-        structured[:, :10] = float('nan')
-        structured[:, 10:20] = float('inf')
-
-        # Sanitize (mimics classification_dataset.py:370-372)
-        if torch.isnan(structured).any() or torch.isinf(structured).any():
-            structured = torch.nan_to_num(structured, nan=0.0, posinf=0.0, neginf=0.0)
-
-        # Verify sanitization
-        assert torch.isfinite(structured).all(), "Structured features should be finite"
+        batch = torch.stack([dataset[i]["structured"] for i in range(len(dataset))])
+        assert torch.isnan(batch).any(), "Missing values should stay NaN until the model"
+        with torch.no_grad():
+            embedding = model.struct_encoder(batch)
+        assert torch.isfinite(embedding).all(), "Structured embedding should be finite"
 
 
 # =============================================================================
@@ -314,35 +163,24 @@ class TestPerformanceRegression:
     """Tests to ensure fixes don't degrade performance."""
 
     def test_forward_pass_speed(self, multimodal_classifier, device):
-        """Test that NaN guards don't significantly slow forward pass."""
-        import time
-
+        """Forward pass throughput with the real inputs."""
         model = multimodal_classifier
-        batch_size = 32
+        batch = make_batch(batch_size=8)
+        batch["structured"] = torch.randn(8, model.struct_encoder.input_dim)
+        inputs = [batch[k].to(device) for k in ("image", "text_tokens", "structured", "attention_mask")]
 
-        # Warmup
-        for _ in range(10):
-            img_emb = torch.randn(batch_size, 768, device=device)
-            text_emb = torch.randn(batch_size, 768, device=device)
-            structured = torch.randn(batch_size, 128, device=device)
-            with torch.no_grad():
-                _ = model(img_emb, text_emb, structured)
-
-        # Benchmark
-        num_iterations = 100
-        start_time = time.time()
-        for _ in range(num_iterations):
-            img_emb = torch.randn(batch_size, 768, device=device)
-            text_emb = torch.randn(batch_size, 768, device=device)
-            structured = torch.randn(batch_size, 128, device=device)
-            with torch.no_grad():
-                _ = model(img_emb, text_emb, structured)
+        with torch.no_grad():
+            model(*inputs)  # warmup
+            start_time = time.time()
+            num_iterations = 5
+            for _ in range(num_iterations):
+                model(*inputs)
 
         if device.type == "cuda":
             torch.cuda.synchronize()
 
         elapsed = time.time() - start_time
-        throughput = (num_iterations * batch_size) / elapsed
+        throughput = (num_iterations * 8) / elapsed
 
         print(f"\nForward pass throughput: {throughput:.1f} samples/sec")
 
@@ -350,25 +188,15 @@ class TestPerformanceRegression:
         if device.type == "cuda":
             assert throughput > 100, f"Throughput too low: {throughput} samples/sec"
 
-    def test_model_capacity_not_reduced(self, multimodal_classifier, normal_embeddings):
-        """Test that NaN guards don't collapse model capacity."""
-        model = multimodal_classifier
-        img_emb = normal_embeddings["img"]
-        text_emb = normal_embeddings["text"]
-        structured = torch.randn(4, 128, device=img_emb.device)
+    def test_model_capacity_not_reduced(self, multimodal_classifier, device):
+        """Outputs are not collapsed across samples or classes."""
+        batch = make_batch(batch_size=4)
+        batch["structured"] = torch.randn(4, multimodal_classifier.struct_encoder.input_dim)
+        inputs = [batch[k].to(device) for k in ("image", "text_tokens", "structured", "attention_mask")]
 
-        # Forward pass
         with torch.no_grad():
-            outputs = model(img_emb, text_emb, structured)
+            logits, clip_emb, _ = multimodal_classifier(*inputs)
 
-        # Check output variance (should not be collapsed)
-        logits_var = outputs['logits'].var(dim=-1).mean()
+        logits_var = logits.var(dim=-1).mean()
         assert logits_var > 0.01, f"Logits have suspiciously low variance: {logits_var}"
-
-        if 'clip_emb' in outputs:
-            clip_var = outputs['clip_emb'].var(dim=-1).mean()
-            assert clip_var > 0.01, f"CLIP embeddings have suspiciously low variance: {clip_var}"
-
-
-if __name__ == "__main__":
-    pytest.main([__file__, "-v", "-s"])
+        assert clip_emb.std(dim=0).mean() > 1e-3, "CLIP embeddings collapsed across samples"

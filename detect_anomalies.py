@@ -12,8 +12,12 @@ Usage:
     # Single image
     python detect_anomalies.py --image path/to/xray.jpg --model output/models/mae_best.pt
 
-    # Batch from HDF5
+    # Batch from HDF5 (the images.h5 file or its preprocessed directory)
     python detect_anomalies.py --hdf5 output/preprocessed/test/images.h5 --model output/models/mae_best.pt
+
+    # Use the reconstruction threshold fitted by train_mae.py
+    python detect_anomalies.py --image path/to/xray.jpg --model output/models/mae_best.pt \
+        --detector output/models/anomaly_detector.pt
 
     # With visualization
     python detect_anomalies.py --image path/to/xray.jpg --model output/models/mae_best.pt --visualize
@@ -38,21 +42,19 @@ from typing import Optional, List, Dict
 import numpy as np
 import torch
 from torch.utils.data import DataLoader
-from PIL import Image
-import torchvision.transforms as T
 from tqdm import tqdm
 
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent))
 
 from src.models.mae import MaskedAutoencoder
-from src.models.dataset import MIMICCXRDataset, get_mae_augmentations
+from src.models.dataset import MIMICCXRDataset, build_image_transform
 from src.models.anomaly import (
     ReconstructionAnomalyDetector,
-    EmbeddingAnomalyDetector,
     EnsembleAnomalyDetector,
 )
-from src.models.config import MAEConfig
+from src.models.config import MAEConfig, LEGACY_IMAGE_MODE
+from src.preprocessing.images import load_and_process_image
 
 logging.basicConfig(
     level=logging.INFO,
@@ -64,20 +66,27 @@ logger = logging.getLogger(__name__)
 def load_model(
     model_path: Path,
     device: str = "cuda",
-) -> MaskedAutoencoder:
-    """Load pretrained MAE model."""
+) -> tuple[MaskedAutoencoder, MAEConfig]:
+    """
+    Load pretrained MAE model.
+
+    Returns:
+        (model, config): the config gives the image size and preprocessing
+        mode the model was trained with, which inference must reproduce.
+    """
     logger.info(f"Loading model from {model_path}")
 
     checkpoint = torch.load(model_path, map_location=device)
 
     # Get config from checkpoint
-    if "config" in checkpoint:
-        config = checkpoint["config"]
-        if isinstance(config, dict):
-            mae_config = MAEConfig(**config) if "mae" not in config else MAEConfig(**config["mae"])
-        else:
-            mae_config = MAEConfig()
+    saved = checkpoint.get("config") if isinstance(checkpoint, dict) else None
+    if isinstance(saved, dict):
+        saved = saved.get("mae", saved)
+        mae_config = MAEConfig(**saved)
+        # Checkpoints from before image_mode existed were trained on center crops
+        mae_config.image_mode = saved.get("image_mode", LEGACY_IMAGE_MODE)
     else:
+        logger.warning("Checkpoint has no config; assuming MAEConfig defaults")
         mae_config = MAEConfig()
 
     # Create model
@@ -91,8 +100,9 @@ def load_model(
 
     model = model.to(device)
     model.eval()
+    logger.info(f"Model input: {mae_config.img_size}px, image_mode={mae_config.image_mode}")
 
-    return model
+    return model, mae_config
 
 
 def load_anomaly_detector(
@@ -128,23 +138,18 @@ def load_anomaly_detector(
 def preprocess_image(
     image_path: Path,
     img_size: int = 224,
+    image_mode: str = "resize",
 ) -> torch.Tensor:
-    """Load and preprocess a single image."""
-    transform = T.Compose([
-        T.Resize((img_size, img_size)),
-        T.Grayscale(num_output_channels=3),
-        T.ToTensor(),
-        T.Normalize(
-            mean=[0.485, 0.456, 0.406],
-            std=[0.229, 0.224, 0.225]
-        ),
-    ])
+    """
+    Load and preprocess a single image exactly as in training: min-max
+    normalization (as in preprocess.py), then the evaluation transform.
+    """
+    arr = load_and_process_image(image_path, normalize_method="minmax")
+    if arr is None:
+        raise ValueError(f"Could not load image: {image_path}")
 
-    img = Image.open(image_path)
-    if img.mode != "L":
-        img = img.convert("L")
-
-    tensor = transform(img)
+    transform = build_image_transform((img_size, img_size), mode=image_mode, training=False)
+    tensor = transform(torch.from_numpy(arr[0]))
     return tensor.unsqueeze(0)  # Add batch dimension
 
 
@@ -154,6 +159,8 @@ def detect_single_image(
     threshold: float = 0.05,
     device: str = "cuda",
     visualize: bool = False,
+    img_size: int = 224,
+    image_mode: str = "resize",
 ) -> Dict:
     """
     Detect anomaly in a single image.
@@ -164,12 +171,14 @@ def detect_single_image(
         threshold: Anomaly threshold
         device: Device to use
         visualize: Whether to generate visualization
+        img_size: Model input size
+        image_mode: Preprocessing mode the model was trained with
 
     Returns:
         Dictionary with anomaly results
     """
     # Preprocess image
-    image = preprocess_image(image_path).to(device)
+    image = preprocess_image(image_path, img_size, image_mode).to(device)
 
     # Create simple reconstruction detector
     detector = ReconstructionAnomalyDetector(model, device=device)
@@ -243,7 +252,7 @@ def detect_batch(
 
         for i, (score, study_id) in enumerate(zip(scores, study_ids)):
             results.append({
-                "study_id": study_id,
+                "study_id": int(study_id) if study_id is not None else None,
                 "anomaly_score": float(score),
                 "prediction": "ANOMALOUS" if score > threshold else "NORMAL",
             })
@@ -331,13 +340,14 @@ def main():
     )
     parser.add_argument(
         "--detector", type=Path, default=None,
-        help="Path to fitted anomaly detector (optional)"
+        help="Fitted anomaly detector from train_mae.py (anomaly_detector.pt); its "
+             "reconstruction threshold replaces --threshold"
     )
 
     # Options
     parser.add_argument(
         "--threshold", type=float, default=0.05,
-        help="Anomaly threshold (default: 0.05)"
+        help="Anomaly threshold (default: 0.05; ignored with --detector)"
     )
     parser.add_argument(
         "--batch-size", type=int, default=32,
@@ -365,7 +375,14 @@ def main():
     args = parser.parse_args()
 
     # Load model
-    model = load_model(args.model, args.device)
+    model, mae_config = load_model(args.model, args.device)
+    img_kwargs = {"img_size": mae_config.img_size, "image_mode": mae_config.image_mode}
+
+    # Threshold: fitted reconstruction threshold if a detector is given
+    if args.detector is not None:
+        detector_state = torch.load(args.detector, map_location="cpu")
+        args.threshold = float(detector_state["recon_threshold"])
+        logger.info(f"Using fitted reconstruction threshold from {args.detector}: {args.threshold:.4f}")
 
     # Process input
     if args.image:
@@ -376,6 +393,7 @@ def main():
             threshold=args.threshold,
             device=args.device,
             visualize=args.visualize,
+            **img_kwargs,
         )
 
         # Print results
@@ -391,13 +409,16 @@ def main():
         results = [result]
 
     elif args.hdf5:
-        # Batch from HDF5
+        # Batch from HDF5 (MIMICCXRDataset takes the directory holding images.h5)
         logger.info(f"Processing HDF5 file: {args.hdf5}")
+        hdf5_dir = args.hdf5.parent if args.hdf5.suffix in {".h5", ".hdf5"} else args.hdf5
 
-        transform = get_mae_augmentations(target_size=(224, 224), training=False)
+        size = (mae_config.img_size, mae_config.img_size)
+        transform = build_image_transform(size, mode=mae_config.image_mode, training=False)
         dataset = MIMICCXRDataset(
-            args.hdf5,
+            hdf5_dir,
             transform=transform,
+            target_size=size,
             return_metadata=True,
         )
         dataloader = DataLoader(
@@ -432,6 +453,7 @@ def main():
                 threshold=args.threshold,
                 device=args.device,
                 visualize=False,
+                **img_kwargs,
             )
             results.append(result)
 

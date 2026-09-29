@@ -19,8 +19,8 @@ Usage:
         --train-dir output/preprocessed/normal_train \\
         --val-dir output/preprocessed/normal_val
 
-    # Resume from checkpoint
-    python train_mae.py --resume checkpoints/mae_epoch_100.pt
+    # Resume from checkpoint (configuration and data paths come from the checkpoint)
+    python train_mae.py --resume output/checkpoints/mae_latest.pt
 
 Example:
     python train_mae.py \\
@@ -41,35 +41,39 @@ Data format (per PREPROCESSED_DATA_SCHEMA.md):
 import argparse
 import json
 import logging
-import math
-import os
 import sys
 import time
-from datetime import datetime
+from dataclasses import fields
 from pathlib import Path
 from typing import Optional
 
-import numpy as np
 import torch
-import torch.nn as nn
 import torch.optim as optim
-from torch.cuda.amp import GradScaler, autocast
+from torch.cuda.amp import GradScaler
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent))
 
-from src.models.mae import MaskedAutoencoder, mae_vit_base_patch16, mae_vit_small_patch16
+from src.models.mae import MaskedAutoencoder
 from src.models.dataset import MIMICCXRDataset, PreprocessedMAEDataset, get_mae_augmentations
 from src.models.config import (
+    IMAGE_MODES,
+    LEGACY_IMAGE_MODE,
     TrainingConfig, MAEConfig,
     get_debug_config, get_fast_config, get_base_config
 )
-from src.models.anomaly import (
-    ReconstructionAnomalyDetector,
-    EmbeddingAnomalyDetector,
-    EnsembleAnomalyDetector,
+from src.models.anomaly import EnsembleAnomalyDetector
+from src.training import (
+    ConsecutiveSkipGuard,
+    assert_params_finite,
+    backward_and_step,
+    build_warmup_cosine_scheduler,
+    is_cuda_device,
+    load_checkpoint_states,
+    save_checkpoint_files,
+    set_seed,
 )
 
 logging.basicConfig(
@@ -80,46 +84,65 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-def set_seed(seed: int) -> None:
-    """Set random seeds for reproducibility."""
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
+# CLI flag -> MAEConfig field
+CLI_OVERRIDES = {
+    "epochs": "epochs",
+    "batch_size": "batch_size",
+    "lr": "base_lr",
+    "mask_ratio": "mask_ratio",
+    "img_size": "img_size",
+    "patch_size": "patch_size",
+    "image_mode": "image_mode",
+    "num_workers": "num_workers",
+}
+
+# Resuming continues the saved schedule/model, so these cannot change
+RESUME_LOCKED_FIELDS = {
+    "epochs", "batch_size", "base_lr", "mask_ratio", "img_size", "patch_size", "image_mode",
+}
+
+PATH_FIELDS = ("train_dir", "val_dir", "output_dir", "checkpoint_dir")
 
 
-def get_lr_scheduler(
-    optimizer: optim.Optimizer,
-    config: MAEConfig,
-    steps_per_epoch: int,
-) -> optim.lr_scheduler.LRScheduler:
-    """
-    Create learning rate scheduler with warmup and cosine decay.
+def mae_augmentation_kwargs(config: MAEConfig) -> dict:
+    """Augmentation settings from MAEConfig for get_mae_augmentations."""
+    return {
+        "crop_scale": config.crop_scale,
+        "horizontal_flip": config.horizontal_flip,
+        "rotation_degrees": config.rotation_degrees,
+        "gaussian_blur": config.gaussian_blur,
+    }
 
-    Args:
-        optimizer: Optimizer
-        config: MAE configuration
-        steps_per_epoch: Number of steps per epoch
 
-    Returns:
-        Learning rate scheduler
-    """
-    warmup_steps = config.warmup_epochs * steps_per_epoch
-    total_steps = config.epochs * steps_per_epoch
+def apply_overrides(config: TrainingConfig, args: argparse.Namespace, resuming: bool) -> None:
+    """Apply CLI overrides. Explicit zeros count (e.g. --num-workers 0)."""
+    for arg, field_name in CLI_OVERRIDES.items():
+        value = getattr(args, arg)
+        if value is None:
+            continue
+        current = getattr(config.mae, field_name)
+        if resuming and field_name in RESUME_LOCKED_FIELDS and value != current:
+            raise ValueError(
+                f"--{arg.replace('_', '-')} {value} differs from the checkpoint's value "
+                f"({current}). Resuming continues the saved run; start a new run to change it."
+            )
+        setattr(config.mae, field_name, value)
 
-    def lr_lambda(step: int) -> float:
-        if step < warmup_steps:
-            # Linear warmup
-            return step / warmup_steps
-        else:
-            # Cosine decay
-            progress = (step - warmup_steps) / (total_steps - warmup_steps)
-            return config.min_lr / config.base_lr + \
-                   (1 - config.min_lr / config.base_lr) * \
-                   0.5 * (1 + math.cos(math.pi * progress))
 
-    return optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+def config_from_checkpoint(checkpoint: dict) -> TrainingConfig:
+    """Rebuild the training configuration stored in a checkpoint."""
+    saved = checkpoint["config"]
+    mae_saved = saved.get("mae", saved)
+    known = {f.name for f in fields(MAEConfig)}
+    config = TrainingConfig()
+    config.mae = MAEConfig(**{k: v for k, v in mae_saved.items() if k in known})
+    if "image_mode" not in mae_saved:
+        # Saved before image_mode existed: that model was trained on center crops
+        config.mae.image_mode = LEGACY_IMAGE_MODE
+    for key in PATH_FIELDS:
+        if saved.get(key) is not None:
+            setattr(config, key, Path(saved[key]))
+    return config
 
 
 def create_model(config: MAEConfig, device: str) -> MaskedAutoencoder:
@@ -156,6 +179,8 @@ def create_dataloaders(
             config.train_dir,
             training=True,
             target_size=(config.mae.img_size, config.mae.img_size),
+            image_mode=config.mae.image_mode,
+            augmentation=mae_augmentation_kwargs(config.mae),
         )
 
         val_dataset = None
@@ -165,6 +190,7 @@ def create_dataloaders(
                 config.val_dir,
                 training=False,
                 target_size=(config.mae.img_size, config.mae.img_size),
+                image_mode=config.mae.image_mode,
             )
 
     # Legacy: Direct HDF5 path
@@ -174,10 +200,13 @@ def create_dataloaders(
         train_transform = get_mae_augmentations(
             target_size=(config.mae.img_size, config.mae.img_size),
             training=True,
+            mode=config.mae.image_mode,
+            **mae_augmentation_kwargs(config.mae),
         )
         val_transform = get_mae_augmentations(
             target_size=(config.mae.img_size, config.mae.img_size),
             training=False,
+            mode=config.mae.image_mode,
         )
 
         # For legacy HDF5, assume it's in a directory with images.h5
@@ -233,16 +262,24 @@ def train_epoch(
     dataloader: DataLoader,
     optimizer: optim.Optimizer,
     scheduler: optim.lr_scheduler.LRScheduler,
-    scaler: Optional[GradScaler],
+    scaler: GradScaler,
     config: MAEConfig,
     device: str,
     epoch: int,
 ) -> dict:
-    """Train for one epoch."""
+    """
+    Train for one epoch.
+
+    Batches with a non-finite loss or gradient are skipped, never stepped
+    (backward_and_step). The scheduler advances every batch.
+    """
     model.train()
 
+    device_type = torch.device(device).type
     total_loss = 0.0
-    num_batches = 0
+    num_steps = 0
+    skipped = 0
+    guard = ConsecutiveSkipGuard(config.max_consecutive_skips)
     start_time = time.time()
 
     progress = tqdm(dataloader, desc=f"Epoch {epoch}")
@@ -255,28 +292,22 @@ def train_epoch(
         else:
             images = batch.to(device)
 
-        optimizer.zero_grad()
-
         # Forward pass with mixed precision
-        if scaler is not None:
-            with autocast():
-                loss, pred, mask = model(images)
-            scaler.scale(loss).backward()
-            scaler.unscale_(optimizer)
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-            scaler.step(optimizer)
-            scaler.update()
-        else:
+        with torch.autocast(device_type=device_type, enabled=scaler.is_enabled()):
             loss, pred, mask = model(images)
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-            optimizer.step()
+
+        stepped = False
+        if torch.isfinite(loss):
+            stepped, _ = backward_and_step(loss, optimizer, scaler, config.grad_clip)
+
+        if stepped:
+            total_loss += loss.item()
+            num_steps += 1
+        else:
+            skipped += 1
 
         scheduler.step()
-
-        # Track metrics
-        total_loss += loss.item()
-        num_batches += 1
+        guard.update(stepped, context=f"epoch {epoch}, batch {batch_idx}")
 
         # Update progress bar
         if batch_idx % config.log_interval == 0:
@@ -284,15 +315,21 @@ def train_epoch(
             progress.set_postfix({
                 "loss": f"{loss.item():.4f}",
                 "lr": f"{current_lr:.2e}",
+                "skipped": skipped,
             })
 
+    assert_params_finite([model])
+
     epoch_time = time.time() - start_time
-    avg_loss = total_loss / num_batches
+    avg_loss = total_loss / max(num_steps, 1)
+    if skipped:
+        logger.warning(f"Epoch {epoch}: {skipped} batches skipped (non-finite loss or gradients)")
 
     return {
         "loss": avg_loss,
         "time": epoch_time,
         "lr": scheduler.get_last_lr()[0],
+        "skipped": skipped,
     }
 
 
@@ -322,84 +359,62 @@ def validate(
         total_loss += loss.item()
         num_batches += 1
 
-    avg_loss = total_loss / num_batches
+    avg_loss = total_loss / max(num_batches, 1)
     return {"loss": avg_loss}
+
+
+def config_to_dict(config: TrainingConfig) -> dict:
+    """Configuration stored in checkpoints (MAE settings + data/output paths)."""
+    return {
+        "mae": dict(config.mae.__dict__),
+        **{key: str(getattr(config, key)) if getattr(config, key) is not None else None
+           for key in PATH_FIELDS},
+    }
 
 
 def save_checkpoint(
     model: MaskedAutoencoder,
     optimizer: optim.Optimizer,
     scheduler: optim.lr_scheduler.LRScheduler,
-    scaler: Optional[GradScaler],
+    scaler: GradScaler,
     epoch: int,
     config: TrainingConfig,
     metrics: dict,
+    best_val_loss: float,
+    history: dict,
     is_best: bool = False,
 ) -> Path:
-    """Save training checkpoint."""
+    """Save training checkpoint (``epoch`` is the epoch just completed)."""
     checkpoint = {
         "epoch": epoch,
         "model_state_dict": model.state_dict(),
         "optimizer_state_dict": optimizer.state_dict(),
         "scheduler_state_dict": scheduler.state_dict(),
-        "config": {
-            "mae": config.mae.__dict__,
-        },
+        "config": config_to_dict(config),
         "metrics": metrics,
+        "best_val_loss": best_val_loss,
+        "history": history,
     }
-
-    if scaler is not None:
+    if scaler.is_enabled():
         checkpoint["scaler_state_dict"] = scaler.state_dict()
 
-    # Save regular checkpoint
-    checkpoint_path = config.checkpoint_dir / f"mae_epoch_{epoch:04d}.pt"
-    torch.save(checkpoint, checkpoint_path)
-
-    # Save best model
-    if is_best:
-        best_path = config.output_dir / "mae_best.pt"
-        torch.save(checkpoint, best_path)
-        logger.info(f"Saved best model to {best_path}")
-
-    # Save latest
-    latest_path = config.checkpoint_dir / "mae_latest.pt"
-    torch.save(checkpoint, latest_path)
-
-    return checkpoint_path
+    return save_checkpoint_files(
+        checkpoint,
+        config.checkpoint_dir,
+        prefix="mae",
+        epoch=epoch,
+        best_path=config.output_dir / "mae_best.pt" if is_best else None,
+    )
 
 
-def load_checkpoint(
-    checkpoint_path: Path,
-    model: MaskedAutoencoder,
-    optimizer: Optional[optim.Optimizer] = None,
-    scheduler: Optional[optim.lr_scheduler.LRScheduler] = None,
-    scaler: Optional[GradScaler] = None,
-) -> int:
-    """Load checkpoint and return starting epoch."""
-    logger.info(f"Loading checkpoint from {checkpoint_path}")
-    checkpoint = torch.load(checkpoint_path, map_location="cpu")
-
-    model.load_state_dict(checkpoint["model_state_dict"])
-
-    if optimizer is not None and "optimizer_state_dict" in checkpoint:
-        optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
-
-    if scheduler is not None and "scheduler_state_dict" in checkpoint:
-        scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
-
-    if scaler is not None and "scaler_state_dict" in checkpoint:
-        scaler.load_state_dict(checkpoint["scaler_state_dict"])
-
-    return checkpoint["epoch"]
-
-
-def train(config: TrainingConfig, resume_path: Optional[Path] = None) -> MaskedAutoencoder:
+def train(config: TrainingConfig, resume_checkpoint: Optional[dict] = None) -> MaskedAutoencoder:
     """
     Main training loop.
 
     Args:
         config: Training configuration
-        resume_path: Optional path to checkpoint to resume from
+        resume_checkpoint: Loaded checkpoint to resume from (continues after
+            its last completed epoch, with its best validation loss and history)
 
     Returns:
         Trained model
@@ -423,20 +438,28 @@ def train(config: TrainingConfig, resume_path: Optional[Path] = None) -> MaskedA
 
     # Create scheduler
     steps_per_epoch = len(train_loader)
-    scheduler = get_lr_scheduler(optimizer, config.mae, steps_per_epoch)
+    scheduler = build_warmup_cosine_scheduler(
+        optimizer,
+        warmup_steps=config.mae.warmup_epochs * steps_per_epoch,
+        total_steps=config.mae.epochs * steps_per_epoch,
+        min_lr_ratio=config.mae.min_lr / config.mae.base_lr,
+    )
 
-    # Mixed precision scaler
-    scaler = GradScaler() if config.mae.mixed_precision and device == "cuda" else None
+    # Mixed precision scaler (disabled: plain full-precision steps)
+    scaler = GradScaler(enabled=config.mae.mixed_precision and is_cuda_device(device))
 
     # Training history
-    history = {"train_loss": [], "val_loss": [], "lr": []}
+    history = {"epoch": [], "train_loss": [], "val_epoch": [], "val_loss": [], "lr": []}
     best_val_loss = float("inf")
     start_epoch = 0
 
     # Resume from checkpoint if provided
-    if resume_path is not None:
-        start_epoch = load_checkpoint(resume_path, model, optimizer, scheduler, scaler)
-        logger.info(f"Resuming training from epoch {start_epoch}")
+    if resume_checkpoint is not None:
+        load_checkpoint_states(resume_checkpoint, model, optimizer, scheduler, scaler)
+        start_epoch = resume_checkpoint["epoch"] + 1
+        best_val_loss = resume_checkpoint.get("best_val_loss", best_val_loss)
+        history = resume_checkpoint.get("history", history)
+        logger.info(f"Resuming training at epoch {start_epoch}")
 
     # Log training info
     logger.info("=" * 60)
@@ -447,8 +470,9 @@ def train(config: TrainingConfig, resume_path: Optional[Path] = None) -> MaskedA
     logger.info(f"Epochs: {config.mae.epochs}")
     logger.info(f"Batch size: {config.mae.batch_size}")
     logger.info(f"Learning rate: {config.mae.base_lr}")
+    logger.info(f"Image: {config.mae.img_size}px, mode={config.mae.image_mode}")
     logger.info(f"Device: {device}")
-    logger.info(f"Mixed precision: {config.mae.mixed_precision}")
+    logger.info(f"Mixed precision: {scaler.is_enabled()}")
     logger.info("=" * 60)
 
     # Training loop
@@ -458,6 +482,7 @@ def train(config: TrainingConfig, resume_path: Optional[Path] = None) -> MaskedA
             model, train_loader, optimizer, scheduler, scaler,
             config.mae, device, epoch
         )
+        history["epoch"].append(epoch)
         history["train_loss"].append(train_metrics["loss"])
         history["lr"].append(train_metrics["lr"])
 
@@ -465,6 +490,7 @@ def train(config: TrainingConfig, resume_path: Optional[Path] = None) -> MaskedA
         val_metrics = {"loss": None}
         if val_loader is not None and (epoch + 1) % config.mae.eval_interval == 0:
             val_metrics = validate(model, val_loader, config.mae, device)
+            history["val_epoch"].append(epoch)
             history["val_loss"].append(val_metrics["loss"])
 
             is_best = val_metrics["loss"] < best_val_loss
@@ -490,6 +516,7 @@ def train(config: TrainingConfig, resume_path: Optional[Path] = None) -> MaskedA
                 model, optimizer, scheduler, scaler,
                 epoch, config,
                 {"train_loss": train_metrics["loss"], "val_loss": val_metrics["loss"]},
+                best_val_loss, history,
                 is_best=is_best,
             )
 
@@ -562,9 +589,9 @@ def main():
 
     # Configuration preset
     parser.add_argument(
-        "--config", type=str, default="base",
+        "--config", type=str, default=None,
         choices=["debug", "fast", "base"],
-        help="Configuration preset (default: base)"
+        help="Configuration preset (default: base; ignored with --resume)"
     )
 
     # Data paths (new preprocessed format)
@@ -587,18 +614,18 @@ def main():
         help="[Legacy] Path to validation HDF5 file"
     )
     parser.add_argument(
-        "--data-dir", type=Path, default=Path("output/preprocessed"),
+        "--data-dir", type=Path, default=None,
         help="[Legacy] Base directory for preprocessed data"
     )
 
     # Output paths
     parser.add_argument(
-        "--output-dir", type=Path, default=Path("output/models"),
-        help="Directory for output models"
+        "--output-dir", type=Path, default=None,
+        help="Directory for output models (default: output/models)"
     )
     parser.add_argument(
-        "--checkpoint-dir", type=Path, default=Path("output/checkpoints"),
-        help="Directory for checkpoints"
+        "--checkpoint-dir", type=Path, default=None,
+        help="Directory for checkpoints (default: output/checkpoints)"
     )
 
     # Training overrides
@@ -608,6 +635,10 @@ def main():
     parser.add_argument("--mask-ratio", type=float, default=None, help="Mask ratio")
     parser.add_argument("--img-size", type=int, default=None, help="Input image size (default: 224)")
     parser.add_argument("--patch-size", type=int, default=None, help="Patch size (default: 16)")
+    parser.add_argument(
+        "--image-mode", type=str, default=None, choices=IMAGE_MODES,
+        help="resize: full radiograph (default); center_crop: legacy crop from native resolution"
+    )
 
     # Resumption
     parser.add_argument(
@@ -637,15 +668,21 @@ def main():
 
     args = parser.parse_args()
 
-    # Load configuration preset
-    if args.config == "debug":
+    # Load configuration: from the checkpoint when resuming, else from a preset
+    resume_checkpoint = None
+    if args.resume is not None:
+        resume_checkpoint = torch.load(args.resume, map_location="cpu")
+        config = config_from_checkpoint(resume_checkpoint)
+        if args.config is not None:
+            logger.info("--config is ignored when resuming; using the checkpoint's configuration")
+    elif args.config == "debug":
         config = get_debug_config()
     elif args.config == "fast":
         config = get_fast_config()
     else:
         config = get_base_config()
 
-    # Apply overrides
+    # Apply paths
     # New preprocessed directory format (preferred)
     if args.train_dir:
         config.train_dir = args.train_dir
@@ -663,21 +700,13 @@ def main():
         config.output_dir = args.output_dir
     if args.checkpoint_dir:
         config.checkpoint_dir = args.checkpoint_dir
-    if args.epochs:
-        config.mae.epochs = args.epochs
-    if args.batch_size:
-        config.mae.batch_size = args.batch_size
-    if args.lr:
-        config.mae.base_lr = args.lr
-    if args.mask_ratio:
-        config.mae.mask_ratio = args.mask_ratio
-    if args.img_size:
-        config.mae.img_size = args.img_size
-    if args.patch_size:
-        config.mae.patch_size = args.patch_size
-    if args.num_workers:
-        config.mae.num_workers = args.num_workers
     config.device = args.device
+
+    # Apply overrides
+    try:
+        apply_overrides(config, args, resuming=resume_checkpoint is not None and not args.skip_pretrain)
+    except ValueError as e:
+        parser.error(str(e))
 
     # Create directories
     config.output_dir.mkdir(parents=True, exist_ok=True)
@@ -696,18 +725,19 @@ def main():
 
     # Train
     if not args.skip_pretrain:
-        model = train(config, resume_path=args.resume)
+        model = train(config, resume_checkpoint=resume_checkpoint)
     else:
         # Load from checkpoint
-        if args.resume:
+        if resume_checkpoint is not None:
             model = create_model(config.mae, config.device)
-            load_checkpoint(args.resume, model)
+            load_checkpoint_states(resume_checkpoint, model)
         else:
             # Load best model
             best_path = config.output_dir / "mae_best.pt"
             if best_path.exists():
-                model = create_model(config.mae, config.device)
-                load_checkpoint(best_path, model)
+                best_checkpoint = torch.load(best_path, map_location="cpu")
+                model = create_model(config_from_checkpoint(best_checkpoint).mae, config.device)
+                load_checkpoint_states(best_checkpoint, model)
             else:
                 raise ValueError("No model found. Run training first or provide --resume")
 

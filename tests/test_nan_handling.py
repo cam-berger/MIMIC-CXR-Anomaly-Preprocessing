@@ -1,202 +1,85 @@
 """
 Unit tests for NaN/Inf handling in model components.
 
-Tests for all 4 fixes:
-- Fix #1: GradScaler reset
-- Fix #2: CrossAttentionFusion NaN guards
+Covers:
+- CrossAttentionFusion numerics (token-level attention)
 - Fix #3: Safe normalization
 - Fix #4: MAE epsilon increase
+
+Fix #1 (GradScaler reset) and the NaN masking of Fix #2 were removed along
+with the weight-revert fuse: the cascade they recovered from came from
+gradients of parameters outside the optimizer, now fixed at the source.
+See tests/test_training_fixes.py.
 """
 
 import pytest
 import torch
 import torch.nn.functional as F
-from torch.cuda.amp import GradScaler
 
 
 # =============================================================================
-# Fix #1: GradScaler Reset Tests
+# CrossAttentionFusion numerics
 # =============================================================================
 
-class TestGradScalerReset:
-    """Tests for GradScaler reset behavior."""
+class TestCrossAttentionNumerics:
+    """CrossAttentionFusion stays finite on valid inputs and propagates invalid ones."""
 
-    def test_gradscaler_new_instantiation_loses_state(self):
-        """
-        Test that creating new GradScaler() creates a different object.
-        This demonstrates the BROKEN behavior in old code.
-        """
-        # Create scaler
-        scaler1 = GradScaler(init_scale=1024.0)
-        original_id = id(scaler1)
+    def test_zero_token_inputs(self, cross_attention_fusion, device):
+        """Zero embeddings produce a finite output."""
+        img = torch.zeros(4, 5, 768, device=device)
+        text = torch.zeros(4, 7, 768, device=device)
 
-        # BROKEN: Create new scaler (old code behavior)
-        scaler2 = GradScaler()
-        new_id = id(scaler2)
-
-        # Assert: New scaler is different object
-        assert new_id != original_id, "New GradScaler should be different object"
-        # This loses optimizer synchronization (the actual problem)
-
-    def test_gradscaler_load_state_dict_preserves_object(self):
-        """
-        Test that load_state_dict() preserves object identity.
-        This is the FIXED behavior (Fix #1).
-        """
-        # Create scaler
-        scaler = GradScaler(init_scale=1024.0)
-        original_id = id(scaler)
-
-        # FIXED: Reset using load_state_dict (Fix #1)
-        initial_state = {
-            'scale': 65536.0,
-            'growth_factor': 2.0,
-            'backoff_factor': 0.5,
-            'growth_interval': 2000,
-            '_growth_tracker': 0,
-        }
-        scaler.load_state_dict(initial_state)
-
-        reset_id = id(scaler)
-
-        # Assert: Same object after reset (preserves optimizer sync)
-        assert reset_id == original_id, "Should be same object after load_state_dict"
-        # This preserves optimizer synchronization (the fix)
-
-    def test_gradscaler_recovery_after_corruption(self):
-        """
-        Test that GradScaler can recover after detecting corrupted state.
-        Simulates the weight corruption scenario with Fix #1.
-        """
-        scaler = GradScaler()
-
-        # Simulate normal training steps
-        for _ in range(10):
-            scaler.update()
-
-        # Simulate detection of weight corruption
-        # (In real training, this happens when _params_finite(model) returns False)
-        # Reset scaler to break cascade failures (Fix #1)
-        initial_state = {
-            'scale': 65536.0,
-            'growth_factor': 2.0,
-            'backoff_factor': 0.5,
-            'growth_interval': 2000,
-            '_growth_tracker': 0,
-        }
-        scaler.load_state_dict(initial_state)
-
-        # Continue training
-        for _ in range(10):
-            scaler.update()
-
-        # Should not crash and scale should be reasonable
-        final_scale = scaler.get_scale()
-        assert torch.isfinite(torch.tensor(final_scale)), "Scale should be finite"
-        assert 1.0 <= final_scale <= 1e6, f"Scale should be reasonable, got {final_scale}"
-
-
-# =============================================================================
-# Fix #2: CrossAttentionFusion NaN Guards Tests
-# =============================================================================
-
-class TestCrossAttentionNaNGuards:
-    """Tests for CrossAttentionFusion NaN/Inf handling."""
-
-    def test_zero_vector_inputs(self, cross_attention_fusion, device):
-        """Test that cross-attention handles zero vectors without NaN."""
-        batch_size = 4
-        embed_dim = 768
-
-        # Create zero vectors
-        img_emb = torch.zeros(batch_size, embed_dim, device=device)
-        text_emb = torch.zeros(batch_size, embed_dim, device=device)
-
-        # Forward pass should not produce NaN
         with torch.no_grad():
-            fused = cross_attention_fusion(img_emb, text_emb)
+            fused = cross_attention_fusion(img, text)
 
-        # Assertions
         assert torch.isfinite(fused).all(), "Fused embedding contains NaN/Inf"
-        assert fused.shape == (batch_size, embed_dim), "Output shape mismatch"
+        assert fused.shape == (4, 768), "Output shape mismatch"
 
     def test_large_magnitude_inputs(self, cross_attention_fusion, device):
-        """Test that cross-attention handles large magnitude vectors."""
-        batch_size = 4
-        embed_dim = 768
+        """Softmax and LayerNorm keep large-magnitude tokens finite (no clamping needed)."""
+        img = torch.randn(4, 5, 768, device=device) * 1000.0
+        text = torch.randn(4, 7, 768, device=device) * 1000.0
 
-        # Create large magnitude vectors (near FP16 limits)
-        img_emb = torch.randn(batch_size, embed_dim, device=device) * 1000.0
-        text_emb = torch.randn(batch_size, embed_dim, device=device) * 1000.0
-
-        # Forward pass should not overflow
         with torch.no_grad():
-            fused = cross_attention_fusion(img_emb, text_emb)
+            fused = cross_attention_fusion(img, text)
 
-        # Assertions
         assert torch.isfinite(fused).all(), "Fused embedding contains NaN/Inf"
-        assert not torch.isinf(fused).any(), "Fused embedding overflowed to Inf"
 
-    def test_nan_inputs(self, cross_attention_fusion, device):
-        """Test that cross-attention sanitizes NaN inputs."""
-        batch_size = 4
-        embed_dim = 768
+    def test_nan_inputs_propagate(self, cross_attention_fusion, device):
+        """
+        A NaN embedding must reach the loss so the batch is skipped before
+        backward. Masking it here made the loss look valid while backward
+        produced NaN gradients.
+        """
+        img = torch.randn(4, 5, 768, device=device)
+        img[0, :, :10] = float('nan')
+        text = torch.randn(4, 7, 768, device=device)
 
-        # Create inputs with NaN
-        img_emb = torch.randn(batch_size, embed_dim, device=device)
-        img_emb[0, :10] = float('nan')
-        text_emb = torch.randn(batch_size, embed_dim, device=device)
-        text_emb[1, :10] = float('nan')
-
-        # Forward pass should sanitize NaN
         with torch.no_grad():
-            fused = cross_attention_fusion(img_emb, text_emb)
+            fused = cross_attention_fusion(img, text)
 
-        # Assertions (after fix, should not contain NaN)
-        # NOTE: This test will FAIL before Fix #2 is applied
-        # After applying Fix #2, this should pass
-        if hasattr(cross_attention_fusion, '_sanitizes_inputs'):
-            # If fix is applied, should have no NaN
-            assert not torch.isnan(fused).any(), "Fused embedding should not contain NaN after sanitization"
-        else:
-            # Before fix, may contain NaN (skip assertion)
-            pass
+        assert torch.isnan(fused[0]).any(), "NaN input should not be masked"
+        assert torch.isfinite(fused[1:]).all(), "Other samples must be unaffected"
 
-    def test_inf_inputs(self, cross_attention_fusion, device):
-        """Test that cross-attention sanitizes Inf inputs."""
-        batch_size = 4
-        embed_dim = 768
+    def test_inf_inputs_propagate(self, cross_attention_fusion, device):
+        """Inf embeddings are not masked either."""
+        img = torch.randn(4, 5, 768, device=device)
+        text = torch.randn(4, 7, 768, device=device)
+        text[1, :, :10] = float('-inf')
 
-        # Create inputs with Inf
-        img_emb = torch.randn(batch_size, embed_dim, device=device)
-        img_emb[0, :10] = float('inf')
-        text_emb = torch.randn(batch_size, embed_dim, device=device)
-        text_emb[1, :10] = float('-inf')
-
-        # Forward pass should sanitize Inf
         with torch.no_grad():
-            fused = cross_attention_fusion(img_emb, text_emb)
+            fused = cross_attention_fusion(img, text)
 
-        # Assertions (after fix, should not contain Inf)
-        if hasattr(cross_attention_fusion, '_sanitizes_inputs'):
-            assert not torch.isinf(fused).any(), "Fused embedding should not contain Inf after sanitization"
-        else:
-            pass
+        assert not torch.isfinite(fused[1]).all()
 
     def test_attention_weights_no_overflow(self, cross_attention_fusion, device):
-        """Test that attention weights don't overflow in softmax."""
-        batch_size = 4
-        embed_dim = 768
+        """Highly correlated tokens (large dot products) do not overflow the softmax."""
+        img = torch.ones(4, 5, 768, device=device) * 10.0
+        text = torch.ones(4, 7, 768, device=device) * 10.0
 
-        # Create very correlated embeddings (high dot product)
-        img_emb = torch.ones(batch_size, embed_dim, device=device) * 10.0
-        text_emb = torch.ones(batch_size, embed_dim, device=device) * 10.0
-
-        # Forward pass
         with torch.no_grad():
-            fused = cross_attention_fusion(img_emb, text_emb)
+            fused = cross_attention_fusion(img, text)
 
-        # Attention weights should not overflow
         assert torch.isfinite(fused).all(), "Attention caused overflow"
 
 
@@ -411,14 +294,11 @@ class TestNaNHandlingRegression:
         assert loss.item() < 2.0, f"Reconstruction loss unexpectedly high: {loss.item()}"
         assert loss.item() > 0.0, f"Reconstruction loss unexpectedly low: {loss.item()}"
 
-    def test_cross_attention_capacity(self, cross_attention_fusion, normal_embeddings):
-        """Ensure NaN guards don't reduce attention capacity."""
-        img_emb = normal_embeddings["img"]
-        text_emb = normal_embeddings["text"]
-
+    def test_cross_attention_capacity(self, cross_attention_fusion, normal_tokens):
+        """Ensure fused embeddings are not collapsed."""
         # Forward pass
         with torch.no_grad():
-            fused = cross_attention_fusion(img_emb, text_emb)
+            fused = cross_attention_fusion(normal_tokens["img"], normal_tokens["text"])
 
         # Fused embeddings should have reasonable variance (not collapsed)
         var = fused.var(dim=-1).mean()

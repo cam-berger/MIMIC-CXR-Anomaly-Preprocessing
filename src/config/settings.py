@@ -229,7 +229,7 @@ class PreprocessingConfig:
         "wbc", "hemoglobin", "hematocrit", "platelets",
         "glucose", "creatinine", "bun", "sodium", "potassium",
         "chloride", "bicarbonate", "calcium", "magnesium",
-        "lactate", "troponin", "bnp", "procalcitonin",
+        "lactate", "troponin", "bnp",
     )
     priority_vitals: tuple = (
         "temperature", "heartrate", "resprate",

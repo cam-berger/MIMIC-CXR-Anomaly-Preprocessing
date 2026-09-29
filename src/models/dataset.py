@@ -20,7 +20,73 @@ import torch
 from torch.utils.data import Dataset
 import torchvision.transforms as T
 
+from .config import IMAGE_MODES
+
 logger = logging.getLogger(__name__)
+
+IMAGENET_MEAN = [0.485, 0.456, 0.406]
+IMAGENET_STD = [0.229, 0.224, 0.225]
+
+
+def build_image_transform(
+    target_size: tuple[int, int] = (224, 224),
+    mode: str = "resize",
+    training: bool = False,
+    normalize: bool = True,
+    crop_scale: Optional[tuple[float, float]] = None,
+    horizontal_flip: bool = True,
+    rotation_degrees: int = 15,
+    gaussian_blur: bool = True,
+) -> Callable:
+    """
+    Image transform used for training, validation and inference.
+
+    Input: grayscale image [H, W] float32 in [0, 1] (native resolution, e.g. 3056x2544)
+    Output: RGB tensor [3, target_size] (ImageNet-normalized if ``normalize``)
+
+    Modes:
+        resize: the whole radiograph is resized to ``target_size``, so lung
+            apices, costophrenic angles and lateral fields stay in view. In
+            training, ``crop_scale`` switches to RandomResizedCrop.
+        center_crop: crops ``target_size`` pixels from the native-resolution
+            image (~13% of the image at 1024, ~0.65% at 224). Only for
+            reproducing models trained that way.
+
+    Args:
+        target_size: Output size (H, W)
+        mode: One of IMAGE_MODES
+        training: Apply random augmentations
+        normalize: Apply ImageNet normalization
+        crop_scale: RandomResizedCrop area range for training in "resize" mode
+        horizontal_flip, rotation_degrees, gaussian_blur: Training augmentations
+    """
+    if mode not in IMAGE_MODES:
+        raise ValueError(f"Unknown image mode {mode!r}; expected one of {IMAGE_MODES}")
+
+    transforms = [T.ToPILImage()]
+    if mode == "center_crop":
+        transforms.append(T.CenterCrop(target_size))
+    elif training and crop_scale is not None:
+        transforms.append(T.RandomResizedCrop(target_size, scale=tuple(crop_scale), antialias=True))
+    else:
+        transforms.append(T.Resize(target_size, antialias=True))
+
+    if training:
+        if horizontal_flip:
+            transforms.append(T.RandomHorizontalFlip(p=0.5))
+        if rotation_degrees:
+            transforms.append(T.RandomRotation(degrees=rotation_degrees))
+        if gaussian_blur:
+            transforms.append(T.RandomApply([T.GaussianBlur(kernel_size=23)], p=0.5))
+
+    transforms += [
+        T.Grayscale(num_output_channels=3),  # 1 channel -> 3 channels for ViT
+        T.ToTensor(),
+    ]
+    if normalize:
+        transforms.append(T.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD))
+
+    return T.Compose(transforms)
 
 
 class MIMICCXRDataset(Dataset):
@@ -117,31 +183,10 @@ class MIMICCXRDataset(Dataset):
         logger.info(f"Loaded index with {len(self.study_ids)} images")
 
     def _build_default_transform(self) -> Callable:
-        """
-        Build default transform pipeline for MAE training.
-
-        Handles:
-        - Full resolution input [1, H, W] float32 in [0, 1]
-        - Resize to target_size
-        - Convert grayscale to 3-channel for ViT
-        - Apply ImageNet normalization
-        """
-        transforms = [
-            T.ToPILImage(),
-            T.Resize(self.target_size),
-            T.Grayscale(num_output_channels=3),  # 1 channel -> 3 channels
-            T.ToTensor(),
-        ]
-
-        if self.normalize:
-            transforms.append(
-                T.Normalize(
-                    mean=[0.485, 0.456, 0.406],
-                    std=[0.229, 0.224, 0.225]
-                )
-            )
-
-        return T.Compose(transforms)
+        """Default transform: resize the full image to target_size (no augmentation)."""
+        return build_image_transform(
+            self.target_size, mode="resize", training=False, normalize=self.normalize,
+        )
 
     def _get_hdf5_file(self) -> h5py.File:
         """Get HDF5 file handle (lazy loading for multiprocessing)."""
@@ -255,7 +300,7 @@ class MIMICCXRDataset(Dataset):
         lab_types = [
             "bicarbonate", "bnp", "bun", "calcium", "chloride", "creatinine",
             "glucose", "hematocrit", "hemoglobin", "lactate", "magnesium",
-            "platelets", "potassium", "procalcitonin", "sodium", "troponin", "wbc"
+            "platelets", "potassium", "sodium", "troponin", "wbc"
         ]
         for lab in lab_types:
             col = f"lab_{lab}_mean"
@@ -341,6 +386,9 @@ class PreprocessedMAEDataset(Dataset):
         preprocessed_dir: Path to preprocessed cohort directory
         training: Whether to apply training augmentations
         target_size: Target image size (H, W)
+        image_mode: "resize" (full view) or "center_crop" (legacy)
+        augmentation: Optional overrides for get_mae_augmentations (e.g.
+            crop_scale, horizontal_flip, rotation_degrees, gaussian_blur)
     """
 
     def __init__(
@@ -348,12 +396,16 @@ class PreprocessedMAEDataset(Dataset):
         preprocessed_dir: Union[str, Path],
         training: bool = True,
         target_size: tuple[int, int] = (224, 224),
+        image_mode: str = "resize",
+        augmentation: Optional[dict] = None,
     ):
         self.training = training
         self.target_size = target_size
 
         # Build appropriate transform
-        transform = get_mae_augmentations(target_size, training)
+        transform = get_mae_augmentations(
+            target_size, training, mode=image_mode, **(augmentation or {})
+        )
 
         # Create underlying dataset
         self.dataset = MIMICCXRDataset(
@@ -376,51 +428,43 @@ class PreprocessedMAEDataset(Dataset):
 def get_mae_augmentations(
     target_size: tuple[int, int] = (224, 224),
     training: bool = True,
+    mode: str = "resize",
+    crop_scale: Optional[tuple[float, float]] = (0.5, 1.0),
+    horizontal_flip: bool = True,
+    rotation_degrees: int = 15,
+    gaussian_blur: bool = True,
 ) -> Callable:
     """
     Get augmentation pipeline for MAE training.
 
-    Based on medical_mae recommendations:
-    - Center crop from full resolution (captures lung fields)
-    - Horizontal flip (anatomically valid for CXR)
+    Based on medical_mae recommendations (defaults mirror MAEConfig):
+    - Random resized crop of the full image (area scale 0.5-1.0)
+    - Horizontal flip
     - Light rotation (up to 15 degrees)
     - Gaussian blur
 
-    Input: Grayscale image [1, H, W] float32 in [0, 1] (full resolution ~3056x2544)
+    Input: Grayscale image [H, W] float32 in [0, 1] (full resolution ~3056x2544)
     Output: RGB tensor [3, target_size, target_size] ImageNet-normalized
 
     Args:
         target_size: Target image size (H, W)
         training: Whether to apply training augmentations
+        mode: "resize" (full view) or "center_crop" (legacy); see build_image_transform
+        crop_scale, horizontal_flip, rotation_degrees, gaussian_blur: Training augmentations
 
     Returns:
         Transform function
     """
-    if training:
-        return T.Compose([
-            T.ToPILImage(),
-            T.CenterCrop(target_size),  # Center crop from full resolution
-            T.RandomHorizontalFlip(p=0.5),
-            T.RandomRotation(degrees=15),
-            T.RandomApply([T.GaussianBlur(kernel_size=23)], p=0.5),
-            T.Grayscale(num_output_channels=3),
-            T.ToTensor(),
-            T.Normalize(
-                mean=[0.485, 0.456, 0.406],
-                std=[0.229, 0.224, 0.225]
-            ),
-        ])
-    else:
-        return T.Compose([
-            T.ToPILImage(),
-            T.CenterCrop(target_size),  # Center crop for validation too
-            T.Grayscale(num_output_channels=3),
-            T.ToTensor(),
-            T.Normalize(
-                mean=[0.485, 0.456, 0.406],
-                std=[0.229, 0.224, 0.225]
-            ),
-        ])
+    return build_image_transform(
+        target_size,
+        mode=mode,
+        training=training,
+        normalize=True,
+        crop_scale=crop_scale,
+        horizontal_flip=horizontal_flip,
+        rotation_degrees=rotation_degrees,
+        gaussian_blur=gaussian_blur,
+    )
 
 
 # Backwards compatibility aliases

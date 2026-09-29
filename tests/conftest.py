@@ -48,15 +48,17 @@ def mae_model(device):
 
 @pytest.fixture
 def multimodal_classifier(device):
-    """Create MultimodalClassifier for testing."""
+    """Create MultimodalClassifier for testing (32px images keep ViT-B fast on CPU)."""
+    torch.manual_seed(0)
     model = MultimodalClassifier(
         mae_checkpoint=None,  # No pretrained weights for testing
         num_labels=14,
         embed_dim=768,
-        struct_input_dim=44,
+        struct_input_dim=43,
         struct_hidden_dim=256,
         contrastive_dim=128,
         freeze_text=False,  # Don't freeze for testing
+        img_size=32,
     ).to(device)
     model.eval()
     return model
@@ -119,6 +121,17 @@ def normal_embeddings(device):
     img_emb = torch.randn(batch_size, embed_dim, device=device)
     text_emb = torch.randn(batch_size, embed_dim, device=device)
     return {"img": img_emb, "text": text_emb}
+
+
+@pytest.fixture
+def normal_tokens(device):
+    """Image and text token sequences (index 0 = [CLS]) for cross-attention."""
+    batch_size = 4
+    embed_dim = 768
+    return {
+        "img": torch.randn(batch_size, 5, embed_dim, device=device),
+        "text": torch.randn(batch_size, 7, embed_dim, device=device),
+    }
 
 
 @pytest.fixture
@@ -212,45 +225,45 @@ def gradscaler():
 
 
 @pytest.fixture
-def mock_preprocessed_data(tmp_path, device):
-    """Create mock preprocessed data directory for integration testing."""
+def preprocessed_dir(tmp_path):
+    """
+    Tiny preprocessed cohort in the pipeline's on-disk format: images.h5
+    (images + parquet index), structured.parquet, text.parquet (Bio_ClinicalBERT
+    ids) and a CheXpert label CSV. Study 0 has an extreme NT-proBNP, study 1 a
+    missing one, study 2 an infinite triage_acuity and no text.
+    """
     import h5py
     import pandas as pd
+    from src.models.classification_dataset import MultimodalClassificationDataset as D
 
-    # Create HDF5 file with images
-    images_path = tmp_path / "images.h5"
-    with h5py.File(images_path, 'w') as f:
-        for i in range(10):
-            img = np.random.rand(1, 224, 224).astype(np.float32)
-            f.create_dataset(f'images/{i}', data=img)
-            f.create_dataset(f'metadata/{i}', data=np.string_(f'{{"study_id": "s{i}", "subject_id": "p{i}"}}'))
+    study_ids = [50000001, 50000002, 50000003]
+    rows = []
+    with h5py.File(tmp_path / "images.h5", "w") as f:
+        for idx, study_id in enumerate(study_ids):
+            image = np.zeros((1, 300, 250), dtype=np.float32)
+            image[0, :30, :25] = 1.0  # bright marker in the top-left corner
+            f.create_dataset(f"images/{idx}", data=image)
+            rows.append({"idx": idx, "study_id": study_id, "subject_id": 10000000 + idx})
+        index_bytes = pd.DataFrame(rows).to_parquet()
+        f.create_dataset("index", data=np.frombuffer(index_bytes, dtype=np.uint8))
 
-    # Create structured data
-    structured_data = {
-        'study_id': [f's{i}' for i in range(10)],
-        'subject_id': [f'p{i}' for i in range(10)],
-        'age': np.random.randint(20, 90, 10),
-        'gender': np.random.choice([0, 1], 10),
-    }
-    # Add lab features
-    for lab in ['wbc', 'hemoglobin', 'platelet']:
-        for stat in ['mean', 'min', 'max']:
-            structured_data[f'lab_{lab}_{stat}'] = np.random.randn(10)
+    structured = pd.DataFrame({"study_id": study_ids})
+    for name in D.STRUCTURED_FEATURES:
+        structured[name] = [1.0, 2.0, 3.0]
+    structured.loc[0, "lab_bnp_mean"] = 70000.0
+    structured.loc[1, "lab_bnp_mean"] = np.nan
+    structured.loc[2, "triage_acuity"] = np.inf
+    structured.to_parquet(tmp_path / "structured.parquet")
 
-    structured_df = pd.DataFrame(structured_data)
-    structured_df.to_parquet(tmp_path / "structured.parquet")
+    pd.DataFrame({
+        "study_id": study_ids,
+        "tokens": ["101,2000,3000,102", "101,2500,102", ""],
+    }).to_parquet(tmp_path / "text.parquet")
 
-    # Create text data
-    text_data = {
-        'study_id': [f's{i}' for i in range(10)],
-        'subject_id': [f'p{i}' for i in range(10)],
-        'report': [f'Test report {i}' for i in range(10)],
-        'summary': [f'Test summary {i}' for i in range(10)],
-        'tokens': [100 + i for i in range(10)],
-    }
-    text_df = pd.DataFrame(text_data)
-    text_df.to_parquet(tmp_path / "text.parquet")
-
+    chexpert = pd.DataFrame({"subject_id": [1, 2, 3], "study_id": study_ids})
+    for label in D.PATHOLOGY_LABELS:
+        chexpert[label] = [1.0, 0.0, -1.0]
+    chexpert.to_csv(tmp_path / "chexpert.csv", index=False)
     return tmp_path
 
 

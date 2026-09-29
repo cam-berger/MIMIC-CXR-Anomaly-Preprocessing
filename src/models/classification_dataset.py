@@ -4,12 +4,11 @@ PyTorch Dataset for multimodal classification with CheXpert labels.
 Extends MIMICCXRDataset to include:
 - CheXpert pathology labels (12 classes)
 - Label mask for handling uncertainty (-1.0 values)
-- Tensorized structured features
+- Tensorized structured features (NaN = missing; normalized inside the model)
 - Support for training with masked loss
 """
 
 import io
-import json
 import logging
 from pathlib import Path
 from typing import Optional, Callable, Union
@@ -19,9 +18,8 @@ import numpy as np
 import pandas as pd
 import torch
 from torch.utils.data import Dataset
-import torchvision.transforms as T
 
-from ..datasets import MIMICCXRLoader
+from .dataset import build_image_transform
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +40,9 @@ class MultimodalClassificationDataset(Dataset):
     - Uncertain (-1.0): Label = 0.0, Mask = 0.0 (excluded from loss)
     - Missing (NaN): Label = 0.0, Mask = 0.0 (excluded from loss)
 
+    Structured features are returned raw with NaN for missing values; the
+    model's StructuredEncoder normalizes them and adds missingness indicators.
+
     Args:
         preprocessed_dir: Path to preprocessed cohort directory
         chexpert_csv: Path to mimic-cxr-2.0.0-chexpert.csv.gz
@@ -49,22 +50,8 @@ class MultimodalClassificationDataset(Dataset):
         target_size: Target image size (H, W)
         normalize: Whether to apply ImageNet normalization
         augment: Whether to apply training augmentations
+        image_mode: "resize" (full view) or "center_crop" (legacy); see build_image_transform
     """
-
-    # Blacklisted study_ids that cause NaN during training
-    # These samples have problematic data (extreme values, corrupted images, etc.)
-    BLACKLISTED_STUDY_IDS = {
-        # Batch 24 NaN culprits
-        56963809,
-        52404879,
-        51936871,
-        55210365,
-        # Batch 84 NaN culprits
-        50381712,
-        55659481,
-        52626685,
-        52686135,
-    }
 
     # CheXpert pathology labels (12 classes, excludes "No Finding" and "Support Devices")
     PATHOLOGY_LABELS = [
@@ -116,11 +103,28 @@ class MultimodalClassificationDataset(Dataset):
         "lab_magnesium_mean",
         "lab_platelets_mean",
         "lab_potassium_mean",
-        "lab_procalcitonin_mean",
         "lab_sodium_mean",
         "lab_troponin_mean",
         "lab_wbc_mean",
     ]
+
+    # Heavy-tailed, non-negative labs: log1p before standardizing
+    # (e.g. NT-proBNP spans ~10 to 70,000 pg/mL)
+    LOG_TRANSFORM_FEATURES = {
+        "lab_bnp_mean",
+        "lab_bun_mean",
+        "lab_creatinine_mean",
+        "lab_glucose_mean",
+        "lab_lactate_mean",
+        "lab_platelets_mean",
+        "lab_troponin_mean",
+        "lab_wbc_mean",
+    }
+
+    @classmethod
+    def structured_log_transform_flags(cls) -> list[bool]:
+        """Per-feature log-transform flags, aligned with STRUCTURED_FEATURES."""
+        return [name in cls.LOG_TRANSFORM_FEATURES for name in cls.STRUCTURED_FEATURES]
 
     def __init__(
         self,
@@ -130,12 +134,14 @@ class MultimodalClassificationDataset(Dataset):
         target_size: tuple[int, int] = (224, 224),
         normalize: bool = True,
         augment: bool = True,
+        image_mode: str = "resize",
     ):
         self.preprocessed_dir = Path(preprocessed_dir)
         self.chexpert_csv = Path(chexpert_csv)
         self.target_size = target_size
         self.normalize = normalize
         self.augment = augment
+        self.image_mode = image_mode
 
         # Paths
         self.hdf5_path = self.preprocessed_dir / "images.h5"
@@ -185,15 +191,6 @@ class MultimodalClassificationDataset(Dataset):
                 raise ValueError("HDF5 file missing 'index' dataset")
             index_bytes = f["index"][:]
             self.index_df = pd.read_parquet(io.BytesIO(bytes(index_bytes)))
-
-        # Filter out blacklisted study_ids that cause NaN during training
-        original_count = len(self.index_df)
-        self.index_df = self.index_df[~self.index_df["study_id"].isin(self.BLACKLISTED_STUDY_IDS)]
-        self.index_df = self.index_df.reset_index(drop=True)
-
-        blacklisted_count = original_count - len(self.index_df)
-        if blacklisted_count > 0:
-            logger.info(f"Excluded {blacklisted_count} blacklisted study_ids")
 
         self.study_ids = self.index_df["study_id"].tolist()
         logger.info(f"Loaded index with {len(self.study_ids)} images")
@@ -285,33 +282,12 @@ class MultimodalClassificationDataset(Dataset):
 
     def _build_transform(self, augment: bool) -> Callable:
         """Build image transform pipeline."""
-        if augment:
-            transforms = [
-                T.ToPILImage(),
-                T.CenterCrop(self.target_size),
-                T.RandomHorizontalFlip(p=0.5),
-                T.RandomRotation(degrees=15),
-                T.RandomApply([T.GaussianBlur(kernel_size=23)], p=0.5),
-                T.Grayscale(num_output_channels=3),
-                T.ToTensor(),
-            ]
-        else:
-            transforms = [
-                T.ToPILImage(),
-                T.CenterCrop(self.target_size),
-                T.Grayscale(num_output_channels=3),
-                T.ToTensor(),
-            ]
-
-        if self.normalize:
-            transforms.append(
-                T.Normalize(
-                    mean=[0.485, 0.456, 0.406],
-                    std=[0.229, 0.224, 0.225]
-                )
-            )
-
-        return T.Compose(transforms)
+        return build_image_transform(
+            self.target_size,
+            mode=self.image_mode,
+            training=augment,
+            normalize=self.normalize,
+        )
 
     def _get_hdf5_file(self) -> h5py.File:
         """Get HDF5 file handle (lazy loading)."""
@@ -331,7 +307,7 @@ class MultimodalClassificationDataset(Dataset):
                 - image: [3, H, W] tensor
                 - text_tokens: [512] long tensor
                 - attention_mask: [512] float tensor
-                - structured: [num_features] float tensor
+                - structured: [num_features] float tensor (raw, NaN = missing)
                 - labels: [12] float tensor (multi-hot pathology labels)
                 - label_mask: [12] float tensor (1.0 for valid, 0.0 for uncertain/missing)
                 - study_id: int
@@ -363,13 +339,8 @@ class MultimodalClassificationDataset(Dataset):
         labels = self.labels.get(study_id, torch.zeros(len(self.PATHOLOGY_LABELS)))
         label_mask = self.label_masks.get(study_id, torch.zeros(len(self.PATHOLOGY_LABELS)))
 
-        # Get structured features (already sanitized in _extract_structured_tensor)
+        # Get structured features (raw, NaN = missing)
         structured = self._extract_structured_tensor(study_id)
-
-        # Double-check structured features for NaN/Inf
-        if torch.isnan(structured).any() or torch.isinf(structured).any():
-            logger.warning(f"NaN/Inf in structured features for study_id={study_id}, sanitizing")
-            structured = torch.nan_to_num(structured, nan=0.0, posinf=0.0, neginf=0.0)
 
         # Get text tokens
         text_tokens, attention_mask = self._extract_text_tokens(study_id)
@@ -386,23 +357,67 @@ class MultimodalClassificationDataset(Dataset):
         }
 
     def _extract_structured_tensor(self, study_id: int) -> torch.Tensor:
-        """Extract structured features as a tensor."""
-        features = []
+        """Extract raw structured features as a tensor; missing or non-finite values are NaN."""
+        if self.structured_df is None or study_id not in self.structured_df.index:
+            return torch.full((len(self.STRUCTURED_FEATURES),), float("nan"))
 
-        if self.structured_df is not None and study_id in self.structured_df.index:
-            row = self.structured_df.loc[study_id]
-            for feat_name in self.STRUCTURED_FEATURES:
-                val = row.get(feat_name, np.nan)
-                # Convert NaN and Inf to 0.0
-                # Note: triage_acuity can have Inf values which propagate NaN through model
-                if pd.notna(val) and not np.isinf(val):
-                    features.append(float(val))
-                else:
-                    features.append(0.0)
-        else:
-            features = [0.0] * len(self.STRUCTURED_FEATURES)
+        row = self.structured_df.loc[study_id]
+        if isinstance(row, pd.DataFrame):  # duplicated study_id: keep the first row
+            row = row.iloc[0]
+        values = pd.Series([row.get(name, np.nan) for name in self.STRUCTURED_FEATURES], dtype=object)
+        values = pd.to_numeric(values, errors="coerce").astype(np.float32).to_numpy()
+        tensor = torch.from_numpy(values)
+        # e.g. triage_acuity can contain Inf; treat it as missing
+        return torch.where(torch.isfinite(tensor), tensor, torch.full_like(tensor, float("nan")))
 
-        return torch.tensor(features, dtype=torch.float32)
+    def structured_matrix(self) -> torch.Tensor:
+        """
+        Raw structured features for every sample [N, num_features], NaN = missing.
+
+        Used to fit the model's structured-feature normalization on the training set.
+        """
+        if self.structured_df is None:
+            return torch.full((len(self), len(self.STRUCTURED_FEATURES)), float("nan"))
+
+        frame = self.structured_df.reindex(columns=self.STRUCTURED_FEATURES)
+        frame = frame[~frame.index.duplicated(keep="first")].reindex(self.study_ids)
+        values = frame.apply(pd.to_numeric, errors="coerce").to_numpy(np.float32, copy=True)
+        values[~np.isfinite(values)] = np.nan
+        return torch.from_numpy(values)
+
+    def validate_text_tokens(self, cls_token_id: int, vocab_size: int, model_name: str = "") -> None:
+        """
+        Check that the stored token ids come from the text encoder's tokenizer.
+
+        Ids from a different vocabulary map to unrelated wordpieces without
+        raising an error, so check that every sequence starts with the
+        encoder's [CLS] id and that no id falls outside its vocabulary.
+
+        Raises:
+            ValueError: If any tokenized row does not match.
+        """
+        if self.text_df is None or "tokens" not in self.text_df.columns:
+            return
+
+        tokens = self.text_df["tokens"]
+        tokens = tokens[tokens.apply(lambda t: isinstance(t, str) and t.strip() != "")]
+        if tokens.empty:
+            return
+
+        first_ids = tokens.str.split(",", n=1).str[0].astype(int)
+        max_ids = tokens.apply(lambda t: max(int(x) for x in t.split(",") if x.strip()))
+        bad_first = int((first_ids != cls_token_id).sum())
+        out_of_vocab = int((max_ids >= vocab_size).sum())
+
+        if bad_first or out_of_vocab:
+            raise ValueError(
+                f"{self.text_path}: token ids do not match the text encoder "
+                f"{model_name or ''} ([CLS]={cls_token_id}, vocab={vocab_size}): "
+                f"{bad_first}/{len(tokens)} rows start with a different id, "
+                f"{out_of_vocab} rows contain out-of-vocabulary ids. Re-run text "
+                f"preprocessing with this tokenizer or set text_model_name to the "
+                f"tokenizer used in preprocessing."
+            )
 
     def _extract_text_tokens(self, study_id: int) -> tuple[torch.Tensor, torch.Tensor]:
         """Extract text tokens and attention mask."""

@@ -14,7 +14,12 @@ Components:
 - AnomalyDetector: Multiple anomaly detection methods
 """
 
-from .dataset import MIMICCXRDataset, PreprocessedMAEDataset, get_mae_augmentations
+from .dataset import (
+    MIMICCXRDataset,
+    PreprocessedMAEDataset,
+    build_image_transform,
+    get_mae_augmentations,
+)
 from .mae import MaskedAutoencoder
 from .anomaly import (
     ReconstructionAnomalyDetector,
@@ -40,6 +45,7 @@ __all__ = [
     # Datasets
     "MIMICCXRDataset",
     "PreprocessedMAEDataset",
+    "build_image_transform",
     "get_mae_augmentations",
     "MultimodalClassificationDataset",
     "collate_multimodal",

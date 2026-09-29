@@ -2,21 +2,22 @@
 Multimodal classification model with cross-attention fusion.
 
 Components:
-- TextEncoder: ClinicalBERT wrapper for radiology text
-- StructuredEncoder: MLP for clinical features (vitals, labs, demographics)
-- CrossAttentionFusion: Bidirectional attention between image and text
+- TextEncoder: ClinicalBERT wrapper for clinical text
+- StructuredEncoder: normalization + MLP for clinical features (vitals, labs, demographics)
+- CrossAttentionFusion: Bidirectional token-level attention between image and text
 - MultimodalClassifier: Complete model with contrastive learning heads
 """
 
 import logging
 from pathlib import Path
-from typing import Optional, Tuple, Union
+from typing import Optional, Sequence, Tuple, Union
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from transformers import AutoModel, AutoConfig
 
+from .config import DEFAULT_TEXT_MODEL, LEGACY_IMAGE_MODE
 from .mae import MaskedAutoencoder, mae_vit_base_patch16
 
 logger = logging.getLogger(__name__)
@@ -71,10 +72,15 @@ def safe_normalize(x: torch.Tensor, dim: int = -1, eps: float = 1e-8) -> torch.T
 
 class TextEncoder(nn.Module):
     """
-    ClinicalBERT encoder for radiology text.
+    ClinicalBERT encoder for clinical text.
 
-    Extracts [CLS] token embedding from pretrained medical BERT model.
-    Model is frozen by default to preserve pretrained features.
+    Returns token embeddings (for cross-attention) and the [CLS] embedding.
+    Frozen by default to preserve pretrained features; a frozen encoder is
+    also kept in eval mode, so dropout does not perturb features that no
+    gradient can adapt to.
+
+    The input ids must come from the same model's tokenizer: ids from a
+    different vocabulary map to unrelated wordpieces without any error.
 
     Args:
         model_name: HuggingFace model identifier
@@ -84,7 +90,7 @@ class TextEncoder(nn.Module):
 
     def __init__(
         self,
-        model_name: str = "microsoft/BiomedNLP-PubMedBERT-base-uncased-abstract-fulltext",
+        model_name: str = DEFAULT_TEXT_MODEL,
         freeze: bool = True,
         output_dim: Optional[int] = None,
     ):
@@ -92,14 +98,18 @@ class TextEncoder(nn.Module):
 
         # Load pretrained model
         logger.info(f"Loading text encoder: {model_name}")
+        self.model_name = model_name
         self.bert = AutoModel.from_pretrained(model_name)
         config = AutoConfig.from_pretrained(model_name)
         self.hidden_size = config.hidden_size  # Usually 768
+        self.vocab_size = config.vocab_size
 
         # Freeze if requested
+        self.frozen = freeze
         if freeze:
             for param in self.bert.parameters():
                 param.requires_grad = False
+            self.bert.eval()
             logger.info("Text encoder frozen")
 
         # Optional projection to different dimension
@@ -110,7 +120,13 @@ class TextEncoder(nn.Module):
         else:
             self.output_dim = self.hidden_size
 
-    def forward(
+    def train(self, mode: bool = True) -> "TextEncoder":
+        super().train(mode)
+        if self.frozen:
+            self.bert.eval()
+        return self
+
+    def encode_tokens(
         self,
         input_ids: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
@@ -123,35 +139,54 @@ class TextEncoder(nn.Module):
             attention_mask: Attention mask [B, seq_len], 1 for real tokens
 
         Returns:
-            CLS token embedding [B, output_dim]
+            Token embeddings [B, seq_len, output_dim]; index 0 is [CLS]
         """
         outputs = self.bert(
             input_ids=input_ids,
             attention_mask=attention_mask,
             return_dict=True,
         )
-
-        # Get [CLS] token (first token)
-        cls_embedding = outputs.last_hidden_state[:, 0, :]
+        tokens = outputs.last_hidden_state
 
         if self.projection is not None:
-            cls_embedding = self.projection(cls_embedding)
+            tokens = self.projection(tokens)
 
-        return cls_embedding
+        return tokens
+
+    def forward(
+        self,
+        input_ids: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """Return the [CLS] token embedding [B, output_dim]."""
+        return self.encode_tokens(input_ids, attention_mask)[:, 0]
 
 
 class StructuredEncoder(nn.Module):
     """
-    MLP encoder for structured clinical data.
+    Normalization + MLP encoder for structured clinical data.
 
-    Handles demographics, vitals, and lab values with dropout
-    for robustness to missing data (encoded as zeros).
+    Raw features arrive with NaN for missing values. Each feature is
+    optionally log-transformed (heavy-tailed labs), standardized with
+    statistics fitted on the training set, and clipped; missing values become
+    0 (the training mean) and a per-feature missingness indicator is appended,
+    since whether a test was ordered is itself informative.
+
+    Normalizing matters for more than accuracy: raw values such as NT-proBNP
+    (reported up to 70,000 pg/mL) overflow fp16 (max 65,504) in the first
+    Linear layer under autocast, and unscaled features let one lab dominate
+    the embedding.
+
+    The statistics are buffers, so they are saved in checkpoints and follow
+    the model to its device. Call ``fit_normalization`` before training.
 
     Args:
-        input_dim: Number of input features
+        input_dim: Number of raw input features
         hidden_dim: Hidden layer dimension
         output_dim: Output embedding dimension
         dropout: Dropout probability
+        log_transform: Per-feature flags for sign(x)*log1p(|x|) before standardizing
+        clip_value: Standardized values are clipped to [-clip_value, clip_value]
     """
 
     def __init__(
@@ -160,11 +195,28 @@ class StructuredEncoder(nn.Module):
         hidden_dim: int = 256,
         output_dim: int = 256,
         dropout: float = 0.3,
+        log_transform: Optional[Sequence[bool]] = None,
+        clip_value: float = 5.0,
     ):
         super().__init__()
 
+        if log_transform is None:
+            log_transform = [False] * input_dim
+        if len(log_transform) != input_dim:
+            raise ValueError(
+                f"log_transform has {len(log_transform)} entries, expected {input_dim}"
+            )
+
+        self.input_dim = input_dim
+        self.clip_value = clip_value
+        self.register_buffer("log_transform", torch.tensor(list(log_transform), dtype=torch.bool))
+        self.register_buffer("feature_mean", torch.zeros(input_dim))
+        self.register_buffer("feature_std", torch.ones(input_dim))
+        self.register_buffer("normalization_fitted", torch.tensor(False))
+
+        # Input: standardized values + missingness indicators
         self.encoder = nn.Sequential(
-            nn.Linear(input_dim, hidden_dim),
+            nn.Linear(2 * input_dim, hidden_dim),
             nn.LayerNorm(hidden_dim),
             nn.GELU(),
             nn.Dropout(dropout),
@@ -178,30 +230,76 @@ class StructuredEncoder(nn.Module):
 
         self.output_dim = output_dim
 
+    def _log_transform(self, x: torch.Tensor) -> torch.Tensor:
+        return torch.where(self.log_transform, torch.sign(x) * torch.log1p(x.abs()), x)
+
+    @torch.no_grad()
+    def fit_normalization(self, raw: torch.Tensor) -> None:
+        """
+        Fit per-feature mean/std on training data.
+
+        Args:
+            raw: Raw features [N, input_dim], NaN/Inf for missing values
+        """
+        raw = raw.to(dtype=torch.float64, device=self.feature_mean.device)
+        observed = torch.isfinite(raw)
+        x = self._log_transform(torch.where(observed, raw, torch.zeros_like(raw)))
+        count = observed.sum(dim=0)
+        mean = (x * observed).sum(dim=0) / count.clamp(min=1)
+        var = (((x - mean) ** 2) * observed).sum(dim=0) / (count - 1).clamp(min=1)
+        std = var.sqrt()
+        # Constant or never-observed features: leave unscaled instead of dividing by ~0
+        std = torch.where((count > 1) & (std > 1e-6), std, torch.ones_like(std))
+
+        self.feature_mean.copy_(mean.float())
+        self.feature_std.copy_(std.float())
+        self.normalization_fitted.fill_(True)
+
+        never_observed = int((count == 0).sum())
+        logger.info(
+            f"Fitted structured-feature normalization on {raw.shape[0]:,} samples "
+            f"({never_observed} feature(s) never observed)"
+        )
+
+    def normalize(self, x: torch.Tensor) -> torch.Tensor:
+        """Raw features [B, input_dim] -> [B, 2 * input_dim] (standardized, missing)."""
+        x = x.float()
+        observed = torch.isfinite(x)
+        x = self._log_transform(torch.where(observed, x, torch.zeros_like(x)))
+        z = ((x - self.feature_mean) / self.feature_std).clamp(-self.clip_value, self.clip_value)
+        z = torch.where(observed, z, torch.zeros_like(z))
+        return torch.cat([z, (~observed).to(z.dtype)], dim=-1)
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
         Encode structured features.
 
         Args:
-            x: Structured features [B, input_dim]
-               NaN values should be pre-converted to 0.0
+            x: Raw structured features [B, input_dim], NaN for missing
 
         Returns:
             Embedding [B, output_dim]
         """
-        # Handle any remaining NaN values
-        x = torch.nan_to_num(x, nan=0.0)
-        return self.encoder(x)
+        return self.encoder(self.normalize(x))
 
 
 class CrossAttentionFusion(nn.Module):
     """
-    Bidirectional cross-attention fusion between image and text.
+    Bidirectional token-level cross-attention between image and text.
 
     Performs:
-    1. Image attends to text (image query, text key/value)
-    2. Text attends to image (text query, image key/value)
-    3. Combines attended representations via MLP
+    1. Image [CLS] attends over the text tokens (padding masked)
+    2. Text [CLS] attends over the image patch tokens
+    3. Combines the attended representations via MLP
+
+    Attention needs more than one key: over a single pooled vector the
+    softmax weight is always 1, the query/key projections receive no
+    gradient, and the module collapses to a linear map.
+
+    No NaN/Inf sanitization happens here on purpose: a non-finite embedding
+    must reach the loss so the training loop skips the batch before backward.
+    (Masking it here let the loss look valid while backward produced NaN
+    gradients.) PyTorch's softmax is already overflow-safe.
 
     Args:
         embed_dim: Embedding dimension for both modalities
@@ -241,67 +339,52 @@ class CrossAttentionFusion(nn.Module):
 
     def forward(
         self,
-        img_emb: torch.Tensor,
-        text_emb: torch.Tensor,
+        img_tokens: torch.Tensor,
+        text_tokens: torch.Tensor,
+        text_attention_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """
-        Fuse image and text embeddings via cross-attention.
+        Fuse image and text token sequences via cross-attention.
 
         Args:
-            img_emb: Image embedding [B, embed_dim]
-            text_emb: Text embedding [B, embed_dim]
+            img_tokens: Image tokens [B, 1 + N_patches, D]; index 0 is [CLS]
+            text_tokens: Text tokens [B, L, D]; index 0 is [CLS]
+            text_attention_mask: [B, L], 1 for real tokens, 0 for padding
 
         Returns:
-            Fused embedding [B, embed_dim]
+            Fused embedding [B, D]
         """
-        # FIX #2: Sanitize inputs before attention to prevent NaN propagation
-        # Critical for numerical stability - a single NaN in embedding can corrupt entire batch
-        img_emb = torch.nan_to_num(img_emb, nan=0.0, posinf=0.0, neginf=0.0)
-        text_emb = torch.nan_to_num(text_emb, nan=0.0, posinf=0.0, neginf=0.0)
+        img_query = img_tokens[:, :1]
+        text_query = text_tokens[:, :1]
+        img_patches = img_tokens[:, 1:]
 
-        # Clamp to safe range to prevent overflow in attention softmax
-        # Attention computes q @ k.T * scale, which can overflow with large values
-        img_emb = img_emb.clamp(-10.0, 10.0)
-        text_emb = text_emb.clamp(-10.0, 10.0)
-
-        # Add sequence dimension for attention [B, 1, D]
-        img_seq = img_emb.unsqueeze(1)
-        text_seq = text_emb.unsqueeze(1)
+        text_padding = None
+        if text_attention_mask is not None:
+            text_padding = text_attention_mask == 0
+            # Keep position 0 attendable: a study without text has an all-zero
+            # mask, and a fully masked row would make the softmax NaN.
+            text_padding[:, 0] = False
 
         # Image attends to text
         img_attended, _ = self.img_to_text_attn(
-            query=img_seq,
-            key=text_seq,
-            value=text_seq,
+            query=img_query,
+            key=text_tokens,
+            value=text_tokens,
+            key_padding_mask=text_padding,
         )
-        img_attended = self.img_to_text_norm(img_attended + img_seq)
+        img_attended = self.img_to_text_norm(img_attended + img_query)
 
         # Text attends to image
         text_attended, _ = self.text_to_img_attn(
-            query=text_seq,
-            key=img_seq,
-            value=img_seq,
+            query=text_query,
+            key=img_patches,
+            value=img_patches,
         )
-        text_attended = self.text_to_img_norm(text_attended + text_seq)
-
-        # Remove sequence dimension [B, D]
-        img_attended = img_attended.squeeze(1)
-        text_attended = text_attended.squeeze(1)
-
-        # FIX #2: Sanitize attention outputs before fusion
-        # Attention can still produce NaN despite input sanitization (e.g., numerical issues in softmax)
-        img_attended = torch.nan_to_num(img_attended, nan=0.0)
-        text_attended = torch.nan_to_num(text_attended, nan=0.0)
+        text_attended = self.text_to_img_norm(text_attended + text_query)
 
         # Concatenate and fuse
-        combined = torch.cat([img_attended, text_attended], dim=-1)
-        fused = self.fusion_mlp(combined)
-
-        # FIX #2: Final safety check - ensure output is finite
-        # Belt-and-suspenders protection against any remaining NaN/Inf
-        fused = torch.nan_to_num(fused, nan=0.0, posinf=0.0, neginf=0.0)
-
-        return fused
+        combined = torch.cat([img_attended.squeeze(1), text_attended.squeeze(1)], dim=-1)
+        return self.fusion_mlp(combined)
 
 
 class MultimodalClassifier(nn.Module):
@@ -309,11 +392,11 @@ class MultimodalClassifier(nn.Module):
     Multimodal classifier with contrastive learning heads.
 
     Architecture:
-        Image -> MAE Encoder -> [B, 768]
-        Text -> ClinicalBERT -> [B, 768]
-        Structured -> MLP -> [B, 256]
+        Image -> MAE Encoder -> tokens [B, 1+N, 768]
+        Text -> ClinicalBERT -> tokens [B, L, 768]
+        Structured -> normalization + MLP -> [B, 256]
 
-        Cross-Attention(Image, Text) -> [B, 768]
+        Cross-Attention(image tokens, text tokens) -> [B, 768]
         Concat(Fused, Structured) -> [B, 1024]
         Final MLP -> [B, 512]
 
@@ -326,12 +409,15 @@ class MultimodalClassifier(nn.Module):
         mae_checkpoint: Path to pretrained MAE weights (or None to init fresh)
         num_labels: Number of classification labels (12 CheXpert pathologies)
         embed_dim: Image/text embedding dimension
-        struct_input_dim: Number of structured features
+        struct_input_dim: Number of raw structured features
         struct_hidden_dim: Hidden dim for structured encoder
         contrastive_dim: Output dimension for contrastive heads
         freeze_mae_epochs: Number of epochs to freeze MAE (for warmup)
-        text_model_name: HuggingFace model for text encoder
+        text_model_name: HuggingFace model for text encoder (must match the
+            tokenizer that produced the input ids)
         freeze_text: Whether to freeze text encoder
+        img_size: Input image size
+        struct_log_transform: Per-feature log-transform flags for the structured encoder
     """
 
     def __init__(
@@ -339,13 +425,14 @@ class MultimodalClassifier(nn.Module):
         mae_checkpoint: Optional[Union[str, Path]] = None,
         num_labels: int = 12,
         embed_dim: int = 768,
-        struct_input_dim: int = 44,
+        struct_input_dim: int = 43,
         struct_hidden_dim: int = 256,
         contrastive_dim: int = 128,
         freeze_mae_epochs: int = 5,
-        text_model_name: str = "microsoft/BiomedNLP-PubMedBERT-base-uncased-abstract-fulltext",
+        text_model_name: str = DEFAULT_TEXT_MODEL,
         freeze_text: bool = True,
         img_size: int = 224,
+        struct_log_transform: Optional[Sequence[bool]] = None,
     ):
         super().__init__()
 
@@ -354,7 +441,9 @@ class MultimodalClassifier(nn.Module):
         self.freeze_mae_epochs = freeze_mae_epochs
 
         # ---------- Encoders ----------
-        # Image encoder (MAE ViT)
+        # Image encoder (MAE ViT). mae_image_mode records how the pretraining
+        # images were preprocessed (None when not loaded from a checkpoint).
+        self.mae_image_mode: Optional[str] = None
         self.image_encoder = self._build_mae_encoder(mae_checkpoint, embed_dim, img_size)
 
         # Text encoder (ClinicalBERT)
@@ -364,11 +453,12 @@ class MultimodalClassifier(nn.Module):
             output_dim=embed_dim,
         )
 
-        # Structured encoder (MLP)
+        # Structured encoder (normalization + MLP)
         self.struct_encoder = StructuredEncoder(
             input_dim=struct_input_dim,
             hidden_dim=struct_hidden_dim,
             output_dim=struct_hidden_dim,
+            log_transform=struct_log_transform,
         )
 
         # ---------- Fusion ----------
@@ -409,8 +499,12 @@ class MultimodalClassifier(nn.Module):
             nn.LayerNorm(contrastive_dim),
         )
 
-        # Track current epoch for MAE freezing
+        # The MAE decoder, mask token and fixed sin-cos position embeddings
+        # are never trained here; only the encoder is (see set_epoch).
+        for param in self.image_encoder.parameters():
+            param.requires_grad = False
         self._current_epoch = 0
+        self.set_epoch(0)
 
         logger.info(
             f"Initialized MultimodalClassifier: "
@@ -431,25 +525,50 @@ class MultimodalClassifier(nn.Module):
         # Load checkpoint if provided
         if checkpoint_path is not None:
             checkpoint_path = Path(checkpoint_path)
-            if checkpoint_path.exists():
-                logger.info(f"Loading MAE checkpoint: {checkpoint_path}")
-                checkpoint = torch.load(checkpoint_path, map_location="cpu")
+            if not checkpoint_path.exists():
+                raise FileNotFoundError(f"MAE checkpoint not found: {checkpoint_path}")
 
-                # Handle different checkpoint formats
-                if "model_state_dict" in checkpoint:
-                    state_dict = checkpoint["model_state_dict"]
-                elif "state_dict" in checkpoint:
-                    state_dict = checkpoint["state_dict"]
-                else:
-                    state_dict = checkpoint
+            logger.info(f"Loading MAE checkpoint: {checkpoint_path}")
+            checkpoint = torch.load(checkpoint_path, map_location="cpu")
 
-                # Load weights
-                mae.load_state_dict(state_dict, strict=False)
-                logger.info("MAE checkpoint loaded successfully")
+            # Handle different checkpoint formats
+            if "model_state_dict" in checkpoint:
+                state_dict = checkpoint["model_state_dict"]
+            elif "state_dict" in checkpoint:
+                state_dict = checkpoint["state_dict"]
             else:
-                logger.warning(f"MAE checkpoint not found: {checkpoint_path}")
+                state_dict = checkpoint
+
+            # Load weights. The decoder is unused here, but a missing encoder
+            # weight means the "pretrained" encoder would silently stay random.
+            result = mae.load_state_dict(state_dict, strict=False)
+            missing_encoder = [
+                k for k in result.missing_keys
+                if not k.startswith("decoder") and k != "mask_token"
+            ]
+            if missing_encoder:
+                raise RuntimeError(
+                    f"MAE checkpoint {checkpoint_path} is missing encoder weights: "
+                    f"{missing_encoder[:5]}{' ...' if len(missing_encoder) > 5 else ''}"
+                )
+
+            config = checkpoint.get("config") if isinstance(checkpoint, dict) else None
+            if isinstance(config, dict):
+                config = config.get("mae", config)
+                self.mae_image_mode = config.get("image_mode", LEGACY_IMAGE_MODE)
+            logger.info("MAE checkpoint loaded successfully")
 
         return mae
+
+    def image_encoder_parameters(self) -> list[nn.Parameter]:
+        """MAE encoder parameters that are fine-tuned (not decoder/mask/pos_embed)."""
+        mae = self.image_encoder
+        return [
+            *mae.patch_embed.parameters(),
+            mae.cls_token,
+            *mae.encoder_blocks.parameters(),
+            *mae.encoder_norm.parameters(),
+        ]
 
     def set_epoch(self, epoch: int) -> None:
         """Update current epoch (for progressive unfreezing)."""
@@ -463,13 +582,13 @@ class MultimodalClassifier(nn.Module):
 
     def _freeze_mae(self) -> None:
         """Freeze MAE encoder weights."""
-        for param in self.image_encoder.parameters():
+        for param in self.image_encoder_parameters():
             param.requires_grad = False
         logger.info("MAE encoder frozen")
 
     def _unfreeze_mae(self) -> None:
-        """Unfreeze MAE encoder weights."""
-        for param in self.image_encoder.parameters():
+        """Unfreeze the MAE encoder (not the decoder or fixed position embeddings)."""
+        for param in self.image_encoder_parameters():
             param.requires_grad = True
         logger.info("MAE encoder unfrozen")
 
@@ -506,7 +625,7 @@ class MultimodalClassifier(nn.Module):
         Args:
             images: Input images [B, 3, H, W]
             text_tokens: Text token IDs [B, seq_len]
-            structured: Structured features [B, num_features]
+            structured: Raw structured features [B, num_features], NaN for missing
             attention_mask: Text attention mask [B, seq_len]
             return_embeddings: Whether to return intermediate embeddings
 
@@ -520,15 +639,17 @@ class MultimodalClassifier(nn.Module):
                 logits, clip_emb, supcon_emb, plus:
                 fused_emb: Fused representation [B, 512]
                 img_emb: Image embedding [B, embed_dim]
-                text_emb: Text embedding [B, embed_dim]
+                text_clip_emb: Text embedding in contrastive space [B, contrastive_dim]
         """
         # Encode each modality
-        img_emb = self.get_image_embedding(images)  # [B, 768]
-        text_emb = self.get_text_embedding(text_tokens, attention_mask)  # [B, 768]
+        img_tokens = self.image_encoder.encode_tokens(images)  # [B, 1+N, 768]
+        text_token_emb = self.text_encoder.encode_tokens(text_tokens, attention_mask)  # [B, L, 768]
         struct_emb = self.get_structured_embedding(structured)  # [B, 256]
+        img_emb = img_tokens[:, 0]
+        text_emb = text_token_emb[:, 0]
 
         # Cross-attention fusion (image + text)
-        fused_img_text = self.cross_attention(img_emb, text_emb)  # [B, 768]
+        fused_img_text = self.cross_attention(img_tokens, text_token_emb, attention_mask)  # [B, 768]
 
         # Concatenate with structured and final fusion
         combined = torch.cat([fused_img_text, struct_emb], dim=-1)  # [B, 1024]
@@ -549,59 +670,66 @@ class MultimodalClassifier(nn.Module):
 
         return logits, clip_emb, supcon_emb
 
-    def get_layer_groups(self) -> list[list[nn.Parameter]]:
+    def get_layer_groups(self) -> list[dict]:
         """
-        Get parameter groups for layer-wise learning rate decay.
+        Parameter groups for layer-wise learning rate decay (LLRD).
 
-        Returns groups from deepest (should have lowest LR) to shallowest:
-        1. MAE encoder patch embed + early layers
-        2. MAE encoder middle layers
-        3. MAE encoder late layers
-        4. Text encoder (if unfrozen)
-        5. Structured encoder + fusion + heads
+        Each group is ``{"name", "params", "decay_exponent", "image_encoder"}``;
+        its LR is ``base_lr * lr_decay ** decay_exponent``. Following the
+        MAE/BEiT fine-tuning recipe, encoder block ``i`` of ``depth`` gets
+        exponent ``depth - i`` and the patch embedding + CLS token get
+        ``depth + 1``; the encoder's final norm and everything outside the
+        encoders get 0. ``image_encoder`` marks groups that are frozen for the
+        first ``freeze_mae_epochs``.
+
+        Every trainable parameter outside the MAE encoder and the pretrained
+        BERT lands in the "head" group, so a newly added module cannot end up
+        outside the optimizer.
         """
-        groups = []
+        mae = self.image_encoder
+        depth = len(mae.encoder_blocks)
 
-        # MAE encoder layers (12 total for ViT-Base)
-        mae_params = list(self.image_encoder.encoder_blocks.parameters())
-        n_layers = len(self.image_encoder.encoder_blocks)
+        groups = [{
+            "name": "mae.embed",
+            "params": [*mae.patch_embed.parameters(), mae.cls_token],
+            "decay_exponent": depth + 1,
+            "image_encoder": True,
+        }]
+        for i, block in enumerate(mae.encoder_blocks):
+            groups.append({
+                "name": f"mae.block{i}",
+                "params": list(block.parameters()),
+                "decay_exponent": depth - i,
+                "image_encoder": True,
+            })
+        groups.append({
+            "name": "mae.norm",
+            "params": list(mae.encoder_norm.parameters()),
+            "decay_exponent": 0,
+            "image_encoder": True,
+        })
 
-        # Split into thirds
-        third = n_layers // 3
-        early_idx = third
-        mid_idx = 2 * third
+        bert_params = [p for p in self.text_encoder.bert.parameters() if p.requires_grad]
+        if bert_params:
+            groups.append({
+                "name": "text_encoder",
+                "params": bert_params,
+                "decay_exponent": depth + 1,
+                "image_encoder": False,
+            })
 
-        # Group 1: Patch embed + early encoder layers
-        group1 = list(self.image_encoder.patch_embed.parameters())
-        for i, block in enumerate(self.image_encoder.encoder_blocks):
-            if i < early_idx:
-                group1.extend(block.parameters())
-        groups.append(group1)
-
-        # Group 2: Middle encoder layers
-        group2 = []
-        for i, block in enumerate(self.image_encoder.encoder_blocks):
-            if early_idx <= i < mid_idx:
-                group2.extend(block.parameters())
-        groups.append(group2)
-
-        # Group 3: Late encoder layers + norm
-        group3 = []
-        for i, block in enumerate(self.image_encoder.encoder_blocks):
-            if i >= mid_idx:
-                group3.extend(block.parameters())
-        group3.extend(self.image_encoder.encoder_norm.parameters())
-        groups.append(group3)
-
-        # Group 4: Structured encoder + cross-attention + fusion + heads
-        group4 = []
-        group4.extend(self.struct_encoder.parameters())
-        group4.extend(self.cross_attention.parameters())
-        group4.extend(self.final_fusion.parameters())
-        group4.extend(self.classifier.parameters())
-        group4.extend(self.clip_proj.parameters())
-        group4.extend(self.supcon_proj.parameters())
-        groups.append(group4)
+        head_params = [
+            p for name, p in self.named_parameters()
+            if p.requires_grad
+            and not name.startswith("image_encoder.")
+            and not name.startswith("text_encoder.bert.")
+        ]
+        groups.append({
+            "name": "head",
+            "params": head_params,
+            "decay_exponent": 0,
+            "image_encoder": False,
+        })
 
         return groups
 

@@ -9,6 +9,20 @@ from typing import Optional, List, Tuple
 from pathlib import Path
 
 
+# Image preprocessing modes (see src/models/dataset.py:build_image_transform).
+# "resize" keeps the whole radiograph; "center_crop" crops target_size pixels
+# from the native-resolution image and is kept only to reproduce models
+# trained before resize became the default.
+IMAGE_MODES = ("resize", "center_crop")
+# Checkpoints saved before image_mode existed were trained with center crops.
+LEGACY_IMAGE_MODE = "center_crop"
+
+# Must match the tokenizer used in preprocessing
+# (src/config/settings.py: PreprocessingConfig.tokenizer_model); token ids are
+# only meaningful to the model whose vocabulary produced them.
+DEFAULT_TEXT_MODEL = "emilyalsentzer/Bio_ClinicalBERT"
+
+
 @dataclass
 class MAEConfig:
     """
@@ -52,8 +66,13 @@ class MAEConfig:
     # Loss
     norm_pix_loss: bool = True
 
+    # Stability
+    grad_clip: float = 1.0
+    max_consecutive_skips: int = 50  # fail after this many skipped batches in a row
+
     # Data augmentation (moderate for medical)
-    crop_scale: Tuple[float, float] = (0.5, 1.0)
+    image_mode: str = "resize"  # see IMAGE_MODES
+    crop_scale: Tuple[float, float] = (0.5, 1.0)  # RandomResizedCrop scale ("resize" mode)
     horizontal_flip: bool = True
     rotation_degrees: int = 15
     gaussian_blur: bool = True
@@ -147,11 +166,6 @@ class TrainingConfig:
     # Reproducibility
     seed: int = 42
 
-    def __post_init__(self):
-        """Create output directories."""
-        self.output_dir.mkdir(parents=True, exist_ok=True)
-        self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
-
 
 # Preset configurations
 def get_debug_config() -> TrainingConfig:
@@ -221,11 +235,13 @@ class ClassifierConfig:
     # NOTE: struct_input_dim is overridden at runtime from
     # len(MultimodalClassificationDataset.STRUCTURED_FEATURES) to stay in
     # sync with any changes to the feature list.
-    struct_input_dim: int = 44
+    struct_input_dim: int = 43
     struct_hidden_dim: int = 256
     contrastive_dim: int = 128
     num_labels: int = 12
     img_size: int = 224
+    image_mode: str = "resize"  # see IMAGE_MODES
+    text_model_name: str = DEFAULT_TEXT_MODEL
 
     # Training
     epochs: int = 50
@@ -235,7 +251,14 @@ class ClassifierConfig:
     weight_decay: float = 0.05
     warmup_epochs: int = 5
     freeze_mae_epochs: int = 5
-    lr_decay: float = 0.9
+    # LR warmup for the MAE encoder once it unfreezes (it starts with empty
+    # Adam state, so its first updates would otherwise be full-LR sized)
+    unfreeze_warmup_epochs: int = 1
+    lr_decay: float = 0.9  # per-block layer-wise LR decay for the MAE encoder
+
+    # Stability
+    grad_clip: float = 1.0
+    max_consecutive_skips: int = 50  # fail after this many skipped batches in a row
 
     # Loss weights
     cls_weight: float = 1.0
@@ -253,3 +276,55 @@ class ClassifierConfig:
 
     # Mixed precision
     mixed_precision: bool = True
+
+
+def _default_device() -> str:
+    import torch
+    return "cuda" if torch.cuda.is_available() else "cpu"
+
+
+@dataclass
+class ClassifierTrainingConfig:
+    """Full configuration for train_classifier.py (model + paths + hardware)."""
+
+    classifier: ClassifierConfig = field(default_factory=ClassifierConfig)
+
+    # Paths
+    train_dir: Optional[Path] = None
+    val_dir: Optional[Path] = None
+    chexpert_csv: Optional[Path] = None
+    mae_checkpoint: Optional[Path] = None
+    output_dir: Path = Path("output/models")
+    checkpoint_dir: Path = Path("output/checkpoints")
+
+    # Hardware
+    device: str = field(default_factory=_default_device)
+    seed: int = 42
+
+
+def get_classifier_config(preset: str = "base") -> ClassifierTrainingConfig:
+    """
+    Classifier training presets.
+
+    - debug: 2 epochs, tiny batches, MAE kept frozen
+    - fast: 10 epochs for development
+    - base: full training (ClassifierConfig defaults)
+    """
+    config = ClassifierTrainingConfig()
+    c = config.classifier
+    if preset == "debug":
+        c.epochs = 2
+        c.batch_size = 4
+        c.num_workers = 0
+        c.eval_interval = 1
+        c.save_interval = 1
+        c.warmup_epochs = 1
+        c.freeze_mae_epochs = 100  # Keep MAE frozen to avoid OOM
+    elif preset == "fast":
+        c.epochs = 10
+        c.batch_size = 16
+        c.warmup_epochs = 2
+        c.freeze_mae_epochs = 2
+    elif preset != "base":
+        raise ValueError(f"Unknown classifier preset: {preset!r}")
+    return config

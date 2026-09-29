@@ -27,6 +27,32 @@ from ..datasets import MIMICCXRLoader
 
 logger = logging.getLogger(__name__)
 
+# Frontal views in order of preference
+FRONTAL_VIEWS = ("PA", "AP")
+
+
+def select_frontal_dicoms(metadata: pd.DataFrame) -> dict[int, str]:
+    """
+    Map study_id -> dicom_id of the study's frontal image (PA preferred over AP).
+
+    Uses ViewPosition from mimic-cxr-2.0.0-metadata.csv.gz. MIMIC-CXR-JPG file
+    names are dicom_ids (lowercase hex), so the view cannot be read from them.
+    Ties are broken by dicom_id so the choice is deterministic.
+
+    Args:
+        metadata: DataFrame with study_id, dicom_id, ViewPosition columns
+
+    Returns:
+        Mapping for studies that have at least one frontal image
+    """
+    views = metadata["ViewPosition"].astype(str)
+    frontal = metadata.loc[views.isin(FRONTAL_VIEWS), ["study_id", "dicom_id"]].copy()
+    frontal["rank"] = views[views.isin(FRONTAL_VIEWS)].map(
+        {view: i for i, view in enumerate(FRONTAL_VIEWS)}
+    )
+    frontal = frontal.sort_values(["study_id", "rank", "dicom_id"]).drop_duplicates("study_id")
+    return dict(zip(frontal["study_id"].astype(int), frontal["dicom_id"].astype(str)))
+
 
 def normalize_image(
     img: np.ndarray,
@@ -119,17 +145,17 @@ def _process_batch_worker(args: tuple) -> list[dict]:
             / f"s{study_id}"
         )
 
-        # Find frontal view (PA preferred over AP)
+        # Frontal image chosen from the CXR metadata (see select_frontal_dicoms)
         image_path = None
-        for view in ["PA", "AP"]:
-            candidates = list(study_dir.glob(f"*{view}*.jpg")) if study_dir.exists() else []
-            if candidates:
-                image_path = candidates[0]
-                break
+        dicom_id = row.get("dicom_id")
+        if dicom_id:
+            candidate = study_dir / f"{dicom_id}.jpg"
+            if candidate.exists():
+                image_path = candidate
 
-        # Fall back to any image
+        # Fall back to the first image (view unknown)
         if image_path is None and study_dir.exists():
-            images = list(study_dir.glob("*.jpg"))
+            images = sorted(study_dir.glob("*.jpg"))
             if images:
                 image_path = images[0]
 
@@ -176,6 +202,15 @@ class ImagePreprocessor:
         self.settings = settings or get_settings()
         self.config = self.settings.preprocessing
 
+    def _frontal_dicoms(self, study_ids: set[int]) -> dict[int, str]:
+        """Frontal dicom_id per study from the CXR metadata ({} if unavailable)."""
+        metadata_path = self.settings.paths.cxr_metadata
+        if not Path(metadata_path).exists():
+            logger.warning(f"CXR metadata not found ({metadata_path}); cannot select frontal views")
+            return {}
+        metadata = MIMICCXRLoader(self.settings.paths).metadata
+        return select_frontal_dicoms(metadata[metadata["study_id"].isin(study_ids)])
+
     def process_cohort(
         self,
         cohort: pd.DataFrame,
@@ -204,6 +239,15 @@ class ImagePreprocessor:
 
         # Prepare data for parallel processing
         cohort_data = cohort[["subject_id", "study_id"]].to_dict("records")
+        frontal_dicoms = self._frontal_dicoms(set(cohort["study_id"].astype(int)))
+        for row in cohort_data:
+            row["dicom_id"] = frontal_dicoms.get(int(row["study_id"]))
+        no_frontal = sum(row["dicom_id"] is None for row in cohort_data)
+        if no_frontal:
+            logger.warning(
+                f"{no_frontal:,} studies have no PA/AP image in the CXR metadata; "
+                f"using the first image in the study directory (may be lateral)"
+            )
 
         # Split into batches
         batches = [
