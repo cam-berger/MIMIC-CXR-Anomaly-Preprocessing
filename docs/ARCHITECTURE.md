@@ -1504,8 +1504,10 @@ The December 2024 safeguards were replaced with a fix at the source; see
 
 **Caveat on these results**: they predate fixes to the text tokenizer, the
 cross-attention fusion, structured-feature normalization and the image crop.
-Per-class AUROCs for classes with >95% positive rates rest on very few
-negatives (e.g. 2 for Pleural_Effusion). See
+In the per-class table above, the last four names are shifted by one
+(No_Finding is Pleural Effusion, Pleural_Effusion is Pleural Other,
+Pleural_Other is Pneumonia, Pneumonia is Pneumothorax), and four classes'
+AUROCs rest on 2-23 negatives (e.g. 2 for Pleural Other). See
 [NEXT_ITERATION_PLAN.md](NEXT_ITERATION_PLAN.md).
 
 ---

@@ -25,29 +25,49 @@ review means for the December 2024 result, and what to do next.
 |-----------|--------------------------------------|
 | Image | MAE encoder **frozen** for all 50 epochs (RESULTS.md). The MAE was pretrained on ~20k normal studies, and training took a 1024×1024 **center crop of a ~3056×2544 image: ~13% of the radiograph**, without the costophrenic angles, apices and lateral fields. |
 | Text | Token ids from the Bio_ClinicalBERT tokenizer fed to PubMedBERT: every id mapped to an unrelated wordpiece. The text branch read noise. |
-| Leakage (latent) | The "leak-free" text contained ED and hospital **discharge ICD codes** (e.g. 486 = pneumonia), procedures and disposition. The scrambled tokens happened to neutralize this. With the tokenizer fixed, the same text would have leaked labels (both fixed now). |
+| Leakage | The "leak-free" text contained ED and hospital **discharge ICD codes** (e.g. 486 = pneumonia), procedures and disposition, and labs included tests drawn up to 24 h *after* the study. The tokenizer mismatch scrambled the text's meaning, but it is a deterministic substitution, so a frozen encoder still produced study-specific embeddings: whether the trained layers exploited the codes is unknown without an ablation. The post-study labs were fed directly. Both are fixed now. |
 | Fusion | Cross-attention over single pooled vectors is a linear map; ~2.4M of its 5.9M parameters never trained. |
 | Structured | Raw values: NT-proBNP (up to 70,000) overflowed fp16, so batches were skipped, and it dominated the embedding. "Procalcitonin" was total protein. Censored results were missing. Labs up to 24 h *after* the study were included. |
 | Losses | `text_clip_proj` was never in the optimizer (a random projection) and the CLIP temperature never trained. The CLIP loss aligns the *fused image+text* embedding with the text embedding, so it can be solved through the text path (still true; see E4). |
 | Evaluation | A random 85/15 subject-level split, with **no test set**; the best epoch was selected on the same validation set that is reported. Blank CheXpert labels are masked rather than treated as negative, which, in the abnormal-only cohort, gives extreme positive rates. |
 
-The per-class numbers show the evaluation problem directly (RESULTS.md):
+The per-class table in RESULTS.md has **the last four class names shifted by
+one**. The model's outputs are `PATHOLOGY_LABELS` (… Lung Opacity, Pleural
+Effusion, Pleural Other, Pneumonia, Pneumothorax). The report's names are the
+first 12 CheXpert labels in alphabetical order, which puts "No Finding"
+before "Pleural Effusion" and drops "Pneumothorax". The label counts confirm
+it against MIMIC-CXR's published label statistics (Table 2 of
+[arXiv:1901.07042](https://arxiv.org/abs/1901.07042)):
 
-- **Pleural Effusion: AUROC 0.326 from 71 labeled validation studies with 2
-  negatives.** An AUROC computed from 2 negatives is noise, not a finding.
-  (It is still suggestive that the class most dependent on the costophrenic
-  angles did worst under a center crop that removes them.)
-- Atelectasis has 23 negatives and Lung Opacity about 42. Five of the 12
-  classes are at least 91% positive in validation.
+| Name in RESULTS.md | Its validation counts | Actually | Why |
+|--------------------|-----------------------|----------|-----|
+| No_Finding | 1,777 labeled, 25% negative | **Pleural Effusion** | The CheXpert labeler never labels No Finding negative |
+| Pleural_Effusion | 71 labeled (1.4% of studies), 97% positive | **Pleural Other** | MIMIC: effusion is labeled in 35% of studies, Pleural Other in 1.0% (94% positive) |
+| Pleural_Other | 987 labeled, 61% positive | **Pneumonia** | Matches pneumonia's labeling profile |
+| Pneumonia | 730 labeled, 24% positive | **Pneumothorax** | Matches pneumothorax's (mostly explicit negatives) |
+
+So Pleural Effusion scored **0.821**; the 0.326 is Pleural Other, from 2
+negative studies. (An earlier version of this plan read the table at face
+value and blamed the center crop for the effusion result. That was wrong.)
+To confirm in a minute: check which label list the evaluation script used
+for names.
+
+What the 12 numbers mean once grouped by how measurable they are:
+
+- **8 classes have ≥30 negatives in validation** (Lung Opacity, Pleural
+  Effusion, Cardiomegaly, Edema, Pneumonia, Pneumothorax, Consolidation,
+  Enlarged Cardiomediastinum). Their mean AUROC is **0.792**.
+- **4 classes have 2-23 negatives** (Atelectasis 23, Fracture 20, Lung Lesion
+  16, Pleural Other 2). Their mean is 0.520, which is noise under the masking
+  label policy. They pull the macro down to 0.701.
 - **Macro AUPRC 0.899 mostly reflects prevalence.** AUPRC's chance level
-  equals the positive rate, so 0.95+ is chance for these classes.
-- The per-class table lists `No_Finding`, which the 12-label classifier does
-  not predict. Confirm which model and evaluation script produced that table.
+  equals the positive rate, so 0.95+ is chance for the >90%-positive classes.
 
-**Reading of 0.701:** CLS features from a frozen MAE looking at the central
-13% of the image, plus an MLP on raw labs, scored with an optimistic
-protocol. It is not evidence for or against multimodal fusion or MAE
-pretraining.
+**Reading of 0.701:** about 0.79 on the measurable classes, from CLS features
+of a frozen MAE looking at the central 13% of the image, plus labs that
+included post-study tests, possibly helped by discharge codes in the text,
+and selected on the reported set. That bar may be optimistic, and it says
+nothing for or against multimodal fusion or MAE pretraining.
 
 ## 2. Should you fine-tune a pretrained vision model?
 
