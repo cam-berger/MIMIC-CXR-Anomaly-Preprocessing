@@ -2,6 +2,10 @@
 
 This document provides guidance for AI assistants working with the MIMIC-CXR Anomaly Detection Pipeline codebase.
 
+## v2 (in progress on branch `v2`)
+
+v2 tests modern pretrained chest X-ray models (RAD-DINO, MedSigLIP, DINOv2) on the same 12-class task: zero-shot, frozen embeddings with linear probes, then one GPU fine-tune. Image-only, with a fixed evaluation protocol. **Read `docs/V2_PLAN.md` first**: it defines the task, splits, metrics, milestones (M0-M4), decision gates and the results log. v2 code goes in a standalone `v2/` package with tests in `tests/v2/`; it does not modify the v1 pipeline described below. The per-class names in `docs/RESULTS.md` are shifted for the last four classes (see `docs/V2_PLAN.md` §2).
+
 ## Project Overview
 
 This is a **medical imaging pipeline** for chest X-ray anomaly detection using multimodal deep learning. The pipeline processes MIMIC datasets (images, labs, vitals, reports) and trains models to detect pathologies in chest X-rays.
