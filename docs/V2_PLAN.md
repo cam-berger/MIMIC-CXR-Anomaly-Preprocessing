@@ -1,6 +1,6 @@
 # v2 Plan: Modern Foundation Models for CheXpert Classification
 
-**Status:** draft to iterate on · **Branch:** `v2` (from `main`) · **Started:** 2026-10-18
+**Status:** implemented in `v2/` (how to run: [`v2/README.md`](../v2/README.md)); next: M0 on your machine · **Branch:** `v2` (from `main`) · **Started:** 2026-10-18
 
 ## 1. Goal
 
@@ -46,11 +46,21 @@ secondary. The primary goal is a clean number we believe.
 
 | Item | Definition |
 |---|---|
-| Population | v1's abnormal cohort: the studies in `output/cohorts/anomalous_{train,val}.parquet` (~32.5k studies), de-duplicated by `study_id` |
+| Population | v1's abnormal cohort: the studies in `output/cohorts/anomalous_{train,val}.parquet` (~32.5k studies), de-duplicated by `study_id`. It is a non-random subset of abnormal studies (see below). |
 | Image | One frontal image per study: PA if present, else AP, from `ViewPosition` in `mimic-cxr-2.0.0-metadata.csv.gz` (ties: lowest `dicom_id`). Studies with no frontal image are dropped and counted. |
 | Inputs | The image only. Nothing recorded after the X-ray, ever. |
 | Labels | The 12 CheXpert pathologies, in v1 order: Atelectasis, Cardiomegaly, Consolidation, Edema, Enlarged Cardiomediastinum, Fracture, Lung Lesion, Lung Opacity, Pleural Effusion, Pleural Other, Pneumonia, Pneumothorax |
 | Label policy | `1` → positive; `0` or blank → negative; `-1` (uncertain) → ignored for that label |
+
+Why the v1 cohort is a non-random subset: v1's ED linking
+(`src/cohort/builder.py`, `_try_ed_linking`) drops every study of a patient
+with ED visits unless the X-ray falls within ±24 h of one. v1 also parses
+`StudyTime` with `str[:6]`. If the CSV stores times before 10:00 without
+their leading zero (it stores them as numbers), that parse fails, those
+studies get no datetime, and they are dropped too for patients with ED visits.
+The M0 audit reports how much of MIMIC-CXR's abnormal studies the cohort keeps
+and whether early-morning studies are under-represented, which settles it. We
+keep the cohort for comparability with v1; backlog item 1 replaces it.
 
 ### 3.1 Splits (all by patient, `subject_id`)
 
@@ -181,7 +191,7 @@ test sets.
 
 **Question:** what does a medical vision-language model know out of the box?
 
-1. Accept the MedSigLIP terms on Hugging Face and log in (`huggingface-cli login`).
+1. Accept the MedSigLIP terms on Hugging Face and log in (`hf auth login`).
 2. `python -m v2.zero_shot`: for each class, score =
    similarity(image, "<class>") − similarity(image, "no <class>"). Choose
    between 2-3 prompt templates on `val` only, never on a test set.
@@ -225,64 +235,83 @@ Otherwise the frozen probe is the baseline: simpler, and as good.
 
 **Question:** do pre-imaging vitals add anything to the image?
 
-1. Features: the image embedding (frozen or fine-tuned), plus age, sex, and
-   triage temperature, heart rate, respiratory rate, SpO2, blood pressure and
-   acuity, with missing-value indicators, from v1's `structured.parquet`.
-2. Only for studies whose ED arrival time is before the X-ray.
+1. Features: the image embedding (frozen by default; fine-tuned embeddings
+   were fit on the training studies, which would understate what vitals add),
+   plus age, sex, and triage temperature, heart rate, respiratory rate, SpO2,
+   blood pressure and acuity, with missing-value indicators. These come from
+   the triage columns of v1's cohort files, not `structured.parquet`, whose
+   aggregates include values recorded after the X-ray.
+2. Vitals count only when the ED arrival time is at or before the X-ray;
+   otherwise they are missing. All studies stay in, so both models are scored
+   on the same test studies.
 3. Fit a logistic regression and compare paired against image-only.
 
 **Done when:** the fusion report exists. Vitals are adopted only if the paired
 CI excludes 0.
 
-## 7. Code plan
+## 7. Code
 
 A standalone package, `v2/`, on this branch. It doesn't touch the v1 pipeline.
+How to run everything: [`v2/README.md`](../v2/README.md).
 
 ```
 v2/
-  common.py         # label list, label policy, split names, paths, seeds
-  prepare_data.py   # M0: manifest, resized images, audit
-  encoders.py       # model name -> loader, preprocessing, embed(images)
-  embed.py          # M1: embeddings -> .npz
+  common.py         # label list, label policy, splits, paths, devices, prediction files
+  prepare_data.py   # M0: manifest, resized images, audit (incl. RAD-DINO overlap, v1 cohort coverage)
+  data.py           # PyTorch dataset over the manifest's PNGs
+  encoders.py       # model name -> loader, preprocessing, embeddings (+ text for SigLIP)
+  embed.py          # M1: embeddings -> .npz (resumable)
   probe.py          # M1: per-class logistic regression -> predictions
   zero_shot.py      # M2
-  finetune.py       # M3: plain PyTorch loop, bf16, checkpoint every epoch
+  finetune.py       # M3: plain PyTorch loop, bf16, checkpoint every epoch, --resume
   fuse.py           # M4
-  evaluate.py       # metrics, bootstrap CIs, paired comparisons, reports
-  gpu/setup.sh      # GPU box: environment, tests, Hugging Face login
-  gpu/run.sh        # M3 runbook: smoke test, then stages with time limits
-tests/v2/           # CPU tests on synthetic data and tiny random models
+  evaluate.py       # metrics, bootstrap CIs, paired comparisons, reports, gates
+  doctor.py         # setup check for any machine
+  synth.py          # synthetic MIMIC-CXR-JPG tree with a planted signal (tests)
+  smoke.py          # end-to-end wiring check on synthetic data
+  scripts/setup.sh  # environment (laptop or GPU), tests, wiring check
+  scripts/run.sh    # stages with logs and time limits; `run.sh gpu` is the M3 runbook
+  requirements.txt  # transformers pinned (5.20.1)
+tests/v2/           # CPU tests on synthetic data and tiny random models; real-model tests opt-in
 ```
 
 Conventions:
 
 - Every experiment writes predictions in one format (`study_id`, `split`,
-  `class`, `score`, `run`). `evaluate.py` is the only place metrics are
-  computed, so every model is scored identically.
-- Every script has `--smoke`: a handful of synthetic studies, seconds on CPU.
-- Paths come from the existing `.env` (`MIMIC_CXR_JPG_PATH`, `OUTPUT_PATH`).
-- Library versions are pinned in `v2/requirements.txt` once the encoders load
-  (M0 includes a one-image load test for each).
+  `label`, `score`, `run`, plus a JSON sidecar). `evaluate.py` is the only
+  place metrics are computed, so every model is scored identically.
+- `embed` and `finetune` have `--smoke`: a handful of real studies, minutes on
+  CPU, to test a machine. `python -m v2.smoke` runs every stage on synthetic
+  data in about 30 s.
+- Paths come from the existing `.env` (`MIMIC_CXR_JPG_PATH`, `OUTPUT_PATH`, plus `COHORT_DIR`).
+- transformers is pinned in `v2/requirements.txt`: DINOv2's position-embedding
+  interpolation (any size other than 518 px) differs between 4.x and 5.x, so
+  embeddings depend on the version. Each embedding and prediction file records
+  the torch and transformers versions.
 
 Tests (all must pass before any GPU time):
 
 | Test | Checks |
 |---|---|
-| Manifest | Frontal selection (PA over AP, laterals never chosen); label policy; splits disjoint by patient; `test_clean` definition |
-| Encoders | Correct embedding shape on 2 fake images, using tiny randomly initialized models (no downloads) |
-| Probe | Recovers a planted signal in synthetic embeddings |
-| Evaluate | AUROC and CIs on toy data with a known answer; measurable-class rule; paired bootstrap |
-| Fine-tune smoke | 2 steps on 16 synthetic images: loss decreases, checkpoint written, predictions file valid |
-| Local rehearsal (you run it) | M0 → M1 → M3 `--smoke` on 200 real studies on your machine |
+| Manifest | Frontal selection (PA over AP, laterals never chosen); label policy; splits disjoint by patient; `test_clean` and `test_v1` definitions; drops counted; RAD-DINO overlap check; `--extend-test-clean` |
+| Encoders | Embedding shape and CLS + mean-patch definition with tiny random models (no downloads); transforms; SigLIP text side |
+| Probe | Recovers a planted signal; alignment of embeddings with studies |
+| Evaluate | AUROC against scikit-learn with ties; known answers; whole-patient bootstrap; CIs narrow with n; paired comparison; v1 vs v2 metric |
+| Fine-tune | Layer-wise lr decay and no-decay sets; schedule; masked loss; checkpoints, predictions and resume |
+| Wiring check | Every stage on synthetic data through the CLI; planted signal recovered (probe ~1.0, fine-tune > 0.7); misaligned embeddings fall to chance |
+| Real models (opt-in) | RAD-DINO and DINOv2 load fully; v2 preprocessing matches their image processors; SigLIP path with the real tokenizer |
+| Local rehearsal (you run it) | `prepare_data --limit 200`, then `run.sh smoke` on your machine |
 
 ## 8. GPU runbook (M3)
 
+Step-by-step commands: [`v2/README.md`](../v2/README.md) §3.
+
 1. Rent 1× A100 or H100 (40-80 GB) with CUDA 12 (about $1.3-2.5/h).
-2. `gpu/setup.sh`: clone the `v2` branch, install, `huggingface-cli login`,
-   `pytest tests/v2`.
-3. Upload `output/v2/manifest.parquet` and `output/v2/images/` (5-8 GB,
-   10-20 min).
-4. `gpu/run.sh`:
+2. `bash v2/scripts/setup.sh`: venv (keeps the provider's CUDA torch), install,
+   `pytest tests/v2`, wiring check. Then `hf auth login` for MedSigLIP.
+3. Upload `output/v2/manifest.parquet`, `measurable_classes.json` and
+   `images/` (5-8 GB, 10-20 min).
+4. `bash v2/scripts/run.sh gpu`:
    1. a 5-minute smoke test on real data (aborts on any failure);
    2. full-resolution embeddings for M1 and M2;
    3. two RAD-DINO fine-tunes (2 seeds);
@@ -324,7 +353,7 @@ Ordered by expected value per unit of cost:
 
 ## 11. Prerequisites
 
-- [ ] A machine with MIMIC-CXR-JPG, the v1 cohort files, Python 3.10-3.11,
+- [ ] A machine with MIMIC-CXR-JPG, the v1 cohort files, Python 3.10+,
       8+ CPU cores and ~10 GB free disk
 - [ ] A Hugging Face account, with the MedSigLIP terms accepted (for M2)
 - [ ] A GPU provider account (for M3)

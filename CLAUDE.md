@@ -4,7 +4,9 @@ This document provides guidance for AI assistants working with the MIMIC-CXR Ano
 
 ## v2 (in progress on branch `v2`)
 
-v2 tests modern pretrained chest X-ray models (RAD-DINO, MedSigLIP, DINOv2) on the same 12-class task: zero-shot, frozen embeddings with linear probes, then one GPU fine-tune. Image-only, with a fixed evaluation protocol. **Read `docs/V2_PLAN.md` first**: it defines the task, splits, metrics, milestones (M0-M4), decision gates and the results log. v2 code goes in a standalone `v2/` package with tests in `tests/v2/`; it does not modify the v1 pipeline described below. The per-class names in `docs/RESULTS.md` are shifted for the last four classes (see `docs/V2_PLAN.md` §2).
+v2 tests modern pretrained chest X-ray models (RAD-DINO, MedSigLIP, DINOv2) on the same 12-class task: zero-shot, frozen embeddings with linear probes, then one GPU fine-tune. Image-only, with a fixed evaluation protocol. **Read `docs/V2_PLAN.md` first**: it defines the task, splits, metrics, milestones (M0-M4), decision gates and the results log. **`v2/README.md`** explains how to run it (setup, `v2/scripts/run.sh` stages, the GPU session). v2 code lives in the standalone `v2/` package with tests in `tests/v2/`; it does not modify the v1 pipeline described below. The per-class names in `docs/RESULTS.md` are shifted for the last four classes (see `docs/V2_PLAN.md` §2).
+
+v2 rules: metrics are computed only in `v2/evaluate.py`, from the one prediction format written by `v2.common.write_predictions`; label policy and splits live in `v2/common.py` and `v2/prepare_data.py`; model choices use `val`, never a test set. Before changing anything, run `pytest tests/v2 -q` and `python -m v2.smoke` (synthetic end-to-end check with a planted signal, ~30 s). transformers is pinned in `v2/requirements.txt` because DINOv2 embeddings at non-native sizes differ between versions.
 
 ## Project Overview
 
