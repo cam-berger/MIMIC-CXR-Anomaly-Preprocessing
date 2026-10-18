@@ -555,8 +555,8 @@ def build_manifest(args: argparse.Namespace, root: Path) -> tuple[pd.DataFrame, 
 def main(argv: Optional[list[str]] = None) -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--mimic-cxr-jpg", help="MIMIC-CXR-JPG root (default: MIMIC_CXR_JPG_PATH)")
-    parser.add_argument("--cohort-dir", help="v1 cohort dir with anomalous_{train,val}.parquet "
-                        "(omit to use every abnormal study; test_v1 is then empty)")
+    parser.add_argument("--cohort-dir", help="v1 cohort dir with anomalous_{train,val}.parquet (default: "
+                        "COHORT_DIR; without one, every abnormal study is used and test_v1 is empty)")
     parser.add_argument("--out", default=None, help="Output dir (default: $OUTPUT_PATH/v2 or output/v2)")
     parser.add_argument("--image-size", type=int, default=518, help="Shorter side of the saved PNGs")
     parser.add_argument("--workers", type=int, default=min(8, os.cpu_count() or 1))
@@ -574,7 +574,8 @@ def main(argv: Optional[list[str]] = None) -> None:
     args = parser.parse_args(argv)
     setup_logging(args.verbose)
 
-    root = resolve_mimic_root(args.mimic_cxr_jpg)
+    root = resolve_mimic_root(args.mimic_cxr_jpg)  # also loads .env
+    args.cohort_dir = args.cohort_dir or os.environ.get("COHORT_DIR") or None
     out_dir = Path(args.out) if args.out else default_out_dir()
     out_dir.mkdir(parents=True, exist_ok=True)
     if not (root / "files").is_dir():

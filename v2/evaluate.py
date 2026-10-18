@@ -356,26 +356,40 @@ def summarize(out_dir: Path, n_boot: int = N_BOOT, runs: Optional[list[str]] = N
                  if rep["meta"].get("kind") == kind and np.isfinite(s)]
         return max(cands)[1] if cands else None
 
+    def missing(kind: str) -> str:
+        if any(rep["meta"].get("kind") == kind for rep in reports.values()):
+            return f"n/a: val has too few positives/negatives to pick a {kind} run"
+        return f"no {kind} runs yet"
+
     lines += ["", "## Gates", ""]
     best_probe = best("probe")
     if best_probe:
         rep = reports[best_probe]
         res = _get(rep, "test_v1", "v1") or _get(rep, "test_clean", "v2")
         where = f"{res['test_set']} ({res['metric']} metric)"
-        verdict = "PASS: rent the GPU for M3" if res["macro_auroc"] >= G1_THRESHOLD else "FAIL: study per-class results first"
+        if not np.isfinite(res["macro_auroc"]):
+            verdict = "n/a: no measurable classes (rehearsal data?)"
+        elif res["macro_auroc"] >= G1_THRESHOLD:
+            verdict = "PASS: rent the GPU for M3"
+        else:
+            verdict = "FAIL: study per-class results first"
         lines.append(f"- **G1** (best probe by val: `{best_probe}`): {fmt(res['macro_auroc'])} on {where} "
                      f"vs {G1_THRESHOLD} -> **{verdict}**")
     else:
-        lines.append("- **G1**: no probe runs yet")
+        lines.append(f"- **G1**: {missing('probe')}")
     best_ft = best("finetune")
     if best_ft and best_probe:
         cmp = compare_runs(out_dir, best_ft, best_probe, "test_clean", "v2", n_boot)
-        verdict = ("PASS: the fine-tuned model is the v2 baseline" if cmp["a_better"]
-                   else "FAIL: the frozen probe stays the baseline")
+        if not np.isfinite(cmp["diff"]):
+            verdict = "n/a: no measurable classes (rehearsal data?)"
+        elif cmp["a_better"]:
+            verdict = "PASS: the fine-tuned model is the v2 baseline"
+        else:
+            verdict = "FAIL: the frozen probe stays the baseline"
         lines.append(f"- **G2** (`{best_ft}` - `{best_probe}` on test_clean): "
                      f"{fmt_ci(cmp['diff'], cmp['diff_ci'])} -> **{verdict}**")
     else:
-        lines.append("- **G2**: needs a fine-tune run and a probe run")
+        lines.append(f"- **G2**: {missing('finetune') if not best_ft else missing('probe')}")
 
     lines += ["", "## Rows for the results log (docs/V2_PLAN.md §9)", "", "```"]
     today = date.today().isoformat()

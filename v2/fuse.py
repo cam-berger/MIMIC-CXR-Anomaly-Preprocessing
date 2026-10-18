@@ -90,7 +90,7 @@ def impute_with_indicators(feats: pd.DataFrame, train_mask: np.ndarray) -> np.nd
 def main(argv: Optional[list[str]] = None) -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--embeddings", required=True, help="Image embeddings (.npz from v2.embed or v2.finetune)")
-    parser.add_argument("--cohort-dir", required=True, help="v1 cohort dir with anomalous_{train,val}.parquet")
+    parser.add_argument("--cohort-dir", help="v1 cohort dir with anomalous_{train,val}.parquet (default: COHORT_DIR)")
     parser.add_argument("--out", default=None, help="v2 output dir (default: $OUTPUT_PATH/v2 or output/v2)")
     parser.add_argument("--run", help="Run-name prefix (default: {embeddings stem})")
     parser.add_argument("--jobs", type=int, default=min(12, os.cpu_count() or 1))
@@ -98,7 +98,10 @@ def main(argv: Optional[list[str]] = None) -> None:
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args(argv)
     setup_logging(args.verbose)
-    out_dir = Path(args.out) if args.out else default_out_dir()
+    out_dir = Path(args.out) if args.out else default_out_dir()  # also loads .env
+    args.cohort_dir = args.cohort_dir or os.environ.get("COHORT_DIR")
+    if not args.cohort_dir:
+        raise SystemExit("M4 needs v1's cohort files: pass --cohort-dir or set COHORT_DIR")
 
     manifest = load_manifest(out_dir)
     ids, emb, meta = load_npz(Path(args.embeddings))
