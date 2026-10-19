@@ -80,8 +80,9 @@ def read_mimic_tables(root: Path) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFr
 
 
 def study_datetime(date: pd.Series, time: pd.Series) -> pd.Series:
-    """StudyDate (YYYYMMDD) + StudyTime (HHMMSS.fff stored as a float, leading zeros lost)."""
-    hhmmss = pd.to_numeric(time, errors="coerce").fillna(0).astype(np.int64).astype(str).str.zfill(6)
+    """StudyDate (YYYYMMDD) + StudyTime (HHMMSS.fff stored as a number, so leading zeros are lost)."""
+    t = pd.to_numeric(time, errors="coerce")
+    hhmmss = t.dropna().astype(np.int64).astype(str).str.zfill(6).reindex(t.index)  # missing time -> NaT
     day = pd.to_numeric(date, errors="coerce").astype("Int64").astype(str)
     return pd.to_datetime(day + hhmmss, format="%Y%m%d%H%M%S", errors="coerce")
 

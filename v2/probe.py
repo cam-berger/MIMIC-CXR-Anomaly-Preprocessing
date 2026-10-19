@@ -88,6 +88,8 @@ def _fit_label(label, X, y, m, Xv, yv, mv, Cs, max_iter) -> LabelFit:
             if best is None or (np.isfinite(a) and a > best_auc):
                 best, best_auc = (C, clf), (a if np.isfinite(a) else best_auc)
     note = "" if np.isfinite(best_auc) else f"val AUROC undefined: kept C={best[0]}"
+    if np.isfinite(best_auc) and len(Cs) > 1 and best[0] == max(Cs):
+        note = "best C is the largest tried: the grid may be too narrow"
     C, clf = best
     return LabelFit(label, C, scores, clf.coef_[0].astype(np.float64), float(clf.intercept_[0]), note)
 
@@ -143,6 +145,11 @@ def run_probe(out_dir: Path, emb_path: Path, run: Optional[str], Cs, n_jobs: int
     probe = fit_probe(X_tr, label_matrix(tr_rows), X_va, label_matrix(va_rows), Cs, n_jobs)
     for f in probe.fits:
         logger.info("  %-27s C=%-5s val AUROC by C: %s %s", f.label, f.C, f.val_auroc, f.note)
+    at_edge = sum(f.C == max(Cs) for f in probe.fits if f.C is not None)
+    if at_edge > len(probe.fits) // 2:
+        logger.warning("%d of %d labels chose the largest C (%s). The grid is selected on val only, so it is "
+                       "safe to widen: --Cs %s", at_edge, len(probe.fits), max(Cs),
+                       ",".join(str(c) for c in sorted({*Cs, max(Cs) * 10, max(Cs) * 100})))
 
     run = run or f"{emb_path.stem}_probe"
     rows = pd.concat([va_rows, te_rows], ignore_index=True)

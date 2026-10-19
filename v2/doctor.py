@@ -89,7 +89,7 @@ def check_device(r: Report) -> None:
         r.warn(f"CPU only ({os.cpu_count()} cores): fine for M0, M1 pilots at 224 px and M4; not for M3")
 
 
-def check_mimic(r: Report, root: Optional[Path], n_sample: int) -> None:
+def check_mimic(r: Report, root: Optional[Path], n_sample: int, cohort_dir: Optional[Path] = None) -> None:
     r.section("MIMIC-CXR-JPG")
     if root is None:
         r.warn("No --mimic-cxr-jpg and no MIMIC_CXR_JPG_PATH: skipped")
@@ -128,6 +128,16 @@ def check_mimic(r: Report, root: Optional[Path], n_sample: int) -> None:
 
     frontal = meta[meta["ViewPosition"].isin(["PA", "AP"])]
     r.ok(f"metadata: {len(meta):,} images, {len(frontal):,} frontal")
+    what = "frontal JPGs"
+    if cohort_dir is not None and (cohort_dir / "anomalous_train.parquet").exists():
+        # Sample what M0 will read: a partial download is fine if it covers the cohort.
+        studies = pd.concat([pd.read_parquet(cohort_dir / f"anomalous_{s}.parquet", columns=["study_id"])
+                             for s in ("train", "val") if (cohort_dir / f"anomalous_{s}.parquet").exists()])
+        frontal = frontal[frontal["study_id"].isin(studies["study_id"])]
+        what = "frontal JPGs of cohort studies"
+    if frontal.empty:
+        r.fail("no frontal images to sample (do the cohort's study_ids match this MIMIC-CXR-JPG?)")
+        return
     sample = frontal.sample(n=min(n_sample, len(frontal)), random_state=0)
     t0, nbytes, bad = time.time(), 0, []
     for row in sample.itertuples(index=False):
@@ -140,9 +150,12 @@ def check_mimic(r: Report, root: Optional[Path], n_sample: int) -> None:
             bad.append(f"{path.name}: {type(exc).__name__}")
     elapsed = max(time.time() - t0, 1e-6)
     if bad:
-        r.fail(f"{len(bad)}/{len(sample)} sampled JPGs unreadable, e.g. {bad[:3]}")
+        share = len(bad) / len(sample)
+        msg = (f"{len(bad)}/{len(sample)} sampled {what} unreadable, e.g. {bad[:3]}. "
+               "Is the download complete? M0 drops missing images and counts them in the audit")
+        (r.fail if share >= 0.05 else r.warn)(msg)
     else:
-        r.ok(f"{len(sample)} sampled JPGs decode; {nbytes / elapsed / 1e6:.0f} MB/s, {len(sample) / elapsed:.1f} img/s")
+        r.ok(f"{len(sample)} sampled {what} decode; {nbytes / elapsed / 1e6:.0f} MB/s, {len(sample) / elapsed:.1f} img/s")
     if len(sample) and len(sample) / elapsed < 5:
         r.warn("Slow image reads: prepare_data reads ~30k JPGs once; expect it to take a while")
 
@@ -258,7 +271,7 @@ def main(argv: Optional[list[str]] = None) -> None:
     r = Report()
     check_packages(r)
     check_device(r)
-    check_mimic(r, Path(root).expanduser() if root else None, args.sample)
+    check_mimic(r, Path(root).expanduser() if root else None, args.sample, Path(cohort) if cohort else None)
     check_cohort(r, Path(cohort) if cohort else None)
     check_output(r, out_dir)
     check_hub(r, args.load_models, args.device)

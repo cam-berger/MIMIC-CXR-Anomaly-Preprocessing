@@ -45,9 +45,9 @@ them with v1's `python build_cohort.py --anomalous-only`.
 
 | Step | Command | Where | Rough time |
 |---|---|---|---|
-| M0: data + audit | `bash v2/scripts/run.sh m0` | laptop with the drive | 15-45 min (reads ~30k JPGs once) |
+| M0: data + audit | `bash v2/scripts/run.sh m0` | laptop with the drive | 10-30 min: ~30k JPGs read once (~45 GB; the drive's speed decides), ~70 ms of CPU each |
 | Check the audit | open `output/v2/audit.md`; **G0** needs ≥6 measurable classes in `test_clean` | | |
-| M1 pilot | `MAX_TRAIN=10000 bash v2/scripts/run.sh m1 eval` | laptop, 224 px | ~20-40 min on an Apple GPU, 1-2 h on an 8-core CPU |
+| M1 pilot | `MAX_TRAIN=10000 bash v2/scripts/run.sh m1 eval` | laptop, 224 px | embeddings ~20-40 min on an Apple GPU, 1-2 h on an 8-core CPU; probes ~1 min; evaluation ~20 s per run |
 | Check **G1** | `output/v2/reports/summary.md` | | |
 | M2 (optional) | `bash v2/scripts/run.sh m2 eval` (accept the MedSigLIP terms first, see §6) | laptop or GPU | like M1 |
 | M3 | `bash v2/scripts/run.sh gpu` (§3) | rented GPU | 2-3 h, about $5-10 |
@@ -206,7 +206,8 @@ Not verified here:
 
 | Symptom | Fix |
 |---|---|
-| `doctor` reports slow JPG reads | Expected on USB drives; M0 reads each JPG once, later steps use the PNGs |
+| `doctor` reports slow JPG reads | Expected on USB drives; M0 reads each JPG once, later steps use the PNGs. On a spinning disk, `WORKERS=2` can be faster than many parallel readers |
+| `doctor` says sampled cohort JPGs are missing | The download is incomplete for the cohort's studies; M0 drops and counts them, but more than a few percent changes the population |
 | CUDA out of memory in M3 | `FT_BATCH=8 FT_ACCUM=4` (same effective batch), or `GRAD_CKPT=1` |
 | An op is not implemented on MPS | `export PYTORCH_ENABLE_MPS_FALLBACK=1` (`run.sh` sets it) |
 | DataLoader worker errors on macOS | `WORKERS=0` |

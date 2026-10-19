@@ -35,9 +35,12 @@ def test_select_frontal_prefers_pa_then_lowest_dicom_and_never_lateral():
 
 
 def test_study_datetime_restores_leading_zeros():
-    dt = study_datetime(pd.Series([21500101, 21500102]), pd.Series([5014.531, 213014.0]))
+    dt = study_datetime(pd.Series([21500101, 21500102, 21500103, 21500104]),
+                        pd.Series([5014.531, 213014.0, np.nan, 84512.937]))
     assert dt[0] == pd.Timestamp("2150-01-01 00:50:14")
     assert dt[1] == pd.Timestamp("2150-01-02 21:30:14")
+    assert pd.isna(dt[2])  # a missing time is not midnight
+    assert dt[3] == pd.Timestamp("2150-01-04 08:45:12")
 
 
 def test_manifest_splits_are_patient_disjoint_and_follow_the_definitions(prepared, synth):

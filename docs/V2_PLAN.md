@@ -58,9 +58,14 @@ with ED visits unless the X-ray falls within ±24 h of one. v1 also parses
 `StudyTime` with `str[:6]`. If the CSV stores times before 10:00 without
 their leading zero (it stores them as numbers), that parse fails, those
 studies get no datetime, and they are dropped too for patients with ED visits.
-The M0 audit reports how much of MIMIC-CXR's abnormal studies the cohort keeps
-and whether early-morning studies are under-represented, which settles it. We
-keep the cohort for comparability with v1; backlog item 1 replaces it.
+Public code that parses the same file left-pads `StudyTime` to six digits
+([AEHRC CXRMate-ED, `prepare_dataset.py`](https://huggingface.co/aehrc/cxrmate-ed/blob/80559a6d52f801981e06dc8ee087a7a9230fecfd/prepare_dataset.py)),
+which suggests it does. On times in that format, v1's parser returns no
+datetime for 100% of studies before 10:00 (about 40% of all studies), while
+v2's parser handles them. The M0 audit reports how much of MIMIC-CXR's abnormal
+studies the cohort keeps and whether early-morning studies are
+under-represented, which settles it. We keep the cohort for comparability with
+v1; backlog item 1 replaces it.
 
 ### 3.1 Splits (all by patient, `subject_id`)
 
