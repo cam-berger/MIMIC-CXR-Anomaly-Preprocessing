@@ -233,5 +233,6 @@ content out of the conversation:
 | An op is not implemented on MPS | v2 sets `PYTORCH_ENABLE_MPS_FALLBACK=1` so such ops run on the CPU; if you import v2 after torch in your own code, export it yourself |
 | DataLoader worker errors on macOS | `WORKERS=0` |
 | "bad steps ... aborting" in M3 | Non-finite loss or gradients in over 1% of steps; check the data and learning rate before spending more GPU time |
+| `run.sh` stops with "transformers X, but v2 pins Y" | It found a Python other than the project venv. It uses `.venv-v2/bin/python` when that exists; run `bash v2/scripts/setup.sh`, or set `PYTHON=` to the venv's python. `ALLOW_UNPINNED=1` overrides the check, but embeddings at 224 px then differ from pinned runs |
 | `measurable classes changed` warning | `prepare_data` was re-run with different data; the lists should stay frozen after M0 |
 | M2 skipped | No MedSigLIP access, see §6 |

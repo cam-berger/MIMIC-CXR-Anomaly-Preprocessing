@@ -21,7 +21,7 @@ def test_scripts_parse(name):
 
 def _run(args, tmp_path):
     env = {k: v for k, v in os.environ.items() if k != "MIMIC_CXR_JPG_PATH"}
-    env.update({"PYTHON": sys.executable, "V2_OUT": str(tmp_path / "v2")})
+    env.update({"PYTHON": sys.executable, "V2_OUT": str(tmp_path / "v2"), "ALLOW_UNPINNED": "1"})
     return subprocess.run(["bash", str(SCRIPTS / "run.sh"), *args], cwd=ROOT, env=env,
                           capture_output=True, text=True, timeout=120)
 
@@ -42,3 +42,18 @@ def test_m0_requires_the_data_path(tmp_path):
         pytest.skip("a local .env sets MIMIC_CXR_JPG_PATH")
     res = _run(["m0"], tmp_path)
     assert res.returncode != 0 and "MIMIC_CXR_JPG_PATH" in res.stderr
+
+
+def test_unpinned_transformers_is_refused(tmp_path):
+    import transformers
+
+    env = {k: v for k, v in os.environ.items() if k not in ("MIMIC_CXR_JPG_PATH", "ALLOW_UNPINNED")}
+    env.update({"PYTHON": sys.executable, "V2_OUT": str(tmp_path / "v2")})
+    pinned = next(line.split("==")[1].split()[0] for line in (ROOT / "v2" / "requirements.txt").read_text().splitlines()
+                  if line.startswith("transformers=="))
+    res = subprocess.run(["bash", str(SCRIPTS / "run.sh"), "eval"], cwd=ROOT, env=env,
+                         capture_output=True, text=True, timeout=120)
+    if transformers.__version__ == pinned:
+        assert "v2 pins" not in res.stderr
+    else:
+        assert res.returncode == 1 and "v2 pins" in res.stderr

@@ -187,7 +187,9 @@ class PixelStatsEncoder(Encoder):
 
     def forward(self, pixel_values: torch.Tensor) -> torch.Tensor:
         g = pixel_values[:, :1]
-        cells = F.adaptive_avg_pool2d(g, (3, 4)).flatten(1)
+        # MPS can't adaptive-pool sizes that 3 or 4 don't divide (e.g. 40 px), and the MPS CPU fallback
+        # doesn't cover it, so pool on the CPU. Test-only encoder; the real encoders don't pool like this.
+        cells = F.adaptive_avg_pool2d(g.cpu(), (3, 4)).to(g.device).flatten(1)
         return torch.cat([cells, g.mean(dim=(1, 2, 3))[:, None], g.std(dim=(1, 2, 3))[:, None]], dim=1)
 
 

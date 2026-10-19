@@ -1,6 +1,6 @@
 # v2 Plan: Modern Foundation Models for CheXpert Classification
 
-**Status:** implemented in `v2/` (how to run: [`v2/README.md`](../v2/README.md)); next: M0 on your machine · **Branch:** `v2` (from `main`) · **Started:** 2026-10-18
+**Status:** M0 done 2026-10-19 (G0 PASS, §9); next: M1 · how to run: [`v2/README.md`](../v2/README.md) · **Branch:** `v2` (from `main`) · **Started:** 2026-10-18
 
 ## 1. Goal
 
@@ -62,10 +62,20 @@ Public code that parses the same file left-pads `StudyTime` to six digits
 ([AEHRC CXRMate-ED, `prepare_dataset.py`](https://huggingface.co/aehrc/cxrmate-ed/blob/80559a6d52f801981e06dc8ee087a7a9230fecfd/prepare_dataset.py)),
 which suggests it does. On times in that format, v1's parser returns no
 datetime for 100% of studies before 10:00 (about 40% of all studies), while
-v2's parser handles them. The M0 audit reports how much of MIMIC-CXR's abnormal
-studies the cohort keeps and whether early-morning studies are
-under-represented, which settles it. We keep the cohort for comparability with
-v1; backlog item 1 replaces it.
+v2's parser handles them.
+
+**Confirmed by the M0 audit (2026-10-19).** The cohort holds 32,498 of
+MIMIC-CXR's 138,707 abnormal studies (23.4%). Only 0.01% of its studies were
+acquired before 10:00, against 51.8% of the abnormal studies outside it.
+Nearly every MIMIC-CXR patient has ED visits, so v1's cohort is in effect
+"abnormal studies within ±24 h of an ED visit, acquired between 10:00 and
+midnight". Early-morning inpatient and ICU films are missing. Every v1 number,
+and every v2.0 number, describes that slice. The audit also confirmed that
+31.3% of v1's training images were non-frontal (v1 picked views by filename,
+which never matched).
+
+We keep the cohort for v2.0, which was fixed before any data was seen and is
+needed for the v1 comparison. Backlog item 1 replaces it.
 
 ### 3.1 Splits (all by patient, `subject_id`)
 
@@ -340,13 +350,17 @@ Add one row per run. Don't edit old rows; add new ones.
 | Date | Milestone | Commit | Run | Test set | Macro AUROC [95% CI] | Classes | Notes / decision |
 |---|---|---|---|---|---|---|---|
 | 2024-12 | v1 (reference) | 8166273 | v1 multimodal | `test_v1`, v1 metric | 0.792 (8 measurable); 0.701 (all 12) | 8 / 12 | Possibly optimistic (§2) |
+| 2026-10-19 | M0 | 0abc51b | audit | `test_clean` 870 studies / 341 patients; `test_v1` 4,860 / 2,947 | n/a | 9 (v2) / 8 (`test_v1`, v1 metric) | **G0 PASS.** RAD-DINO overlap with `test_clean`: 0 images, 0 patients. Splits patient-disjoint. 412 studies dropped (no frontal image), 0 unreadable. The v1-metric classes on `test_v1` are exactly v1's 8 (the other 4 have 2-23 explicit negatives, as in §2). Thin `test_clean` classes: Enlarged Cardiomediastinum 41, Lung Lesion 47 and Consolidation 60 positives, so expect wide CIs. v1 cohort bias confirmed (§3). |
 
 ## 10. Backlog (after v2.0, one at a time)
 
 Ordered by expected value per unit of cost:
 
-1. **More data:** train on all frontal MIMIC-CXR studies of train-split
-   patients, not just the v1 cohort (~6× more). Likely the biggest single gain.
+1. **More data, unbiased population:** train on all frontal MIMIC-CXR studies of
+   train-split patients, not just the v1 cohort (~4× more abnormal studies,
+   ~6× more studies in total). Likely the biggest single gain. It also removes
+   the cohort's time-of-day and ED-window selection (§3), and grows
+   `test_clean` beyond 870 studies.
 2. **Higher resolution** (RAD-DINO at 1024 px with interpolated position
    embeddings) for subtle findings such as pneumothorax and fracture.
 3. **Parameter-efficient fine-tuning** (LoRA) of MedSigLIP's image encoder.

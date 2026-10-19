@@ -29,13 +29,28 @@
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 
+# Check the arguments before doing anything slow.
+[ $# -gt 0 ] || { sed -n '2,30p' "$0"; exit 2; }
+stages=()
+for arg in "$@"; do
+  if [ "$arg" = gpu ]; then stages+=(smoke m1 m2 m3 eval); else stages+=("$arg"); fi
+done
+for stage in "${stages[@]}"; do
+  case "$stage" in
+    m0|smoke|m1|m2|m3|m4|eval) ;;
+    *) echo "Unknown stage: $stage (see the header of $0)" >&2; exit 2 ;;
+  esac
+done
+
 if [ -f .env ]; then
   set -a
   # shellcheck disable=SC1091
   . ./.env || echo "warning: could not read .env" >&2
   set +a
 fi
-PY=${PYTHON:-$(command -v python || command -v python3)}
+# Prefer the project venv, so an unactivated shell doesn't silently use another Python.
+if [ -z "${PYTHON:-}" ] && [ -x .venv-v2/bin/python ]; then PY=.venv-v2/bin/python
+else PY=${PYTHON:-$(command -v python || command -v python3)}; fi
 OUTPUT_PATH=${OUTPUT_PATH:-output}
 OUT=${V2_OUT:-$OUTPUT_PATH/v2}
 if [ -z "${COHORT_DIR:-}" ] && [ -f "$OUTPUT_PATH/cohorts/anomalous_train.parquet" ]; then
@@ -56,6 +71,14 @@ mkdir -p "$LOG_DIR"
 START=$(date +%s)
 TIMEOUT=$(command -v timeout || command -v gtimeout || true)
 echo "v2 run: device $DEVICE, size $SIZE, output $OUT, cohort ${COHORT_DIR:-none}, logs $LOG_DIR"
+PINNED=$(sed -n 's/^transformers==\([0-9.]*\).*/\1/p' v2/requirements.txt)
+FOUND=$("$PY" -c 'import transformers; print(transformers.__version__)' 2>/dev/null || echo none)
+echo "python $PY, transformers $FOUND"
+if [ "$FOUND" != "$PINNED" ]; then
+  echo "!!! transformers $FOUND, but v2 pins $PINNED: embeddings at non-native sizes depend on it." >&2
+  echo "!!! Run bash v2/scripts/setup.sh, or set PYTHON to the venv's python." >&2
+  [ "${ALLOW_UNPINNED:-0}" = 1 ] || exit 1
+fi
 
 run() {  # run [--hours H] NAME CMD...: logged and time-limited; any failure stops the script
   local hours=$STAGE_HOURS
@@ -140,15 +163,7 @@ stage_eval() {
   echo "Summary: $OUT/reports/summary.md"
 }
 
-[ $# -gt 0 ] || { sed -n '2,30p' "$0"; exit 2; }
-stages=()
-for arg in "$@"; do
-  if [ "$arg" = gpu ]; then stages+=(smoke m1 m2 m3 eval); else stages+=("$arg"); fi
-done
 for stage in "${stages[@]}"; do
-  case "$stage" in
-    m0|smoke|m1|m2|m3|m4|eval) "stage_$stage" ;;
-    *) echo "Unknown stage: $stage (see the header of $0)" >&2; exit 2 ;;
-  esac
+  "stage_$stage"
 done
 echo "Done in $(( ($(date +%s) - START) / 60 )) min."

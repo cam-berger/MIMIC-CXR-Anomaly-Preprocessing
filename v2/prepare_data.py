@@ -292,7 +292,7 @@ def v1_lateral_share(h5_path: Path, meta: pd.DataFrame) -> dict:
         h5_path = h5_path / "images.h5"
     views = meta.set_index("dicom_id")["ViewPosition"]
     counts: dict[str, int] = {}
-    with h5py.File(h5_path, "r") as f:
+    with h5py.File(h5_path, "r", locking=False) as f:  # read-only; NFS mounts may not support locks
         group = f["metadata"]
         for key in group:
             raw = group[key][()]
@@ -590,7 +590,7 @@ def main(argv: Optional[list[str]] = None) -> None:
         failures = write_images(manifest, root, out_dir, args.image_size, args.workers)
         if failures:
             bad = {Path(p).stem for p in failures}
-            # Record-level details go to a local file only, never to the console (see v2/README.md §10).
+            # Record-level details go to a local file only, never to the console (see v2/README.md §9).
             report = out_dir / "unreadable_images.csv"
             pd.DataFrame({"study_id": [Path(p).stem for p in failures], "error": list(failures.values())}).to_csv(
                 report, index=False)
