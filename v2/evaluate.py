@@ -46,6 +46,9 @@ G1_THRESHOLD = 0.77
 # (test set, label policy) pairs every run is evaluated on, headline first.
 EVAL_SETS = (("test_clean", "v2"), ("test_v1", "v2"), ("test_v1", "v1"), ("val", "v2"))
 MILESTONE = {"probe": "M1", "zero_shot": "M2", "finetune": "M3", "fuse": "M4"}
+# Encoders whose test_v1 numbers are not reportable (§4): they may have trained on those images
+# and their reports. They are shown, flagged, but never used for the gates.
+TEST_CLEAN_ONLY = {"medsiglip"}
 
 
 # ---------------------------------------------------------------------------
@@ -207,9 +210,29 @@ def evaluate_run(out_dir: Path, run: str, n_boot: int = N_BOOT, manifest=None, f
         res = evaluate_set(pred, manifest, frozen, test_set, metric, n_boot)
         if res is not None:
             results.append(res)
-    report = {"run": run, "meta": meta, "caveats": caveats(meta), "results": results}
+    report = {"run": run, "meta": meta, "caveats": caveats(meta), "results": results,
+              "exposure_check": exposure_check(pred, manifest, frozen, n_boot)}
     write_report(out_dir, report)
     return report
+
+
+def exposure_check(pred: pd.DataFrame, manifest: pd.DataFrame, frozen: dict, n_boot: int) -> Optional[dict]:
+    """
+    Macro AUROC on test_v1 over test_clean's measurable classes, so the two test sets compare like
+    with like. Encoders that saw test_v1's images in pretraining (RAD-DINO, maybe MedSigLIP) should
+    show a larger test_v1 - test_clean gap than one that did not (DINOv2).
+    """
+    classes = list(frozen.get("test_clean:v2", []))
+    rows, _ = joined(pred, manifest, "test_v1")
+    if not classes or len(rows) == 0:
+        return None
+    Y, M = targets_and_mask(label_matrix(rows), "v2")
+    S = rows[[f"score::{label}" for label in LABELS]].to_numpy(np.float64)
+    cols = [LABELS.index(c) for c in classes]
+    point = float(np.mean(per_class_auroc(Y, M, S, cols)))
+    boots = [np.nanmean(per_class_auroc(Y[i], M[i], S[i], cols))
+             for i in bootstrap_indices(rows["subject_id"].to_numpy(), n_boot, 1)]
+    return {"classes": classes, "test_v1_macro": point, "test_v1_macro_ci": ci(np.array(boots))}
 
 
 def fmt(x: float, digits: int = 3) -> str:
@@ -343,23 +366,45 @@ def summarize(out_dir: Path, n_boot: int = N_BOOT, runs: Optional[list[str]] = N
     lines = ["# v2 results summary", "", "Macro AUROC [95% CI] over each test set's measurable classes. "
              "Model choices use `val` only.", "",
              "| Run | Kind | val | test_clean | test_v1 | test_v1 (v1 metric) |", "|---|---|---|---|---|---|"]
+    flagged = False
     for run, rep in reports.items():
         cells = []
         for test_set, metric in (("val", "v2"), ("test_clean", "v2"), ("test_v1", "v2"), ("test_v1", "v1")):
             res = _get(rep, test_set, metric)
-            cells.append(fmt_ci(res["macro_auroc"], res["macro_auroc_ci"]) if res else "-")
+            mark = " †" if test_set == "test_v1" and rep["meta"].get("encoder") in TEST_CLEAN_ONLY else ""
+            flagged = flagged or bool(mark)
+            cells.append(fmt_ci(res["macro_auroc"], res["macro_auroc_ci"]) + mark if res else "-")
         lines.append(f"| {run} | {rep['meta'].get('kind', '?')} | " + " | ".join(cells) + " |")
+    if flagged:
+        lines += ["", "† Not reportable (§4): MedSigLIP may have trained on these images and their reports. "
+                  "Flagged runs are never used for the gates."]
+
+    checks = [(run, rep) for run, rep in reports.items() if rep.get("exposure_check") and _get(rep, "test_clean", "v2")]
+    if checks:
+        lines += ["", "## Exposure check (same classes on both test sets)", "",
+                  "Macro AUROC over test_clean's measurable classes. A larger test_v1 - test_clean gap than "
+                  "DINOv2's suggests test_v1 is inflated by pretraining exposure (§3.1).", "",
+                  "| Run | test_clean | test_v1, same classes | Gap |", "|---|---|---|---|"]
+        for run, rep in checks:
+            clean, ex = _get(rep, "test_clean", "v2"), rep["exposure_check"]
+            gap = ex["test_v1_macro"] - clean["macro_auroc"]
+            lines.append(f"| {run} | {fmt(clean['macro_auroc'])} | {fmt_ci(ex['test_v1_macro'], ex['test_v1_macro_ci'])} "
+                         f"| {gap:+.3f} |")
 
     def best(kind: str) -> Optional[str]:
         scored = [(_get(rep, "val", "v2") or {}).get("macro_auroc", float("nan")) for rep in reports.values()]
         cands = [(s, r) for s, (r, rep) in zip(scored, reports.items())
-                 if rep["meta"].get("kind") == kind and np.isfinite(s)]
+                 if rep["meta"].get("kind") == kind and np.isfinite(s)
+                 and rep["meta"].get("encoder") not in TEST_CLEAN_ONLY]
         return max(cands)[1] if cands else None
 
     def missing(kind: str) -> str:
-        if any(rep["meta"].get("kind") == kind for rep in reports.values()):
-            return f"n/a: val has too few positives/negatives to pick a {kind} run"
-        return f"no {kind} runs yet"
+        runs_of_kind = [rep for rep in reports.values() if rep["meta"].get("kind") == kind]
+        if not runs_of_kind:
+            return f"no {kind} runs yet"
+        if all(rep["meta"].get("encoder") in TEST_CLEAN_ONLY for rep in runs_of_kind):
+            return f"n/a: only flagged {kind} runs (§4), which the gates don't use"
+        return f"n/a: val has too few positives/negatives to pick a {kind} run"
 
     lines += ["", "## Gates", ""]
     best_probe = best("probe")
@@ -373,8 +418,10 @@ def summarize(out_dir: Path, n_boot: int = N_BOOT, runs: Optional[list[str]] = N
             verdict = "PASS: rent the GPU for M3"
         else:
             verdict = "FAIL: study per-class results first"
-        lines.append(f"- **G1** (best probe by val: `{best_probe}`): {fmt(res['macro_auroc'])} on {where} "
-                     f"vs {G1_THRESHOLD} -> **{verdict}**")
+        excluded = " (flagged encoders excluded, §4)" if any(
+            r["meta"].get("encoder") in TEST_CLEAN_ONLY for r in reports.values()) else ""
+        lines.append(f"- **G1** (best probe by val{excluded}: `{best_probe}`): "
+                     f"{fmt_ci(res['macro_auroc'], res['macro_auroc_ci'])} on {where} vs {G1_THRESHOLD} -> **{verdict}**")
     else:
         lines.append(f"- **G1**: {missing('probe')}")
     best_ft = best("finetune")

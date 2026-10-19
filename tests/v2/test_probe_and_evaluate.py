@@ -149,3 +149,31 @@ def test_summary_has_gates_and_log_rows(prepared):
     pred.write_text(json.dumps({**meta, "kind": "finetune"}))
     text = evaluate.summarize(prepared, n_boot=50)
     assert "**G1**" in text and "**G2**" in text and "| M3 |" in text
+
+
+def test_edge_note_flags_grid_edges_but_not_ties():
+    Cs = probe.DEFAULT_CS
+    falling = {c: 0.8 - 0.01 * i for i, c in enumerate(Cs)}
+    rising = {c: 0.7 + 0.01 * i for i, c in enumerate(Cs)}
+    flat = {c: 0.75 for c in Cs}
+    assert "smallest" in probe.edge_note(Cs, falling, Cs[0])
+    assert "largest" in probe.edge_note(Cs, rising, Cs[-1])
+    assert probe.edge_note(Cs, flat, Cs[0]) == ""  # a tie picks the smallest C by design
+    assert probe.edge_note(Cs, falling, Cs[2]) == ""
+
+
+def test_gates_ignore_flagged_encoders_and_exposure_check_is_reported(prepared, monkeypatch):
+    monkeypatch.setattr(evaluate, "MIN_COUNT_VAL", 2)  # the small synthetic val split needs a lower bar
+    m = load_manifest(prepared)
+    rows = m[m["split"].isin([VAL, TEST])]
+    y, _ = targets_and_mask(label_matrix(rows))
+    rng = np.random.default_rng(5)
+    for run, noise, encoder in (("flagged_best", 0.1, "medsiglip"), ("clean_probe", 0.8, "rad-dino")):
+        write_predictions(prepared, run, rows["study_id"], rows["split"], y + rng.normal(0, noise, y.shape),
+                          {"kind": "probe", "encoder": encoder})
+    text = evaluate.summarize(prepared, n_boot=30, runs=["flagged_best", "clean_probe"])
+    g1 = next(line for line in text.splitlines() if line.startswith("- **G1**"))
+    assert "`clean_probe`" in g1 and "flagged encoders excluded" in g1
+    assert " †" in text and "Exposure check" in text
+    rep = json.loads((prepared / "reports" / "clean_probe.json").read_text())
+    assert rep["exposure_check"]["classes"] == json.loads((prepared / "measurable_classes.json").read_text())["test_clean:v2"]

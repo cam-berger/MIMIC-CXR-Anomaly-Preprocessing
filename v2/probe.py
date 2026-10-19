@@ -42,7 +42,8 @@ from .evaluate import auroc
 
 logger = logging.getLogger("v2.probe")
 
-DEFAULT_CS = (0.01, 0.1, 1.0, 10.0)
+# Widened on 2026-10-19: with {0.01, ..., 10} every class of the first real M1 probes chose 0.01.
+DEFAULT_CS = (0.0001, 0.001, 0.01, 0.1, 1.0, 10.0)
 
 
 @dataclass
@@ -72,24 +73,35 @@ class Probe:
                 for f in self.fits}
 
 
+def edge_note(Cs, raw: dict, best_C) -> str:
+    """A note when the chosen C sits at an edge of the grid and beats its neighbour (ties prefer small C)."""
+    Cs = sorted(Cs)
+    if len(Cs) < 2:
+        return ""
+    if best_C == Cs[0] and raw.get(best_C, np.nan) > raw.get(Cs[1], -np.inf):
+        return "best C is the smallest tried: the grid may be too narrow"
+    if best_C == Cs[-1]:
+        return "best C is the largest tried: the grid may be too narrow"
+    return ""
+
+
 def _fit_label(label, X, y, m, Xv, yv, mv, Cs, max_iter) -> LabelFit:
     y, Xl = y[m], X[m]
     dim = X.shape[1]
     if len(np.unique(y)) < 2:
         return LabelFit(label, None, {}, np.zeros(dim), 0.0, "single class in train: constant score")
-    best, best_auc, scores = None, -np.inf, {}
+    best, best_auc, scores, raw = None, -np.inf, {}, {}
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", ConvergenceWarning)
         for C in Cs:
             clf = LogisticRegression(C=C, max_iter=max_iter)
             clf.fit(Xl, y)
             a = auroc(yv[mv], clf.decision_function(Xv[mv])) if mv.any() else float("nan")
+            raw[C] = a
             scores[str(C)] = None if np.isnan(a) else round(float(a), 4)
             if best is None or (np.isfinite(a) and a > best_auc):
                 best, best_auc = (C, clf), (a if np.isfinite(a) else best_auc)
-    note = "" if np.isfinite(best_auc) else f"val AUROC undefined: kept C={best[0]}"
-    if np.isfinite(best_auc) and len(Cs) > 1 and best[0] == max(Cs):
-        note = "best C is the largest tried: the grid may be too narrow"
+    note = edge_note(Cs, raw, best[0]) if np.isfinite(best_auc) else f"val AUROC undefined: kept C={best[0]}"
     C, clf = best
     return LabelFit(label, C, scores, clf.coef_[0].astype(np.float64), float(clf.intercept_[0]), note)
 
@@ -145,11 +157,13 @@ def run_probe(out_dir: Path, emb_path: Path, run: Optional[str], Cs, n_jobs: int
     probe = fit_probe(X_tr, label_matrix(tr_rows), X_va, label_matrix(va_rows), Cs, n_jobs)
     for f in probe.fits:
         logger.info("  %-27s C=%-5s val AUROC by C: %s %s", f.label, f.C, f.val_auroc, f.note)
-    at_edge = sum(f.C == max(Cs) for f in probe.fits if f.C is not None)
-    if at_edge > len(probe.fits) // 2:
-        logger.warning("%d of %d labels chose the largest C (%s). The grid is selected on val only, so it is "
-                       "safe to widen: --Cs %s", at_edge, len(probe.fits), max(Cs),
-                       ",".join(str(c) for c in sorted({*Cs, max(Cs) * 10, max(Cs) * 100})))
+    for side, edge, wider in (("smallest", min(Cs), (min(Cs) / 100, min(Cs) / 10)),
+                              ("largest", max(Cs), (max(Cs) * 10, max(Cs) * 100))):
+        n = sum("the grid may be too narrow" in f.note and f.C == edge for f in probe.fits)
+        if n > len(probe.fits) // 2:
+            logger.warning("%d of %d labels chose the %s C (%s). C is selected on val only, so it is safe "
+                           "to widen: --Cs %s", n, len(probe.fits), side, edge,
+                           ",".join(f"{c:g}" for c in sorted({*Cs, *wider})))
 
     run = run or f"{emb_path.stem}_probe"
     rows = pd.concat([va_rows, te_rows], ignore_index=True)

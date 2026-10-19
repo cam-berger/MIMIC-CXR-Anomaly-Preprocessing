@@ -1,6 +1,6 @@
 # v2 Plan: Modern Foundation Models for CheXpert Classification
 
-**Status:** M0 done 2026-10-19 (G0 PASS, §9); next: M1 · how to run: [`v2/README.md`](../v2/README.md) · **Branch:** `v2` (from `main`) · **Started:** 2026-10-18
+**Status:** M0 done (G0 PASS); M1 pilot at 224 px and M2 done; G1 pending a 518 px rerun with a wider C grid (§6, §9) · how to run: [`v2/README.md`](../v2/README.md) · **Branch:** `v2` (from `main`) · **Started:** 2026-10-18
 
 ## 1. Goal
 
@@ -185,7 +185,7 @@ apply the fallback in §3.1 and re-run the audit.
    model's own image embedding.
 2. The same for `dinov2-base`, and for `medsiglip` once access is granted.
 3. `python -m v2.probe --embeddings ...`: per class, standardize the features
-   and fit an L2 logistic regression, choosing C from {0.01, 0.1, 1, 10} by
+   and fit an L2 logistic regression, choosing C from {0.0001, 0.001, 0.01, 0.1, 1, 10} by
    `val` AUROC. Output: `output/v2/predictions/{run}.parquet`.
 4. `python -m v2.evaluate` writes `output/v2/reports/{run}.md`.
 
@@ -202,7 +202,14 @@ test sets.
   **≥ 0.77**, rent the GPU for M3. Otherwise stop and study the per-class
   results first. (RAD-DINO saw the `test_v1` images, without labels, during
   pretraining. That's acceptable for a go/no-go, but the result isn't a
-  headline number.)
+  headline number.) MedSigLIP is not eligible: its `test_v1` numbers are not
+  reportable (§4).
+- *Amendment, 2026-10-19, after the 224 px pilot:* the C grid was widened from
+  {0.01, 0.1, 1, 10}, because every class of both pilot probes chose 0.01, with
+  val AUROC falling as C grew. C is chosen on val only, so the change never
+  uses a test set. G1 is decided once, on the best-by-val probe of RAD-DINO or
+  DINOv2 at 518 px (the plan's intended M1 resolution, run on the Mac instead of
+  the GPU), with the wider grid. Whatever that gives is final.
 
 ### M2: Zero-shot with MedSigLIP (optional; CPU or GPU)
 
@@ -351,6 +358,13 @@ Add one row per run. Don't edit old rows; add new ones.
 |---|---|---|---|---|---|---|---|
 | 2024-12 | v1 (reference) | 8166273 | v1 multimodal | `test_v1`, v1 metric | 0.792 (8 measurable); 0.701 (all 12) | 8 / 12 | Possibly optimistic (§2) |
 | 2026-10-19 | M0 | 0abc51b | audit | `test_clean` 870 studies / 341 patients; `test_v1` 4,860 / 2,947 | n/a | 9 (v2) / 8 (`test_v1`, v1 metric) | **G0 PASS.** RAD-DINO overlap with `test_clean`: 0 images, 0 patients. Splits patient-disjoint. 412 studies dropped (no frontal image), 0 unreadable. The v1-metric classes on `test_v1` are exactly v1's 8 (the other 4 have 2-23 explicit negatives, as in §2). Thin `test_clean` classes: Enlarged Cardiomediastinum 41, Lung Lesion 47 and Consolidation 60 positives, so expect wide CIs. v1 cohort bias confirmed (§3). |
+| 2026-10-19 | M1 | d2a34e4 | rad-dino_224_probe | `test_clean` | 0.739 [0.719, 0.757] | 9 | Old C grid; every class chose C=0.01 (lower edge) |
+| 2026-10-19 | M1 | d2a34e4 | rad-dino_224_probe | `test_v1`, v1 metric | 0.768 [0.752, 0.785] | 8 | G1 basis at 224 px: 0.002 below 0.77, CI spans it |
+| 2026-10-19 | M1 | d2a34e4 | dinov2-base_224_probe | `test_clean` | 0.714 [0.696, 0.733] | 9 | Old C grid, lower edge. RAD-DINO beats it on every set (sanity check passes) |
+| 2026-10-19 | M1 | d2a34e4 | dinov2-base_224_probe | `test_v1`, v1 metric | 0.720 [0.702, 0.739] | 8 | |
+| 2026-10-19 | M1 | d2a34e4 | medsiglip_448_probe | `test_clean` | 0.778 [0.760, 0.793] | 9 | Flagged (§4). Best by val (0.799). `test_v1` (0.807) not reportable |
+| 2026-10-19 | M2 | d2a34e4 | medsiglip_448_zeroshot | `test_clean` | 0.666 [0.646, 0.687] | 9 | Flagged (§4). Template chosen on val. Far below the probe |
+| 2026-10-19 | G1 | d2a34e4 | gate (224 px) | `test_v1`, v1 metric | 0.768 | 8 | Not decided. The summary's PASS used MedSigLIP, which §4 excludes (gate code fixed). Clean probes were limited by the C grid edge. Decision deferred to the 518 px rerun with the wider grid (§6 amendment) |
 
 ## 10. Backlog (after v2.0, one at a time)
 
