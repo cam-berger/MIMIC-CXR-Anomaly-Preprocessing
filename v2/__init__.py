@@ -5,4 +5,9 @@ Image-only, with a fixed evaluation protocol. See docs/V2_PLAN.md for the
 plan and v2/README.md for how to run each step.
 """
 
+import os
+
 __version__ = "0.1.0"
+
+# On Apple GPUs, run ops that MPS lacks on the CPU instead of failing. Set before torch is imported.
+os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")

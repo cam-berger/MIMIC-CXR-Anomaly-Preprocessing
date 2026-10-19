@@ -83,8 +83,6 @@ def check_device(r: Report) -> None:
             r.warn("Under 20 GB of GPU memory: use --batch-size 8 --accum 4 or --grad-checkpointing for 518 px")
     elif getattr(torch.backends, "mps", None) is not None and torch.backends.mps.is_available():
         r.ok("Apple MPS GPU (fp32). Fine-tune at --size 224 locally; use a CUDA GPU for 518 px")
-        if os.environ.get("PYTORCH_ENABLE_MPS_FALLBACK") != "1":
-            r.warn("Set PYTORCH_ENABLE_MPS_FALLBACK=1 so unsupported ops fall back to CPU")
     else:
         r.warn(f"CPU only ({os.cpu_count()} cores): fine for M0, M1 pilots at 224 px and M4; not for M3")
 

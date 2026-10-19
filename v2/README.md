@@ -21,7 +21,8 @@ source .venv-v2/bin/activate
 
 You need Python 3.10 or newer. On macOS: `brew install python@3.11`, then
 `PYTHON=python3.11 bash v2/scripts/setup.sh`. On a Linux machine with no GPU,
-add `--cpu` for a much smaller PyTorch download.
+add `--cpu` for a much smaller PyTorch download. On Windows, use WSL2 (the
+scripts are bash; the `python -m v2.*` commands also work natively).
 
 Put your paths in `.env` at the repo root. Every v2 command and script reads it.
 
@@ -209,7 +210,7 @@ Not verified here:
 | `doctor` reports slow JPG reads | Expected on USB drives; M0 reads each JPG once, later steps use the PNGs. On a spinning disk, `WORKERS=2` can be faster than many parallel readers |
 | `doctor` says sampled cohort JPGs are missing | The download is incomplete for the cohort's studies; M0 drops and counts them, but more than a few percent changes the population |
 | CUDA out of memory in M3 | `FT_BATCH=8 FT_ACCUM=4` (same effective batch), or `GRAD_CKPT=1` |
-| An op is not implemented on MPS | `export PYTORCH_ENABLE_MPS_FALLBACK=1` (`run.sh` sets it) |
+| An op is not implemented on MPS | v2 sets `PYTORCH_ENABLE_MPS_FALLBACK=1` so such ops run on the CPU; if you import v2 after torch in your own code, export it yourself |
 | DataLoader worker errors on macOS | `WORKERS=0` |
 | "bad steps ... aborting" in M3 | Non-finite loss or gradients in over 1% of steps; check the data and learning rate before spending more GPU time |
 | `measurable classes changed` warning | `prepare_data` was re-run with different data; the lists should stay frozen after M0 |
