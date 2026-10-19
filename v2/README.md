@@ -48,10 +48,11 @@ them with v1's `python build_cohort.py --anomalous-only`.
 |---|---|---|---|
 | M0: data + audit | `bash v2/scripts/run.sh m0` | laptop with the drive | 10-30 min: ~30k JPGs read once (~45 GB; the drive's speed decides), ~70 ms of CPU each |
 | Check the audit | open `output/v2/audit.md`; **G0** needs ≥6 measurable classes in `test_clean` | | |
-| M1 pilot | `MAX_TRAIN=10000 bash v2/scripts/run.sh m1 eval` | laptop, 224 px | embeddings ~20-40 min on an Apple GPU, 1-2 h on an 8-core CPU; probes ~1 min; evaluation ~20 s per run |
+| M1 pilot | `MAX_TRAIN=10000 bash v2/scripts/run.sh m1 eval` | laptop, 224 px | embeddings ~6 min per model on an Apple-silicon Mac (full cohort), 1-2 h on an 8-core CPU; probes ~1 min; evaluation ~20 s per run |
+| M1 at 518 px | `SIZE=518 bash v2/scripts/run.sh m1 eval` | laptop with an Apple GPU, or the GPU session | ~1 h per model on an Apple-silicon Mac; minutes on CUDA |
 | Check **G1** | `output/v2/reports/summary.md` | | |
 | M2 (optional) | `bash v2/scripts/run.sh m2 eval` (accept the MedSigLIP terms first, see §6) | laptop or GPU | like M1 |
-| M3 | `bash v2/scripts/run.sh gpu` (§3) | rented GPU | 2-3 h, about $5-10 |
+| M3 | `bash v2/scripts/run.sh smoke m3 eval` (§3); `gpu` also runs M1 and M2 there | rented GPU | 2-3 h, under $10 |
 | M4 (optional) | `bash v2/scripts/run.sh m4 eval` | laptop | minutes |
 
 `run.sh` writes a log per step to `output/v2/logs/` and stops at the first
@@ -72,21 +73,28 @@ fine-tuning is too slow (about 1.5 images/s on 4 cores); use a GPU.
 
 ## 3. The GPU session (M3; docs/V2_PLAN.md §8)
 
-1. Rent one A100 or H100 (40-80 GB) with CUDA 12 and enough disk for the data (~10 GB).
+1. Rent one A100 or H100 (40-80 GB) with CUDA 12 and at least 50 GB of disk.
+   x86-64 is simplest. On an ARM machine (GH200), check that PyTorch still sees
+   the GPU after setup (step 2).
 2. On the GPU box:
    ```bash
    git clone <repo> && cd MIMIC-CXR-Anomaly-Preprocessing && git checkout v2
    bash v2/scripts/setup.sh && source .venv-v2/bin/activate
-   hf auth login                  # only for M2 (MedSigLIP)
+   python -c 'import torch; print(torch.cuda.is_available(), torch.cuda.get_device_name(0))'   # must print True
+   mkdir -p output/v2
+   hf auth login                  # only if M2 (MedSigLIP) runs here
    ```
-3. From your machine, upload the prepared data (not the raw JPGs):
+   Don't copy your `.env` there; it can hold API keys, and the defaults work.
+3. From your machine, upload the prepared data (not the raw JPGs). Plain
+   `rsync -a` prints nothing per file, so no study IDs reach the console:
    ```bash
-   rsync -a --info=progress2 output/v2/manifest.parquet output/v2/measurable_classes.json \
+   rsync -a output/v2/manifest.parquet output/v2/measurable_classes.json \
        output/v2/audit.json output/v2/images <gpu>:MIMIC-CXR-Anomaly-Preprocessing/output/v2/
    ```
 4. On the GPU box, inside `tmux` so a dropped connection doesn't stop it:
    ```bash
-   bash v2/scripts/run.sh gpu     # real-data smoke test first, then m1 m2 m3 eval
+   bash v2/scripts/run.sh smoke m3 eval   # if M1 and M2 ran on your machine
+   bash v2/scripts/run.sh gpu             # or: smoke m1 m2 m3 eval, all here
    ```
    Each fine-tune trains for at most `FT_HOURS` (1.5 h), then predicts from
    its best epoch. Other steps have a hard limit (`STAGE_HOURS`, 2 h), and the
@@ -94,13 +102,18 @@ fine-tuning is too slow (about 1.5 images/s on 4 cores); use a GPU.
    checkpoint every epoch. To resume after an interruption, run the same
    command again.
    Under 40 GB of GPU memory, use `FT_BATCH=8 FT_ACCUM=4` (same effective batch) or `GRAD_CKPT=1`.
-5. Bring the results home, then delete the data and the instance:
+5. Bring the fine-tunes home, then delete the data and the instance. Only the
+   fine-tune outputs come back, so nothing at home is overwritten. Then rebuild
+   the summary at home, where the probe runs are (G2 compares the two):
    ```bash
-   rsync -a <gpu>:MIMIC-CXR-Anomaly-Preprocessing/output/v2/{predictions,reports,embeddings,logs} output/v2/
-   rsync -a --include='*/' --include='best.pt' --include='*.json' --exclude='*' \
-       <gpu>:MIMIC-CXR-Anomaly-Preprocessing/output/v2/runs/ output/v2/runs/
+   ssh <gpu> 'cd MIMIC-CXR-Anomaly-Preprocessing/output/v2 && tar -czf ../m3.tgz predictions/*_ft_s[0-9].* \
+       runs/*_ft_s[0-9]/best.pt runs/*_ft_s[0-9]/*.json embeddings/*_ft_s[0-9].npz logs'
+   scp <gpu>:MIMIC-CXR-Anomaly-Preprocessing/output/m3.tgz output/v2/
+   tar -xzf output/v2/m3.tgz -C output/v2 && rm output/v2/m3.tgz
    ssh <gpu> 'rm -rf MIMIC-CXR-Anomaly-Preprocessing/output'
+   python -m v2.evaluate --all
    ```
+   If you ran `gpu`, bring home `predictions`, `embeddings` and `reports` too.
 
 The MIMIC data stays under your PhysioNet credential. Use a provider you
 trust, and keep the data on the machine only for the run.

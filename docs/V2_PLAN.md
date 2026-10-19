@@ -1,6 +1,6 @@
 # v2 Plan: Modern Foundation Models for CheXpert Classification
 
-**Status:** M0 done (G0 PASS); M1 pilot at 224 px and M2 done; G1 pending a 518 px rerun with a wider C grid (§6, §9) · how to run: [`v2/README.md`](../v2/README.md) · **Branch:** `v2` (from `main`) · **Started:** 2026-10-18
+**Status:** M0, M1 (518 px) and M2 done; **G1 PASS** (0.803 [0.788, 0.818]); next: M3 on a rented GPU (§8, §9) · how to run: [`v2/README.md`](../v2/README.md) · **Branch:** `v2` (from `main`) · **Started:** 2026-10-18
 
 ## 1. Goal
 
@@ -190,7 +190,8 @@ apply the fallback in §3.1 and re-run the audit.
 4. `python -m v2.evaluate` writes `output/v2/reports/{run}.md`.
 
 **Cost:** about an hour per model at 224 px on an 8-core CPU (a 10k-study
-training subset halves it), or minutes on a GPU.
+training subset halves it), or minutes on a GPU. Measured on an Apple-silicon
+Mac: about 6 min per model at 224 px and 53 min at 518 px; probes under a minute.
 
 **Done when:** predictions and a report exist for RAD-DINO and DINOv2 on both
 test sets.
@@ -330,21 +331,26 @@ Tests (all must pass before any GPU time):
 
 Step-by-step commands: [`v2/README.md`](../v2/README.md) §3.
 
-1. Rent 1× A100 or H100 (40-80 GB) with CUDA 12 (about $1.3-2.5/h).
+1. Rent 1× A100 or H100 (40-80 GB) with CUDA 12 (about $1.3-2.5/h). x86-64 is
+   simplest; on an ARM machine (GH200), check after setup that PyTorch still
+   sees the GPU.
 2. `bash v2/scripts/setup.sh`: venv (keeps the provider's CUDA torch), install,
-   `pytest tests/v2`, wiring check. Then `hf auth login` for MedSigLIP.
-3. Upload `output/v2/manifest.parquet`, `measurable_classes.json` and
-   `images/` (5-8 GB, 10-20 min).
-4. `bash v2/scripts/run.sh gpu`:
+   `pytest tests/v2`, wiring check. `hf auth login` only if M2 runs there.
+3. Upload `output/v2/manifest.parquet`, `measurable_classes.json`, `audit.json`
+   and `images/` (5-8 GB, 10-20 min).
+4. `bash v2/scripts/run.sh smoke m3 eval` when M1 and M2 already ran elsewhere
+   (in this project they ran on the Mac at 518 px), or `bash v2/scripts/run.sh gpu`
+   to run them there too:
    1. a 5-minute smoke test on real data (aborts on any failure);
-   2. full-resolution embeddings for M1 and M2;
+   2. `gpu` only: full-resolution embeddings and probes for M1 and M2;
    3. two RAD-DINO fine-tunes (2 seeds);
    4. DenseNet-121;
    5. evaluation.
 
-   Each stage has a time limit, and the whole run aborts at 4 hours.
-5. Download `output/v2/{predictions,reports}` and the best checkpoint. Delete
-   the data, then terminate the instance.
+   Each stage has a time limit, and stages after 4 hours are skipped.
+5. Download the fine-tunes' predictions, best checkpoints and logs, and
+   evaluate where the probe runs are (G2 compares the two). Delete the data,
+   then terminate the instance.
 
 MIMIC data stays under your PhysioNet credential: use a provider you trust,
 keep the data on the machine only for the run, and delete it before
@@ -365,6 +371,16 @@ Add one row per run. Don't edit old rows; add new ones.
 | 2026-10-19 | M1 | d2a34e4 | medsiglip_448_probe | `test_clean` | 0.778 [0.760, 0.793] | 9 | Flagged (§4). Best by val (0.799). `test_v1` (0.807) not reportable |
 | 2026-10-19 | M2 | d2a34e4 | medsiglip_448_zeroshot | `test_clean` | 0.666 [0.646, 0.687] | 9 | Flagged (§4). Template chosen on val. Far below the probe |
 | 2026-10-19 | G1 | d2a34e4 | gate (224 px) | `test_v1`, v1 metric | 0.768 | 8 | Not decided. The summary's PASS used MedSigLIP, which §4 excludes (gate code fixed). Clean probes were limited by the C grid edge. Decision deferred to the 518 px rerun with the wider grid (§6 amendment) |
+| 2026-10-19 | M1 | ec3e020 | rad-dino_224_probe_wide | `test_clean` | 0.761 [0.741, 0.778] | 9 | Wider C grid on the same embeddings: +0.022 over the old grid. Most classes chose C=0.001; Consolidation and Lung Opacity sit at the new lower edge (0.0001) |
+| 2026-10-19 | M1 | ec3e020 | rad-dino_224_probe_wide | `test_v1`, v1 metric | 0.800 [0.784, 0.814] | 8 | |
+| 2026-10-19 | M1 | ec3e020 | dinov2-base_224_probe_wide | `test_clean` | 0.715 [0.696, 0.732] | 9 | The wider grid barely moves DINOv2 |
+| 2026-10-19 | M1 | ec3e020 | dinov2-base_224_probe_wide | `test_v1`, v1 metric | 0.730 [0.713, 0.748] | 8 | |
+| 2026-10-19 | M1 | ec3e020 | medsiglip_448_probe_wide | `test_clean` | 0.782 [0.765, 0.798] | 9 | Flagged (§4). `test_v1` not reportable. Pneumothorax at the lower edge |
+| 2026-10-19 | M1 | ec3e020 | rad-dino_518_probe | `test_clean` | 0.775 [0.756, 0.791] | 9 | **Best eligible probe by val (0.803).** Paired on `test_clean`: vs `rad-dino_224_probe_wide` +0.014 [0.007, 0.022]; vs `dinov2-base_518_probe` +0.060 [0.041, 0.078]; `medsiglip_448_probe_wide` minus this +0.007 [-0.006, 0.021], a tie. Consolidation at the lower edge. 52 min to embed on the Mac |
+| 2026-10-19 | M1 | ec3e020 | rad-dino_518_probe | `test_v1`, v1 metric | 0.803 [0.788, 0.818] | 8 | v1's 0.792 lies inside this CI: a frozen encoder on the image alone matches v1 |
+| 2026-10-19 | M1 | ec3e020 | dinov2-base_518_probe | `test_clean` | 0.715 [0.695, 0.732] | 9 | No gain from 518 px on `test_clean` (+0.013 on val, +0.011 on `test_v1`) |
+| 2026-10-19 | M1 | ec3e020 | dinov2-base_518_probe | `test_v1`, v1 metric | 0.741 [0.726, 0.759] | 8 | |
+| 2026-10-19 | G1 | ec3e020 | gate (518 px, wider grid) | `test_v1`, v1 metric | 0.803 [0.788, 0.818] | 8 | **PASS**, on the run the §6 amendment named: `rad-dino_518_probe`, best by val among eligible probes, with its lower CI bound above 0.77. Exposure check on the same classes: RAD-DINO's `test_v1` minus `test_clean` gap is +0.010, below DINOv2's +0.016, so no sign that pretraining exposure inflates `test_v1`. Next: M3; G2 compares against this probe |
 
 ## 10. Backlog (after v2.0, one at a time)
 
