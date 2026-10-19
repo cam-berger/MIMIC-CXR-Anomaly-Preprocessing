@@ -58,6 +58,16 @@ else
 fi
 "$PY" -m pip install -q -r v2/requirements.txt
 
+# A provider's torch built for NumPy 1.x loses its NumPy bridge ("Numpy is not available") once
+# pip puts NumPy 2 in the venv, as on Lambda's images. NumPy 1.26 still meets v2's requirements.
+numpy_ok() { "$PY" -c 'import numpy, torch; torch.from_numpy(numpy.zeros(1))' >/dev/null 2>&1; }
+if ! numpy_ok; then
+  echo "torch $("$PY" -c 'import torch; print(torch.__version__)' 2>/dev/null) can't use NumPy" \
+       "$("$PY" -c 'import numpy; print(numpy.__version__)'): installing numpy<2"
+  "$PY" -m pip install -q "numpy>=1.26,<2"
+  numpy_ok || { echo "torch still can't use NumPy. Install a PyPI build: $PY -m pip install torch torchvision" >&2; exit 1; }
+fi
+
 "$PY" - <<'EOF'
 import torch, transformers
 dev = "cuda" if torch.cuda.is_available() else ("mps" if torch.backends.mps.is_available() else "cpu")

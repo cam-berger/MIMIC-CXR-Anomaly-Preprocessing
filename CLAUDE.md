@@ -2,9 +2,9 @@
 
 This document provides guidance for AI assistants working with the MIMIC-CXR Anomaly Detection Pipeline codebase.
 
-## v2 (in progress on branch `v2`)
+## v2 (branch `v2`; v2.0 done, v2.1 next)
 
-v2 tests modern pretrained chest X-ray models (RAD-DINO, MedSigLIP, DINOv2) on the same 12-class task: zero-shot, frozen embeddings with linear probes, then one GPU fine-tune. Image-only, with a fixed evaluation protocol. **Read `docs/V2_PLAN.md` first**: it defines the task, splits, metrics, milestones (M0-M4), decision gates and the results log. **`v2/README.md`** explains how to run it (setup, `v2/scripts/run.sh` stages, the GPU session). v2 code lives in the standalone `v2/` package with tests in `tests/v2/`; it does not modify the v1 pipeline described below. The per-class names in `docs/RESULTS.md` are shifted for the last four classes (see `docs/V2_PLAN.md` §2).
+v2 tests modern pretrained chest X-ray models (RAD-DINO, MedSigLIP, DINOv2) on the same 12-class task: zero-shot, frozen embeddings with linear probes, then one GPU fine-tune. Image-only, with a fixed evaluation protocol. v2.0 is done: the fine-tuned RAD-DINO at 518 px is the baseline (0.787 [0.769, 0.803] on `test_clean`); the results log is §9 of the plan. **Read `docs/V2_PLAN.md` first**: it defines the task, splits, metrics, milestones (M0-M4), decision gates and the results log. **`v2/README.md`** explains how to run it (setup, `v2/scripts/run.sh` stages, the GPU session). v2 code lives in the standalone `v2/` package with tests in `tests/v2/`; it does not modify the v1 pipeline described below. The per-class names in `docs/RESULTS.md` are shifted for the last four classes (see `docs/V2_PLAN.md` §2).
 
 v2 rules: metrics are computed only in `v2/evaluate.py`, from the one prediction format written by `v2.common.write_predictions`; label policy and splits live in `v2/common.py` and `v2/prepare_data.py`; model choices use `val`, never a test set. Before changing anything, run `pytest tests/v2 -q` and `python -m v2.smoke` (synthetic end-to-end check with a planted signal, ~30 s).
 

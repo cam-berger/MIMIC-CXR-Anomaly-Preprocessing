@@ -52,7 +52,7 @@ them with v1's `python build_cohort.py --anomalous-only`.
 | M1 at 518 px | `SIZE=518 bash v2/scripts/run.sh m1 eval` | laptop with an Apple GPU, or the GPU session | ~1 h per model on an Apple-silicon Mac; minutes on CUDA |
 | Check **G1** | `output/v2/reports/summary.md` | | |
 | M2 (optional) | `bash v2/scripts/run.sh m2 eval` (accept the MedSigLIP terms first, see §6) | laptop or GPU | like M1 |
-| M3 | `bash v2/scripts/run.sh smoke m3 eval` (§3); `gpu` also runs M1 and M2 there | rented GPU | 2-3 h, under $10 |
+| M3 | `bash v2/scripts/run.sh smoke m3 eval` (§3); `gpu` also runs M1 and M2 there | rented GPU | about 2 h on an A100-40GB (measured: 2.15 instance hours, about $3-4) |
 | M4 (optional) | `bash v2/scripts/run.sh m4 eval` | laptop | minutes |
 
 `run.sh` writes a log per step to `output/v2/logs/` and stops at the first
@@ -211,10 +211,14 @@ Verified, on a CPU-only Linux container:
 - The SigLIP code path works with the open SigLIP-base weights and its real
   tokenizer.
 
-Not verified here:
-- Your MIMIC data (it is on your drive). The audit and `--smoke` stages exist to catch problems there.
-- MedSigLIP's own weights (gated).
-- CUDA/bf16 and Apple MPS execution, since the container has no GPU. `run.sh gpu` starts with a smoke step for this reason.
+Verified on the real data (October 2026; results in `docs/V2_PLAN.md` §9):
+- M0-M2 on an Apple-silicon Mac (MPS), including MedSigLIP's gated weights.
+- M3 on a Lambda A100-SXM4-40GB (CUDA, bf16): three fine-tunes with no
+  non-finite steps, in about 2 h of instance time. Lambda's preinstalled torch
+  needed `numpy<2`, which `setup.sh` now installs when needed.
+
+Not verified: other providers' machine images. Start every new machine with
+`bash v2/scripts/run.sh smoke`.
 
 ## 9. Working on MIMIC data with an AI assistant
 
@@ -243,6 +247,7 @@ content out of the conversation:
 | `doctor` reports slow JPG reads | Expected on USB drives; M0 reads each JPG once, later steps use the PNGs. On a spinning disk, `WORKERS=2` can be faster than many parallel readers |
 | `doctor` says sampled cohort JPGs are missing | The download is incomplete for the cohort's studies; M0 drops and counts them, but more than a few percent changes the population |
 | CUDA out of memory in M3 | `FT_BATCH=8 FT_ACCUM=4` (same effective batch), or `GRAD_CKPT=1` |
+| Tests fail with `RuntimeError: Numpy is not available` | The machine's torch was built for NumPy 1.x and the venv has NumPy 2. `setup.sh` checks for this and installs `numpy<2`; by hand: `.venv-v2/bin/python -m pip install 'numpy<2'` |
 | An op is not implemented on MPS | v2 sets `PYTORCH_ENABLE_MPS_FALLBACK=1` so such ops run on the CPU; if you import v2 after torch in your own code, export it yourself |
 | DataLoader worker errors on macOS | `WORKERS=0` |
 | "bad steps ... aborting" in M3 | Non-finite loss or gradients in over 1% of steps; check the data and learning rate before spending more GPU time |

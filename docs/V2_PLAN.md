@@ -1,6 +1,6 @@
 # v2 Plan: Modern Foundation Models for CheXpert Classification
 
-**Status:** M0, M1 (518 px) and M2 done; **G1 PASS** (0.803 [0.788, 0.818]); next: M3 on a rented GPU (§8, §9) · how to run: [`v2/README.md`](../v2/README.md) · **Branch:** `v2` (from `main`) · **Started:** 2026-10-18
+**Status:** v2.0 done (M0-M3; M4 parked). **G2 PASS:** the fine-tuned RAD-DINO is the v2 baseline, 0.787 [0.769, 0.803] on `test_clean` (§9). Next: v2.1 (§10) · how to run: [`v2/README.md`](../v2/README.md) · **Branch:** `v2` (from `main`) · **Started:** 2026-10-18
 
 ## 1. Goal
 
@@ -381,6 +381,13 @@ Add one row per run. Don't edit old rows; add new ones.
 | 2026-10-19 | M1 | ec3e020 | dinov2-base_518_probe | `test_clean` | 0.715 [0.695, 0.732] | 9 | No gain from 518 px on `test_clean` (+0.013 on val, +0.011 on `test_v1`) |
 | 2026-10-19 | M1 | ec3e020 | dinov2-base_518_probe | `test_v1`, v1 metric | 0.741 [0.726, 0.759] | 8 | |
 | 2026-10-19 | G1 | ec3e020 | gate (518 px, wider grid) | `test_v1`, v1 metric | 0.803 [0.788, 0.818] | 8 | **PASS**, on the run the §6 amendment named: `rad-dino_518_probe`, best by val among eligible probes, with its lower CI bound above 0.77. Exposure check on the same classes: RAD-DINO's `test_v1` minus `test_clean` gap is +0.010, below DINOv2's +0.016, so no sign that pretraining exposure inflates `test_v1`. Next: M3; G2 compares against this probe |
+| 2026-10-19 | M3 | df4fb0b | rad-dino_518_ft_s0 | `test_clean` | 0.786 [0.770, 0.801] | 9 | Minus `rad-dino_518_probe`: +0.012 [0.003, 0.022]. Best epoch 1 of 10 (val 0.820). Val loss was lowest at epoch 2, then the model overfit while train loss kept falling; the last epoch scored below the frozen probe on val. 39.5 min on an A100-SXM4-40GB, 110 img/s |
+| 2026-10-19 | M3 | df4fb0b | rad-dino_518_ft_s0 | `test_v1`, v1 metric | 0.824 [0.808, 0.839] | 8 | |
+| 2026-10-19 | M3 | df4fb0b | rad-dino_518_ft_s1 | `test_clean` | 0.787 [0.769, 0.803] | 9 | **v2 baseline** (best fine-tune by val, 0.821). Minus the probe: +0.012 [0.003, 0.022]. Minus seed 0: -0.000 [-0.007, 0.006]. Same epoch-1 peak as seed 0 |
+| 2026-10-19 | M3 | df4fb0b | rad-dino_518_ft_s1 | `test_v1`, v1 metric | 0.823 [0.807, 0.837] | 8 | 0.031 above v1's 0.792, which lies below this CI |
+| 2026-10-19 | M3 | df4fb0b | densenet121_512_ft_s0 | `test_clean` | 0.768 [0.748, 0.785] | 9 | `rad-dino_518_ft_s0` minus this: +0.019 [0.005, 0.031]. Best epoch 5 of 10. 30.4 min, 137 img/s |
+| 2026-10-19 | M3 | df4fb0b | densenet121_512_ft_s0 | `test_v1`, v1 metric | 0.796 [0.780, 0.813] | 8 | |
+| 2026-10-19 | G2 | df4fb0b | gate | `test_clean` | difference +0.012 [0.003, 0.022] | 9 | **PASS**: `rad-dino_518_ft_s1` minus `rad-dino_518_probe`, so the fine-tune is the v2 baseline; both seeds agree. `rad-dino_518_ft_s0` minus `medsiglip_448_probe_wide`: +0.005 [-0.008, 0.017], a tie. Exposure check: the fine-tunes' gaps (+0.014, +0.015) match DINOv2's (+0.016). GPU session: Lambda A100-SXM4-40GB, 2.15 instance hours, about $3-4. One environment fix: numpy<2 for Lambda's preinstalled torch (now automatic in `setup.sh`) |
 
 ## 10. Backlog (after v2.0, one at a time)
 
@@ -390,7 +397,9 @@ Ordered by expected value per unit of cost:
    train-split patients, not just the v1 cohort (~4× more abnormal studies,
    ~6× more studies in total). Likely the biggest single gain. It also removes
    the cohort's time-of-day and ED-window selection (§3), and grows
-   `test_clean` beyond 870 studies.
+   `test_clean` beyond 870 studies. Declare the fine-tune schedule before
+   running it: in v2.0 both RAD-DINO seeds peaked at epoch 1 of 10 and then
+   overfit, so use about 3 epochs (1 of warm-up) and keep best-epoch selection.
 2. **Higher resolution** (RAD-DINO at 1024 px with interpolated position
    embeddings) for subtle findings such as pneumothorax and fracture.
 3. **Parameter-efficient fine-tuning** (LoRA) of MedSigLIP's image encoder.
@@ -401,6 +410,9 @@ Ordered by expected value per unit of cost:
 6. **Clinical text** (chief complaint) through a small text encoder, only if
    M4 shows that pre-imaging data helps.
 7. Ensembles and test-time augmentation.
+8. **LP-FT:** start the fine-tune's head from the frozen probe instead of from
+   scratch. It tends to distort pretrained features less and to transfer
+   better under distribution shift. Compare it paired against the v2 baseline.
 
 ## 11. Prerequisites
 
@@ -419,3 +431,4 @@ Ordered by expected value per unit of cost:
 - RAD-DINO: <https://arxiv.org/abs/2401.10815>, <https://huggingface.co/microsoft/rad-dino>
 - MedSigLIP and MedGemma: <https://arxiv.org/abs/2507.05201>, <https://huggingface.co/google/medsiglip-448>
 - DINOv2: <https://arxiv.org/abs/2304.07193>
+- LP-FT (fine-tuning can distort pretrained features): <https://arxiv.org/abs/2202.10054>
