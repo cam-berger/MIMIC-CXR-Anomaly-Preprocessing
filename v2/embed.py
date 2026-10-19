@@ -107,7 +107,9 @@ def run_embedding(
             feats = enc(x.to(device, non_blocking=True))
         feats = feats.float().cpu().numpy()
         if not np.isfinite(feats).all():
-            raise RuntimeError(f"non-finite embeddings for studies {todo_ids[idx.numpy()][:5]}")
+            bad = int((~np.isfinite(feats).all(axis=1)).sum())
+            raise RuntimeError(f"non-finite embeddings for {bad} images in one batch (check those PNGs and the "
+                               "encoder; --precision fp32 rules out mixed precision)")
         new_emb.append(feats)
         new_ids.append(todo_ids[idx.numpy()])
         n_done += len(idx)

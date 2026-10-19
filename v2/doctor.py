@@ -145,11 +145,12 @@ def check_mimic(r: Report, root: Optional[Path], n_sample: int, cohort_dir: Opti
             with Image.open(path) as img:
                 img.load()
         except Exception as exc:  # noqa: BLE001
-            bad.append(f"{path.name}: {type(exc).__name__}")
+            bad.append(type(exc).__name__)  # error types only: no file names or ids on the console
     elapsed = max(time.time() - t0, 1e-6)
     if bad:
         share = len(bad) / len(sample)
-        msg = (f"{len(bad)}/{len(sample)} sampled {what} unreadable, e.g. {bad[:3]}. "
+        kinds = {k: bad.count(k) for k in sorted(set(bad))}
+        msg = (f"{len(bad)}/{len(sample)} sampled {what} unreadable {kinds}. "
                "Is the download complete? M0 drops missing images and counts them in the audit")
         (r.fail if share >= 0.05 else r.warn)(msg)
     else:

@@ -590,8 +590,12 @@ def main(argv: Optional[list[str]] = None) -> None:
         failures = write_images(manifest, root, out_dir, args.image_size, args.workers)
         if failures:
             bad = {Path(p).stem for p in failures}
-            for path, err in list(failures.items())[:5]:
-                logger.warning("Unreadable image for %s: %s", Path(path).stem, err)
+            # Record-level details go to a local file only, never to the console (see v2/README.md §10).
+            report = out_dir / "unreadable_images.csv"
+            pd.DataFrame({"study_id": [Path(p).stem for p in failures], "error": list(failures.values())}).to_csv(
+                report, index=False)
+            kinds = pd.Series([e.split(":")[0] for e in failures.values()]).value_counts().to_dict()
+            logger.warning("%d images missing or unreadable %s; details in %s", len(failures), kinds, report)
             manifest = manifest[~manifest["study_id"].astype(str).isin(bad)].reset_index(drop=True)
         drops["image missing or unreadable"] = len(failures)
         free_gb = shutil.disk_usage(out_dir).free / 1e9

@@ -203,7 +203,27 @@ Not verified here:
 - MedSigLIP's own weights (gated).
 - CUDA/bf16 and Apple MPS execution, since the container has no GPU. `run.sh gpu` starts with a smoke step for this reason.
 
-## 9. Troubleshooting
+## 9. Working on MIMIC data with an AI assistant
+
+PhysioNet's credentialed data use agreement forbids sharing the data with third
+parties. Its [LLM guidance](https://physionet.org/news/post/llm-responsible-use/)
+(September 2025) says this includes sending data through APIs or online
+platforms. Third-party services must not retain the data, use it for training
+or allow human review of it. A coding assistant such as Claude Code sends what
+it reads (opened files, command output) to its servers. Unless you have
+verified that your account's data handling meets those requirements, keep MIMIC
+content out of the conversation:
+
+- Let the assistant run the v2 commands, but not open, print or list the
+  dataset, the cohort files, `manifest.parquet`, embeddings or predictions.
+- v2's console output is aggregate only: counts, metrics and paths.
+  Record-level diagnostics, such as which images were unreadable, go to local
+  files like `output/v2/unreadable_images.csv`, and those stay local.
+- Share `audit.md` and `reports/*.md`. They hold aggregate counts and metrics,
+  the kind of tables a paper publishes.
+- Never commit or upload `output/`; it is gitignored.
+
+## 10. Troubleshooting
 
 | Symptom | Fix |
 |---|---|

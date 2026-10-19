@@ -80,6 +80,7 @@ def test_audit_counts_drops_and_rad_dino_overlap(prepared):
     audit = json.loads((prepared / "audit.json").read_text())
     assert audit["drops"]["no frontal (PA/AP) image"] > 0
     assert audit["drops"]["image missing or unreadable"] == 1
+    assert len(pd.read_csv(prepared / "unreadable_images.csv")) == 1  # details stay in a local file
     assert audit["patient_overlap"] == {"train/val": 0, "train/test": 0, "val/test": 0}
     rad = audit["rad_dino"]
     assert rad["test_clean"]["images_in_list"] == 0 and rad["test_clean"]["patients_in_list"] == 0

@@ -79,6 +79,8 @@ v1; backlog item 1 replaces it.
 Why two test sets: RAD-DINO was pretrained (without labels) on every
 official-train MIMIC-CXR image and excluded the official validate/test images.
 Only `test_clean` is clean for it. `test_v1` exists only to compare with v1.
+The v1 checkpoint itself can't be scored on `test_clean`. v1 split its cohort
+by patient at random, so it trained on most official validate/test patients.
 
 Fallback, decided now and used only if needed: if `test_clean` has fewer than
 6 measurable classes (§3.2), add every other frontal study of the same
@@ -361,6 +363,7 @@ Ordered by expected value per unit of cost:
 - [ ] A machine with MIMIC-CXR-JPG, the v1 cohort files, Python 3.10+,
       8+ CPU cores and ~10 GB free disk
 - [ ] A Hugging Face account, with the MedSigLIP terms accepted (for M2)
+- [ ] AI assistants never see record-level MIMIC data (`v2/README.md` §9)
 - [ ] A GPU provider account (for M3)
 - [ ] Agreement on the task definition (§3), the label policy (§3) and the
       gates G0-G2 (§6)
