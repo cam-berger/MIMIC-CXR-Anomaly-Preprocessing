@@ -7,7 +7,7 @@ task definition and decision gates are in [`docs/V2_PLAN.md`](../docs/V2_PLAN.md
 This file covers how to run it.
 
 ```
-M0 prepare_data -> M1 embed + probe -> (M2 zero-shot) -> M3 fine-tune -> (M4 + vitals) -> evaluate
+M0 prepare_data -> M1 embed + probe -> (M2 zero-shot) -> M3 fine-tune -> M4 pre-imaging text -> evaluate
      laptop           laptop or GPU          optional         GPU (or Apple GPU)    laptop       anywhere
 ```
 
@@ -30,6 +30,10 @@ Put your paths in `.env` at the repo root. Every v2 command and script reads it.
 MIMIC_CXR_JPG_PATH=/Volumes/<drive>/mimic-cxr-jpg/2.1.0   # the folder with files/ and the CSVs
 OUTPUT_PATH=./output
 COHORT_DIR=./output/cohorts       # v1's anomalous_{train,val}.parquet
+# M4 only: text and triage data from before each X-ray
+MIMIC_CXR_REPORTS_PATH=/Volumes/<drive>/mimic-cxr/2.1.0/mimic-cxr-reports.zip   # from the MIMIC-CXR project
+MIMIC_IV_ED_PATH=/Volumes/<drive>/mimic-iv-ed/2.2   # the folder with ed/edstays and ed/triage
+MIMIC_IV_PATH=/Volumes/<drive>/mimiciv/3.1          # optional: hosp/patients, for age
 ```
 
 Then check the machine and the data:
@@ -53,7 +57,7 @@ them with v1's `python build_cohort.py --anomalous-only`.
 | Check **G1** | `output/v2/reports/summary.md` | | |
 | M2 (optional) | `bash v2/scripts/run.sh m2 eval` (accept the MedSigLIP terms first, see §6) | laptop or GPU | like M1 |
 | M3 | `bash v2/scripts/run.sh smoke m3 eval` (§3); `gpu` also runs M1 and M2 there | rented GPU | about 2 h on an A100-40GB (measured: 2.15 instance hours, about $3-4) |
-| M4 (optional) | `bash v2/scripts/run.sh m4 eval` | laptop | minutes |
+| M4: text written before the X-ray | `SIZE=518 bash v2/scripts/run.sh m4 eval`; read `reports/m4_rad-dino_518.md` (red flags, then **G4**) | laptop | about 15 min |
 
 `run.sh` writes a log per step to `output/v2/logs/` and stops at the first
 failure. Its settings (`SIZE`, `MAX_TRAIN`, `FT_BATCH`/`FT_ACCUM`,
@@ -128,14 +132,17 @@ measurable_classes.json    frozen measurable classes per test set (§3.2)
 embeddings/{model}_{size}.npz             frozen embeddings (M1, M2) and fine-tuned ones (M3)
 predictions/{run}.parquet + {run}.json    one format for every model: val and test scores + how they were made
 runs/{run}/                               fine-tunes: last.pt (resume), best.pt, history.json, config.json
+context.parquet                           M4 inputs per study: indication, chief complaint, prior report, vitals (record-level: keep local)
+context_audit.md / .json                  M4 coverage and leak-guard counts (aggregate)
 reports/{run}.md|json                     per-class AUROC [95% CI], AUPRC, prevalence, per test set
 reports/summary.md                        all runs side by side, gates G1 and G2, rows for the results log
 reports/compare_A__B__{test set}.md       paired bootstrap comparisons
+reports/m4_{embeddings}.md                M4: leakage red flags, every arm against `image`, gate G4
 logs/                                     one log per run.sh step
 ```
 
 Runs are named `{model}_{size}_probe`, `{model}_{size}_zeroshot`,
-`{model}_{size}_ft_s{seed}` and `{embeddings}_fuse_{imageonly|vitals}`. Runs
+`{model}_{size}_ft_s{seed}` and `{embeddings}_ctx_{arm}` (M4; arms in `v2/fuse.py`). Runs
 ending in `_smoke` only check the setup and are left out of the summary.
 
 ## 5. Reading the results
@@ -164,7 +171,8 @@ python -m v2.embed --model {rad-dino,dinov2-base,medsiglip,densenet121} --size 2
 python -m v2.probe --embeddings output/v2/embeddings/rad-dino_224.npz
 python -m v2.zero_shot --model medsiglip
 python -m v2.finetune --model rad-dino --size 518 --seed 0 [--resume] [--smoke] [--max-hours H] [--save-embeddings]
-python -m v2.fuse --embeddings output/v2/embeddings/rad-dino_518.npz --cohort-dir output/cohorts
+python -m v2.context [--reports ZIP_OR_DIR] [--mimic-iv-ed DIR] [--mimic-iv DIR]   # M4 inputs -> context.parquet
+python -m v2.fuse --embeddings output/v2/embeddings/rad-dino_518.npz [--arms image,image_text]
 python -m v2.evaluate --all | --run RUN... | --compare RUN_A RUN_B
 python -m v2.doctor [--load-models]
 python -m v2.smoke                # the synthetic end-to-end wiring check
@@ -232,7 +240,8 @@ verified that your account's data handling meets those requirements, keep MIMIC
 content out of the conversation:
 
 - Let the assistant run the v2 commands, but not open, print or list the
-  dataset, the cohort files, `manifest.parquet`, embeddings or predictions.
+  dataset, the cohort files, `manifest.parquet`, `context.parquet`, embeddings or
+  predictions.
 - v2's console output is aggregate only: counts, metrics and paths.
   Record-level diagnostics, such as which images were unreadable, go to local
   files like `output/v2/unreadable_images.csv`, and those stay local.
@@ -254,3 +263,5 @@ content out of the conversation:
 | `run.sh` stops with "transformers X, but v2 pins Y" | It found a Python other than the project venv. It uses `.venv-v2/bin/python` when that exists; run `bash v2/scripts/setup.sh`, or set `PYTHON=` to the venv's python. `ALLOW_UNPINNED=1` overrides the check, but embeddings at 224 px then differ from pinned runs |
 | `measurable classes changed` warning | `prepare_data` was re-run with different data; the lists should stay frozen after M0 |
 | M2 skipped | No MedSigLIP access, see §6 |
+| `m4 needs MIMIC_CXR_REPORTS_PATH` | Download `mimic-cxr-reports.zip` from the MIMIC-CXR project (not MIMIC-CXR-JPG) and set the path in `.env`; `python -m v2.doctor` checks it |
+| `RED FLAG` in the M4 report | A text-only arm is as good as the image, or a class scores above 0.90 on text alone. Don't read G4: inspect the extraction locally, without sharing the text |

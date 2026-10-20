@@ -15,7 +15,8 @@ v2 answers three questions, cheapest first:
 
 Not in v2.0: text inputs, cross-attention fusion, MAE pretraining, report
 generation, anything that needs more than one GPU session. These are in the
-backlog (§10).
+backlog (§10). M4, added after v2.0, brings in text written before the X-ray
+(§6).
 
 ## 2. Starting point: what v1 tells us
 
@@ -48,7 +49,7 @@ secondary. The primary goal is a clean number we believe.
 |---|---|
 | Population | v1's abnormal cohort: the studies in `output/cohorts/anomalous_{train,val}.parquet` (~32.5k studies), de-duplicated by `study_id`. It is a non-random subset of abnormal studies (see below). |
 | Image | One frontal image per study: PA if present, else AP, from `ViewPosition` in `mimic-cxr-2.0.0-metadata.csv.gz` (ties: lowest `dicom_id`). Studies with no frontal image are dropped and counted. |
-| Inputs | The image only. Nothing recorded after the X-ray, ever. |
+| Inputs | The image only in M0-M3; M4 adds text written before the X-ray. Nothing recorded after the X-ray, ever. |
 | Labels | The 12 CheXpert pathologies, in v1 order: Atelectasis, Cardiomegaly, Consolidation, Edema, Enlarged Cardiomediastinum, Fracture, Lung Lesion, Lung Opacity, Pleural Effusion, Pleural Other, Pneumonia, Pneumothorax |
 | Label policy | `1` → positive; `0` or blank → negative; `-1` (uncertain) → ignored for that label |
 
@@ -256,23 +257,70 @@ the instance is deleted.
 frozen probe on `test_clean` (paired 95% CI of the difference above 0).
 Otherwise the frozen probe is the baseline: simpler, and as good.
 
-### M4: Add triage vitals (CPU, optional)
+### M4: Pre-imaging text + image (CPU; written 2026-10-20, before any M4 run)
 
-**Question:** do pre-imaging vitals add anything to the image?
+**Question:** does clinical text written before the X-ray add anything to the image?
 
-1. Features: the image embedding (frozen by default; fine-tuned embeddings
-   were fit on the training studies, which would understate what vitals add),
-   plus age, sex, and triage temperature, heart rate, respiratory rate, SpO2,
-   blood pressure and acuity, with missing-value indicators. These come from
-   the triage columns of v1's cohort files, not `structured.parquet`, whose
-   aggregates include values recorded after the X-ray.
-2. Vitals count only when the ED arrival time is at or before the X-ray;
-   otherwise they are missing. All studies stay in, so both models are scored
-   on the same test studies.
-3. Fit a logistic regression and compare paired against image-only.
+v1 combined text with the image, but its text either was the report the labels
+come from or included data recorded after the X-ray (labs, discharge codes).
+M4 uses only text that existed before the X-ray, and measures what it adds to
+the image alone, paired, on `test_clean`. This replaces the earlier vitals-only
+M4; vitals become a secondary arm.
 
-**Done when:** the fusion report exists. Vitals are adopted only if the paired
-CI excludes 0.
+**Inputs** (`python -m v2.context`; one row per manifest study, kept local):
+
+- **Indication:** the INDICATION, HISTORY, CLINICAL INFORMATION and REASON FOR
+  EXAM sections of the study's own report, which hold the ordering clinician's
+  question. Nothing else from that report is used. FINDINGS, IMPRESSION, WET
+  READ, ADDENDUM and every other section are dropped, because the labels come
+  from them. A guard also cuts the text at any later section header that slips
+  through, and the audit counts those cuts.
+- **Chief complaint:** MIMIC-IV-ED triage `chiefcomplaint` of the most recent
+  ED stay that began at or before the X-ray and no more than 24 h before it.
+- **Prior report:** FINDINGS and IMPRESSION of the patient's most recent
+  earlier MIMIC-CXR study taken at least 24 h before. The data has no report
+  sign times, and 24 h makes it near certain the prior report existed.
+- **Triage vitals, acuity, sex and age** from the same ED stay and MIMIC-IV
+  patients (secondary arms only). Age is optional.
+- A missing source stays missing, with an indicator. Every study stays in, so
+  all arms are scored on the same studies.
+
+**Features and model:** the frozen RAD-DINO 518 px embeddings from M1. For each
+text source, TF-IDF over word 1-2-grams (letters only, min_df 5) plus a
+128-component truncated SVD, both fit on `train` only, and a presence indicator.
+The classifier is the M1 probe: per-class L2 logistic regression with C chosen
+on val.
+
+| Arm | Features | Role |
+|---|---|---|
+| `image` | image | Reference; must reproduce `rad-dino_518_probe` |
+| `image_text` | image + indication + chief complaint + prior report | **Primary (G4)** |
+| `image_indication`, `image_complaint`, `image_prior` | image + one source | Which source carries the gain |
+| `text`, `indication`, `complaint`, `prior` | text only | Controls |
+| `image_vitals`, `image_text_vitals` | adds vitals, acuity, sex, age | Secondary |
+
+**Gate G4 (fixed now):** `image_text` minus `image` on `test_clean`, with a
+paired 95% CI above 0. If it passes, pre-imaging text helps, and the next step
+is a joint image-text fine-tune on the GPU. Otherwise text as an input is
+dropped, and the next text experiment uses reports as a training signal only
+(the image-report alignment loss in §10).
+
+**Leakage red flags, checked before G4 is read:** a text-only arm that beats
+`image` on `test_clean`, or any measurable class whose text-only AUROC on
+`test_clean` exceeds 0.90. Either one means stop and inspect the extraction locally before
+interpreting anything.
+
+**Exploratory, after G4 is read:** a frozen local biomedical text encoder
+(PubMed-trained, no MIMIC exposure) in place of TF-IDF.
+
+**Data:** MIMIC-CXR free-text reports (`mimic-cxr-reports.zip`, from the
+MIMIC-CXR project rather than MIMIC-CXR-JPG), MIMIC-IV-ED 2.2 (`ed/edstays`,
+`ed/triage`) and optionally MIMIC-IV `hosp/patients`. Everything runs locally.
+No text goes to an external API, and only aggregate output reaches an AI
+assistant.
+
+**Done when:** `context_audit.md` and every arm's predictions exist, the
+red flags are checked and G4 is logged in §9.
 
 ## 7. Code
 
@@ -289,7 +337,8 @@ v2/
   probe.py          # M1: per-class logistic regression -> predictions
   zero_shot.py      # M2
   finetune.py       # M3: plain PyTorch loop, bf16, checkpoint every epoch, --resume
-  fuse.py           # M4
+  context.py        # M4 inputs: indication, ED chief complaint, prior report, vitals (+ leak guards, audit)
+  fuse.py           # M4 arms: text features fit on train, late fusion with the probe, red flags, gate G4
   evaluate.py       # metrics, bootstrap CIs, paired comparisons, reports, gates
   doctor.py         # setup check for any machine
   synth.py          # synthetic MIMIC-CXR-JPG tree with a planted signal (tests)
@@ -408,8 +457,11 @@ Ordered by expected value per unit of cost:
 5. **Anomaly detection** (normal vs. abnormal) from foundation embeddings, as
    the distance to the nearest normal studies. Uses the normal cohort and
    revisits the repo's original goal.
-6. **Clinical text** (chief complaint) through a small text encoder, only if
-   M4 shows that pre-imaging data helps.
+6. **Reports as a training signal only:** fine-tune RAD-DINO with an extra
+   loss that aligns each image with its own report (findings and impression).
+   Reports are used in training only and the test is image-only, so nothing
+   leaks. It runs after M4 whichever way G4 goes (§6 M4); if G4 passes, it
+   shares the GPU session with the joint image-text fine-tune.
 7. Ensembles and test-time augmentation.
 8. **LP-FT:** start the fine-tune's head from the frozen probe instead of from
    scratch. It tends to distort pretrained features less and to transfer

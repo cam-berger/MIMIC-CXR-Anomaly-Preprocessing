@@ -176,8 +176,49 @@ def check_cohort(r: Report, cohort_dir: Optional[Path]) -> None:
             r.fail(f"{path.name}: needs subject_id and study_id")
             continue
         rows = pq.ParquetFile(path).metadata.num_rows
-        has_vitals = "triage_temperature" in names and "intime" in names
-        r.ok(f"{path.name}: {rows:,} rows" + ("" if has_vitals else " (no triage columns: M4 unavailable)"))
+        r.ok(f"{path.name}: {rows:,} rows")
+
+
+def check_context_sources(r: Report, out_dir: Path) -> None:
+    """M4 inputs (docs/V2_PLAN.md §6 M4). Only M4 needs them, so a missing source is a warning."""
+    r.section("M4 sources (text written before the X-ray)")
+    from .context import Reports, find_csv
+
+    value = os.environ.get("MIMIC_CXR_REPORTS_PATH")
+    if not value:
+        r.warn("No MIMIC_CXR_REPORTS_PATH: M4 has no indications or prior reports "
+               "(mimic-cxr-reports.zip, from the MIMIC-CXR project on PhysioNet)")
+    elif not Path(value).expanduser().exists():
+        r.fail(f"MIMIC_CXR_REPORTS_PATH: {value} does not exist")
+    else:
+        reports = Reports(Path(value).expanduser())
+        manifest = out_dir / "manifest.parquet"
+        if len(reports) == 0:
+            r.fail(f"{value}: no report files (expected files/pXX/pXXXXXXXX/sXXXXXXXX.txt)")
+        elif manifest.exists():
+            import pandas as pd
+
+            m = pd.read_parquet(manifest, columns=["subject_id", "study_id"])
+            sample = m.sample(n=min(200, len(m)), random_state=0)
+            found = sum(reports.get(su, st) is not None for su, st in zip(sample["subject_id"], sample["study_id"]))
+            (r.ok if found >= 0.95 * len(sample) else r.warn)(
+                f"reports: {found} of {len(sample)} sampled manifest studies have one")
+        else:
+            r.ok(f"reports found in {value}")
+        reports.close()
+
+    value = os.environ.get("MIMIC_IV_ED_PATH")
+    if not value:
+        r.warn("No MIMIC_IV_ED_PATH: M4 has no chief complaints or triage vitals")
+    else:
+        root = Path(value).expanduser()
+        missing = [n for n in ("edstays", "triage") if find_csv(root, n) is None]
+        (r.fail if missing else r.ok)(f"MIMIC-IV-ED: {'missing ' + ', '.join(missing) if missing else 'edstays and triage found'}")
+
+    value = os.environ.get("MIMIC_IV_PATH")
+    has_patients = bool(value) and find_csv(Path(value).expanduser(), "patients") is not None
+    (r.ok if has_patients else r.warn)("MIMIC-IV hosp/patients " + ("found" if has_patients else
+                                                                    "not found: M4 runs without age"))
 
 
 def check_output(r: Report, out_dir: Path) -> None:
@@ -273,6 +314,7 @@ def main(argv: Optional[list[str]] = None) -> None:
     check_mimic(r, Path(root).expanduser() if root else None, args.sample, Path(cohort) if cohort else None)
     check_cohort(r, Path(cohort) if cohort else None)
     check_output(r, out_dir)
+    check_context_sources(r, out_dir)
     check_hub(r, args.load_models, args.device)
     print(f"\n{r.failures} failed, {r.warnings} warnings")
     sys.exit(1 if r.failures else 0)

@@ -5,13 +5,15 @@ Wiring check: the whole v2 pipeline on synthetic data, in about a minute on CPU.
     python -m v2.smoke --keep /tmp/v2_smoke
 
 Builds a synthetic MIMIC-CXR-JPG tree with a planted signal (v2.synth), then
-runs prepare_data -> embed -> probe -> zero_shot -> finetune (+ resume) -> fuse
--> evaluate with test-size encoders, through the same command-line entry points
-you will use on real data. It passes only if every stage runs AND the planted
-signal is recovered end to end: with the "test-pixels" encoder, test_clean
-macro AUROC must be >= 0.9, and must fall below 0.7 when the embeddings are
-deliberately misaligned with their studies (proof that the check has teeth).
-No downloads, no MIMIC data needed.
+runs prepare_data -> embed -> probe -> zero_shot -> finetune (+ resume) ->
+context + fuse -> evaluate with test-size encoders, through the same
+command-line entry points you will use on real data. It passes only if every
+stage runs AND the planted signal is recovered end to end: with the
+"test-pixels" encoder, test_clean macro AUROC must be >= 0.9, and must fall
+below 0.7 when the embeddings are deliberately misaligned with their studies
+(proof that the check has teeth). For M4, no study's input may contain its own
+findings, while the same text-only arm fed whole reports must score > 0.95
+(proof that the leak trap has teeth). No downloads, no MIMIC data needed.
 """
 
 from __future__ import annotations
@@ -27,8 +29,9 @@ from pathlib import Path
 from typing import Callable, Optional
 
 import numpy as np
+import pandas as pd
 
-from . import embed, evaluate, finetune, fuse, prepare_data, probe, zero_shot
+from . import context, embed, evaluate, finetune, fuse, prepare_data, probe, zero_shot
 from .common import load_manifest, setup_logging
 from .synth import make_dataset
 
@@ -118,15 +121,37 @@ def run_checks(work: Path, patients: int = 400) -> list[tuple[str, bool, str]]:
     stage("M3 fine-tune + resume (learns)", m3)
 
     def m4() -> str:
-        fuse.main(["--embeddings", str(out / "embeddings" / "tiny-siglip_32.npz"),
-                   "--cohort-dir", str(paths.cohort_dir), "--n-boot", "100", "--jobs", "2", *common])
-        return "image-only and image+vitals predictions written"
+        context.main(["--reports", str(paths.reports), "--mimic-iv-ed", str(paths.mimic_iv_ed),
+                      "--mimic-iv", str(paths.mimic_iv), "--mimic-cxr-jpg", str(paths.mimic_root), *common])
+        ctx = pd.read_parquet(out / "context.parquet")
+        leaks = sum(f"leak{study}" in text for col in context.TEXT_SOURCES
+                    for study, text in zip(ctx["study_id"], ctx[col]))
+        assert leaks == 0, f"{leaks} inputs contain their own study's findings"
+        emb = out / "embeddings" / "tiny-siglip_32.npz"
+        fuse.main(["--embeddings", str(emb), "--n-boot", "100", "--jobs", "2", *common])
+        text_only = evaluate._get(evaluate.evaluate_run(out, "tiny-siglip_32_ctx_text", n_boot=50),
+                                  "test_clean", "v2")["macro_auroc"]
+        # Negative control: the indication arm fed whole reports, findings included, must look far too good.
+        reports = context.Reports(paths.reports)
+        whole = [reports.get(subject, study) or "" for subject, study in zip(ctx["subject_id"], ctx["study_id"])]
+        reports.close()
+        leaky = out / "context_leaky.parquet"
+        ctx.assign(indication=whole).to_parquet(leaky, index=False)
+        fuse.main(["--embeddings", str(emb), "--context", str(leaky), "--arms", "indication", "--run", "leaky",
+                   "--n-boot", "50", "--jobs", "2", *common])
+        leaked = evaluate._get(evaluate.evaluate_run(out, "leaky_ctx_indication", n_boot=50),
+                               "test_clean", "v2")["macro_auroc"]
+        for path in [*(out / "predictions").glob("leaky_*"), *(out / "reports").glob("leaky_*"),
+                     out / "reports" / "m4_leaky.md", leaky]:
+            path.unlink(missing_ok=True)
+        assert leaked > 0.95, f"whole reports scored only {leaked:.3f}: the leak trap has no teeth"
+        return f"no input holds its own findings; text-only {text_only:.3f}, whole reports {leaked:.3f}"
 
-    stage("M4 fuse", m4)
+    stage("M4 context + fuse (leak trap)", m4)
 
     def reports() -> str:
         text = evaluate.summarize(out, n_boot=100)
-        assert "G1" in text and "G2" in text
+        assert "G1" in text and "G2" in text and "G4" in text
         n = len(list((out / "reports").glob("*.md")))
         return f"{n} reports, summary with gates"
 

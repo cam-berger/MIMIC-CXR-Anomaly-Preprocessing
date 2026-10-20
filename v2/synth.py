@@ -8,12 +8,19 @@ Lateral images carry no signal. If a pipeline picks a lateral view, or
 misaligns images and labels, the planted signal disappears and AUROC falls to
 about 0.5, which is what the wiring check looks for.
 
+For M4 it also writes free-text reports (mimic-cxr-reports.zip), MIMIC-IV-ED
+stays and triage, and MIMIC-IV patients. Indications and chief complaints carry
+a weak planted signal. Every report's findings, impression and wet read carry a
+perfect one: the marker leak{study_id} and the names of its positive labels.
+That text must never reach an M4 input for its own study.
+
     python -m v2.synth --out /tmp/fake_mimic --patients 300
 """
 
 from __future__ import annotations
 
 import argparse
+import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -53,6 +60,19 @@ LAYOUTS = (
 )
 VIEW_MEANING = {"PA": "postero-anterior", "AP": "antero-posterior", "LATERAL": "lateral", "LL": "left lateral"}
 
+# M4 text: label -> (phrase, rate when positive, rate otherwise), planted in indications and chief complaints.
+HINTS = {
+    "Pneumonia": ("fever and productive cough, eval for pneumonia", 0.6, 0.1),
+    "Edema": ("worsening dyspnea, history of chf", 0.5, 0.1),
+    "Pneumothorax": ("chest tube check", 0.5, 0.05),
+}
+NEUTRAL_HINTS = ("chest pain", "routine preoperative film", "line placement", "weakness", "fall from standing")
+COMPLAINTS = {"Pneumonia": ("Fever", 0.5, 0.1), "Edema": ("Dyspnea", 0.4, 0.1)}
+NEUTRAL_COMPLAINTS = ("Chest pain", "Abd pain", "Fall", "Weakness", "Cough")
+# Report layouts seen in MIMIC-CXR, including the ones that could leak findings into an indication.
+REPORT_STYLES = (("standard", 0.5), ("wet_read", 0.15), ("history", 0.1), ("inline", 0.1),
+                 ("headerless_findings", 0.08), ("no_indication", 0.07))
+
 
 @dataclass
 class SynthPaths:
@@ -61,6 +81,9 @@ class SynthPaths:
     rad_dino_list: Path
     v1_val_subjects: set
     official: dict  # subject_id -> official split
+    reports: Optional[Path] = None      # mimic-cxr-reports.zip
+    mimic_iv_ed: Optional[Path] = None  # MIMIC-IV-ED root (ed/edstays, ed/triage)
+    mimic_iv: Optional[Path] = None     # MIMIC-IV root (hosp/patients)
 
 
 def _dicom_id(rng: np.random.Generator) -> str:
@@ -118,7 +141,7 @@ def make_dataset(
     probs = np.array([p for _, p in LAYOUTS])
     probs = probs / probs.sum()
 
-    meta_rows, split_rows, label_rows, cohort_rows = [], [], [], []
+    meta_rows, split_rows, label_rows, cohort_rows, studies = [], [], [], [], []
     official = {}
     study_counter = 50_000_000
     for i in range(n_patients):
@@ -130,6 +153,7 @@ def make_dataset(
             study_counter += int(rng.integers(1, 5000))
             study_id = study_counter
             raw, no_finding = _study_labels(rng)
+            studies.append((subject_id, study_id, raw))
             views = layouts[int(rng.choice(len(layouts), p=probs))]
             date = 21500101 + int(rng.integers(0, 28)) + 100 * int(rng.integers(0, 12)) + 10000 * s
             # MIMIC stores StudyTime as a float, so early times lose their leading zeros.
@@ -189,7 +213,11 @@ def make_dataset(
     rad_list = root / "rad_dino_training_images.csv"
     pd.DataFrame(rad_rows).to_csv(rad_list, index=False)
 
-    cohort_dir, v1_val_subjects = None, set()
+    # Text for M4 comes from its own generator, so the images and labels above do not change.
+    trng = np.random.default_rng(seed + 1000)
+    reports = _write_reports(root / "mimic-cxr-reports.zip", studies, trng)
+
+    cohort_dir, v1_val_subjects, ed_root, iv_root = None, set(), None, None
     if with_cohort:
         cohort_dir = root / "cohorts"
         cohort_dir.mkdir(parents=True, exist_ok=True)
@@ -200,8 +228,87 @@ def make_dataset(
         cohort.to_parquet(cohort_dir / "anomalous_full.parquet", index=False)
         cohort[~is_val].to_parquet(cohort_dir / "anomalous_train.parquet", index=False)
         cohort[is_val].to_parquet(cohort_dir / "anomalous_val.parquet", index=False)
+        ed_root = _write_ed_tables(root / "mimic-iv-ed" / "2.2", cohort, trng)
+        iv_root = _write_patients(root / "mimiciv" / "3.1", cohort)
 
-    return SynthPaths(mimic, cohort_dir, rad_list, v1_val_subjects, official)
+    return SynthPaths(mimic, cohort_dir, rad_list, v1_val_subjects, official, reports, ed_root, iv_root)
+
+
+def _pick(rng: np.random.Generator, raw: np.ndarray, table: dict, neutral: tuple) -> str:
+    """Planted phrases for the study's labels, or a neutral one."""
+    picks = [phrase for label, (phrase, pos, neg) in table.items()
+             if rng.random() < (pos if raw[LABELS.index(label)] == 1.0 else neg)]
+    return ", ".join(picks) if picks else neutral[int(rng.integers(len(neutral)))]
+
+
+def _report(rng: np.random.Generator, study_id: int, raw: np.ndarray) -> str:
+    leak = f"leak{study_id} " + " ".join(LABELS[k].lower() for k in range(len(LABELS)) if raw[k] == 1.0)
+    indication = "___M with " + _pick(rng, raw, HINTS, NEUTRAL_HINTS)
+    probs = np.array([p for _, p in REPORT_STYLES])
+    style = REPORT_STYLES[int(rng.choice(len(REPORT_STYLES), p=probs / probs.sum()))][0]
+    title = "                                 FINAL REPORT\n"
+    if style == "inline":
+        return (f" CHEST RADIOGRAPH PERFORMED ON ___  COMPARISON: ___. CLINICAL HISTORY: {indication}. "
+                f"FINDINGS: {leak}. IMPRESSION: {leak}.\n")
+    if style == "headerless_findings":
+        return f"{title} INDICATION:  {indication}\n\n {leak}. The lungs are clear.\n"
+    text = title + " EXAMINATION:  CHEST (PA AND LAT)\n\n"
+    if style != "no_indication":
+        text += f" {'HISTORY' if style == 'history' else 'INDICATION'}:  {indication}\n\n"
+    text += (" TECHNIQUE:  Chest PA and lateral\n\n COMPARISON:  ___\n\n"
+             f" FINDINGS:\n\n {leak}. The cardiomediastinal silhouette is stable.\n\n IMPRESSION:\n\n {leak}.\n")
+    if style == "wet_read":
+        text = f" WET READ: ___ ___ 10:12 PM\n   {leak}\n {'_' * 78}\n" + text
+    return text
+
+
+def _write_reports(path: Path, studies: list, rng: np.random.Generator) -> Path:
+    """One report per study, as in mimic-cxr-reports.zip; about 2% are missing."""
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as zf:
+        for subject_id, study_id, raw in studies:
+            text = _report(rng, study_id, raw)
+            if rng.random() < 0.02:
+                continue
+            sid = str(subject_id)
+            zf.writestr(f"files/p{sid[:2]}/p{sid}/s{study_id}.txt", text)
+    return path
+
+
+def _write_ed_tables(root: Path, cohort: pd.DataFrame, rng: np.random.Generator) -> Path:
+    """MIMIC-IV-ED edstays and triage for the cohort's ED stays, plus decoys that must never be linked."""
+    stays = cohort.dropna(subset=["stay_id"]).copy()
+    stays["chiefcomplaint"] = [_pick(rng, r, COMPLAINTS, NEUTRAL_COMPLAINTS) for r in stays[list(LABELS)].to_numpy()]
+    stays.loc[stays["intime"] > stays["study_datetime"], "chiefcomplaint"] = "later visit"   # arrival after the X-ray
+    stale = stays.iloc[::10].copy()                                                       # ended long before it
+    stale["stay_id"] = stale["stay_id"] + 50_000_000
+    stale["intime"] = stale["study_datetime"] - pd.to_timedelta(rng.uniform(30, 60, len(stale)), unit="h")
+    stale["outtime"] = stale["intime"] + pd.Timedelta(hours=6)
+    stale["chiefcomplaint"] = "stale visit"
+    stays = pd.concat([stays, stale], ignore_index=True)
+    stays["stay_id"] = stays["stay_id"].astype(np.int64)
+    (root / "ed").mkdir(parents=True, exist_ok=True)
+    fmt = "%Y-%m-%d %H:%M:%S"
+    edstays = pd.DataFrame({
+        "subject_id": stays["subject_id"], "hadm_id": np.nan, "stay_id": stays["stay_id"],
+        "intime": stays["intime"].dt.strftime(fmt), "outtime": stays["outtime"].dt.strftime(fmt),
+        "gender": stays["gender"], "race": "UNKNOWN", "arrival_transport": "WALK IN", "disposition": "ADMITTED",
+    })
+    triage = pd.DataFrame({"subject_id": stays["subject_id"], "stay_id": stays["stay_id"],
+                           **{c: stays[f"triage_{c}"] for c in ("temperature", "heartrate", "resprate", "o2sat",
+                                                                 "sbp", "dbp")},
+                           "pain": "3", "acuity": stays["triage_acuity"], "chiefcomplaint": stays["chiefcomplaint"]})
+    edstays.to_csv(root / "ed" / "edstays.csv.gz", index=False)
+    triage.to_csv(root / "ed" / "triage.csv.gz", index=False)
+    return root
+
+
+def _write_patients(root: Path, cohort: pd.DataFrame) -> Path:
+    """MIMIC-IV hosp/patients for the cohort's patients (anchor year 2150, like the synthetic study dates)."""
+    (root / "hosp").mkdir(parents=True, exist_ok=True)
+    patients = cohort.drop_duplicates("subject_id")[["subject_id", "gender", "anchor_age"]].assign(
+        anchor_year=2150, anchor_year_group="2017 - 2019", dod=np.nan)
+    patients.to_csv(root / "hosp" / "patients.csv.gz", index=False)
+    return root
 
 
 def _cohort_frame(rng: np.random.Generator, rows: list) -> pd.DataFrame:
@@ -248,6 +355,9 @@ def main(argv: Optional[list[str]] = None) -> None:
     print(f"MIMIC-CXR-JPG root: {paths.mimic_root}")
     print(f"v1 cohort files:    {paths.cohort_dir}")
     print(f"RAD-DINO list:      {paths.rad_dino_list}")
+    print(f"Reports (M4):       {paths.reports}")
+    print(f"MIMIC-IV-ED (M4):   {paths.mimic_iv_ed}")
+    print(f"MIMIC-IV (M4):      {paths.mimic_iv}")
 
 
 if __name__ == "__main__":

@@ -437,6 +437,24 @@ def summarize(out_dir: Path, n_boot: int = N_BOOT, runs: Optional[list[str]] = N
                      f"{fmt_ci(cmp['diff'], cmp['diff_ci'])} -> **{verdict}**")
     else:
         lines.append(f"- **G2**: {missing('finetune') if not best_ft else missing('probe')}")
+    primaries = sorted(r for r, rep in reports.items() if rep["meta"].get("arm") == "image_text")
+    for run in primaries:
+        ref = run[: -len("image_text")] + "image"
+        if ref not in reports:
+            lines.append(f"- **G4**: `{ref}` is missing; it is the reference for `{run}`")
+            continue
+        cmp = compare_runs(out_dir, run, ref, "test_clean", "v2", n_boot)
+        if not np.isfinite(cmp["diff"]):
+            verdict = "n/a: no measurable classes (rehearsal data?)"
+        elif cmp["a_better"]:
+            verdict = "PASS: pre-imaging text adds to the image"
+        else:
+            verdict = "FAIL: no detectable gain from pre-imaging text"
+        prefix = run[: -len("_ctx_image_text")]
+        lines.append(f"- **G4** (`{run}` - `{ref}` on test_clean): {fmt_ci(cmp['diff'], cmp['diff_ci'])} -> "
+                     f"**{verdict}**. Read the leakage red flags in reports/m4_{prefix}.md first.")
+    if not primaries:
+        lines.append("- **G4**: no M4 runs yet")
 
     lines += ["", "## Rows for the results log (docs/V2_PLAN.md §9)", "", "```"]
     today = date.today().isoformat()

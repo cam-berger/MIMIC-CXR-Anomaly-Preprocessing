@@ -1,4 +1,4 @@
-"""M2 zero-shot scoring and M4 vitals features."""
+"""M2 zero-shot scoring and M4 fusion: features, red flags and the arms end to end."""
 
 import json
 
@@ -32,27 +32,6 @@ def test_zero_shot_rejects_embeddings_from_another_model(prepared, pixel_embeddi
         zero_shot.main(["--model", "tiny-siglip", "--out", str(prepared), "--embeddings", str(pixel_embeddings)])
 
 
-def test_vitals_after_the_xray_or_out_of_range_are_missing():
-    t = pd.Timestamp("2150-01-01 12:00")
-    manifest = pd.DataFrame({"study_id": [1, 2, 3, 4], "study_datetime": [t] * 4})
-    cohort = pd.DataFrame({
-        "study_id": [1, 2, 3],
-        "anchor_age": [50, 60, 70],
-        "gender": ["M", "F", "M"],
-        "intime": [t - pd.Timedelta(hours=2), t + pd.Timedelta(hours=1), t - pd.Timedelta(hours=1)],
-        **{col: [100.0, 100.0, 100.0] for col in fuse.VITALS},
-    })
-    cohort["triage_temperature"] = [101.0, 101.0, 500.0]  # 500 F is a data-entry error
-    feats, stats = fuse.vitals_features(manifest, cohort)
-    feats = feats.set_index("study_id")
-    assert feats.loc[1, "triage_temperature"] == 101.0
-    assert np.isnan(feats.loc[2, "triage_temperature"])  # ED arrival after the X-ray
-    assert np.isnan(feats.loc[3, "triage_temperature"])  # out of range
-    assert np.isnan(feats.loc[4, "triage_heartrate"])    # not in the cohort
-    assert feats.loc[2, "age"] == 60 and feats.loc[2, "sex_male"] == 0.0  # demographics are pre-imaging
-    assert stats["ed_arrival_before_xray"] == 2
-
-
 def test_imputation_uses_train_medians_and_adds_indicators():
     feats = pd.DataFrame({"study_id": [1, 2, 3], "a": [1.0, np.nan, 100.0]})
     out = fuse.impute_with_indicators(feats, np.array([True, True, False]))
@@ -60,10 +39,58 @@ def test_imputation_uses_train_medians_and_adds_indicators():
     assert out[:, 1].tolist() == [0.0, 1.0, 0.0]
 
 
+def test_structured_block_drops_implausible_vitals():
+    ctx = pd.DataFrame({"study_id": [1, 2, 3], **{c: [100.0, 100.0, 100.0] for c in fuse.VITALS},
+                        "sex_male": [1.0, 0.0, np.nan], "age": [50.0, 60.0, np.nan]})
+    ctx["temperature"] = [101.0, 500.0, 99.0]  # 500 F is a data-entry error
+    block = fuse.structured_block(ctx, np.array([True, True, True]))
+    n = len(fuse.VITALS) + 2
+    assert block.shape == (3, 2 * n)
+    assert block[1, n + 0] == 1.0 and block[1, 0] == 100.0  # missing indicator set; imputed with the train median
+
+
+def test_text_features_are_fit_on_train_only():
+    texts = pd.Series(["cough fever"] * 6 + ["dyspnea chf"] * 6 + ["zebra zebra"] * 4 + [None] * 2)
+    train = np.array([True] * 12 + [False] * 6)
+    block, stats = fuse.text_block(texts, train, n_components=4)
+    assert stats["train_docs"] == 12 and stats["vocabulary"] == 6  # 2 words + 1 bigram, twice; no "zebra"
+    assert np.allclose(block[12:16, :-1], 0.0)                     # words never seen in train carry nothing
+    assert block[:16, -1].tolist() == [1.0] * 16 and block[16:, -1].tolist() == [0.0, 0.0]  # presence
+
+
+def test_red_flags_catch_a_text_only_arm_that_is_too_good():
+    def res(macro, classes):
+        return {"macro_auroc": macro, "per_class": [{"label": k, "measurable": m, "auroc": a} for k, m, a in classes]}
+    clean = {"image": res(0.78, []), "indication": res(0.62, [("Edema", True, 0.95), ("Fracture", False, 0.99)]),
+             "text": res(0.80, [])}
+    flags = fuse.red_flags(clean)
+    assert any("Edema" in f for f in flags) and not any("Fracture" in f for f in flags)  # measurable classes only
+    assert any("`text`" in f for f in flags)
+    assert fuse.red_flags({"image": res(0.78, []), "text": res(0.60, [("Edema", True, 0.7)])}) == []
+
+
 def test_fuse_end_to_end(prepared, synth):
+    from v2 import context, evaluate, probe
+
     embed.main(["--model", "tiny-siglip", "--out", str(prepared), "--workers", "0"])
-    fuse.main(["--embeddings", str(prepared / "embeddings" / "tiny-siglip_32.npz"),
-               "--cohort-dir", str(synth.cohort_dir), "--out", str(prepared), "--n-boot", "50", "--jobs", "1"])
-    for name in ("imageonly", "vitals"):
-        assert (prepared / "predictions" / f"tiny-siglip_32_fuse_{name}.parquet").exists()
-    assert list((prepared / "reports").glob("compare_tiny-siglip_32_fuse_vitals__*"))
+    emb = prepared / "embeddings" / "tiny-siglip_32.npz"
+    probe.main(["--embeddings", str(emb), "--out", str(prepared), "--jobs", "1"])
+    context.main(["--out", str(prepared), "--reports", str(synth.reports), "--mimic-iv-ed", str(synth.mimic_iv_ed),
+                  "--mimic-iv", str(synth.mimic_iv), "--mimic-cxr-jpg", str(synth.mimic_root)])
+    fuse.main(["--embeddings", str(emb), "--out", str(prepared), "--n-boot", "50", "--jobs", "1"])
+    for arm in fuse.ARMS:
+        meta = json.loads((prepared / "predictions" / f"tiny-siglip_32_ctx_{arm}.json").read_text())
+        assert meta["kind"] == "fuse" and meta["arm"] == arm
+    # The image arm is the M1 probe, exactly.
+    a = pd.read_parquet(prepared / "predictions" / "tiny-siglip_32_ctx_image.parquet").sort_values(["study_id", "label"])
+    b = pd.read_parquet(prepared / "predictions" / "tiny-siglip_32_probe.parquet").sort_values(["study_id", "label"])
+    assert np.array_equal(a["score"].to_numpy(), b["score"].to_numpy())
+    # The indication arm finds the planted pre-imaging hints, and only those.
+    rep = evaluate.evaluate_run(prepared, "tiny-siglip_32_ctx_indication", n_boot=20)
+    per = {c["label"]: c["auroc"] for c in evaluate._get(rep, "val", "v2")["per_class"]}
+    per_test = {c["label"]: c["auroc"] for c in evaluate._get(rep, "test_clean", "v2")["per_class"]}
+    planted = np.nanmean([per_test[k] for k in ("Pneumonia", "Edema", "Pneumothorax")])
+    assert planted > 0.6, f"planted indication signal not found: {planted:.3f} ({per})"
+    report = (prepared / "reports" / "m4_tiny-siglip_32.md").read_text()
+    assert "Leakage red flags" in report and "**G4**" in report
+    assert "G4" in evaluate.summarize(prepared, n_boot=20)

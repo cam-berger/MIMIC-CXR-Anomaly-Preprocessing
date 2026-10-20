@@ -11,13 +11,14 @@
 #   m1     rad-dino and dinov2-base embeddings + probes
 #   m2     medsiglip embeddings + zero-shot + probe      skipped without Hugging Face access
 #   m3     fine-tune rad-dino (seeds 0 and 1) + densenet121
-#   m4     triage-vitals fusion on frozen rad-dino embeddings (needs COHORT_DIR)
-#   eval   reports for every run + reports/summary.md with gates G1 and G2
+#   m4     text written before the X-ray + frozen rad-dino embeddings (needs MIMIC_CXR_REPORTS_PATH, MIMIC_IV_ED_PATH)
+#   eval   reports for every run + reports/summary.md with gates G1, G2 and G4
 #   gpu    smoke m1 m2 m3 eval
 #
 # Settings (environment or .env):
 #   MIMIC_CXR_JPG_PATH  MIMIC-CXR-JPG 2.1.0 root (m0 only)
 #   COHORT_DIR          v1 cohort files (default: $OUTPUT_PATH/cohorts if it has anomalous_train.parquet)
+#   MIMIC_CXR_REPORTS_PATH, MIMIC_IV_ED_PATH, MIMIC_IV_PATH (optional)   M4 sources (m4 only)
 #   V2_OUT              output dir (default: $OUTPUT_PATH/v2, or output/v2)
 #   SIZE                encoder input size (default: 518 on CUDA, 224 on Apple MPS or CPU)
 #   MAX_TRAIN           embed and probe only N training studies (CPU pilots); default: all
@@ -153,9 +154,13 @@ stage_m3() {
   run --hours "$FT_LIMIT" m3_densenet121 "$PY" -m v2.finetune --model densenet121 --size "$DN_SIZE" --seed 0 "${ft_args[@]}"
 }
 
-stage_m4() {
-  : "${COHORT_DIR:?m4 needs COHORT_DIR (v1 cohort files with triage columns)}"
-  run m4 "$PY" -m v2.fuse --embeddings "$OUT/embeddings/rad-dino_${SIZE}.npz" --cohort-dir "$COHORT_DIR" --out "$OUT"
+stage_m4() {  # the plan's M4 uses the 518 px embeddings: on a Mac, run it as SIZE=518 bash v2/scripts/run.sh m4 eval
+  : "${MIMIC_CXR_REPORTS_PATH:?m4 needs MIMIC_CXR_REPORTS_PATH (mimic-cxr-reports.zip)}"
+  : "${MIMIC_IV_ED_PATH:?m4 needs MIMIC_IV_ED_PATH (MIMIC-IV-ED 2.2)}"
+  local emb="$OUT/embeddings/rad-dino_${SIZE}.npz"
+  [ -f "$emb" ] || { echo "!!! m4 needs $emb (run m1 at SIZE=$SIZE first)" >&2; exit 1; }
+  run m4_context "$PY" -m v2.context --out "$OUT"
+  run m4_fuse "$PY" -m v2.fuse --embeddings "$emb" --out "$OUT"
 }
 
 stage_eval() {
