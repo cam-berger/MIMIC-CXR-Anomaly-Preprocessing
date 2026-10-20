@@ -1455,7 +1455,7 @@ for batch in test_loader:
 
 ## Production Training Results
 
-### Full Dataset Training (December 2024)
+### Full Dataset Training (December 2025)
 
 Trained on complete anomalous dataset using Lambda Cloud GH200 GPU:
 

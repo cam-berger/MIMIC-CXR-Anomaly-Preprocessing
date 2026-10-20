@@ -14,7 +14,7 @@ v2 rules: metrics are computed only in `v2/evaluate.py`, from the one prediction
 
 This is a **medical imaging pipeline** for chest X-ray anomaly detection using multimodal deep learning. The pipeline processes MIMIC datasets (images, labs, vitals, reports) and trains models to detect pathologies in chest X-rays.
 
-**Production Results (December 2024)**: Achieved **Macro AUROC 0.701, AUPRC 0.899** on 12 CheXpert pathology classes after 50 epochs of training on Lambda GH200 GPU (~$54 cost).
+**Production Results (December 2025)**: Achieved **Macro AUROC 0.701, AUPRC 0.899** on 12 CheXpert pathology classes after 50 epochs of training on Lambda GH200 GPU (~$54 cost).
 
 **Key Goal**: Train multimodal classifiers combining imaging, clinical text, and structured data for robust pathology detection.
 
@@ -232,7 +232,7 @@ CheXpert labels are NLP-extracted from radiology reports. To prevent label leaka
 - Radiology report text is excluded
 - See `docs/ARCHITECTURE.md` section "CheXpert Label Leakage Prevention"
 
-### 6. NaN/Inf Stability Fixes (December 2024)
+### 6. NaN/Inf Stability Fixes (December 2025)
 **Problem**: Training experienced catastrophic cascade failures starting at Epoch 2, where GradScaler corruption caused 100% batch failure rate for remaining 27 epochs.
 
 **Root Cause**: Creating new `GradScaler()` object lost optimizer state synchronization, causing permanent corruption.
@@ -260,7 +260,7 @@ CheXpert labels are NLP-extracted from radiology reports. To prevent label leaka
 
 **Test Coverage**: 21 unit tests + 8 integration tests (see `tests/` directory)
 
-**Production Results (December 2024)**:
+**Production Results (December 2025)**:
 - **Macro AUROC: 0.701** (50 epochs, full dataset)
 - **Macro AUPRC: 0.899**
 - Training completion: 50/50 epochs (zero cascade failures)
@@ -342,7 +342,7 @@ Set environment variables or create `.env` file with MIMIC dataset paths.
 ### Classification Training Issues
 - **Data Leakage**: If classifier achieves suspiciously high accuracy, check if `--leak-free` was used during preprocessing. CheXpert labels are extracted from radiology reports - feeding report text leaks labels.
 - **Missing Labels**: Some studies have uncertain (-1.0) or missing (NaN) labels. These are masked out during training automatically.
-- **NaN Loss During Training** ✅ **FIXED (December 2024)**:
+- **NaN Loss During Training** ✅ **FIXED (December 2025)**:
   - **Previous Issue**: Catastrophic cascade failures caused 100% batch corruption after Epoch 2 due to GradScaler reset bug
   - **Current Status**: All 4 NaN/Inf fixes implemented and validated (see section 6 above)
   - Batches with NaN/Inf loss are automatically skipped (no backward pass)

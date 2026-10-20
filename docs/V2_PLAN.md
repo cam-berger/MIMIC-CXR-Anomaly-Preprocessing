@@ -19,7 +19,7 @@ backlog (§10).
 
 ## 2. Starting point: what v1 tells us
 
-- v1 reported macro AUROC **0.701** over 12 classes (December 2024 model,
+- v1 reported macro AUROC **0.701** over 12 classes (December 2025 model,
   `docs/RESULTS.md`).
 - The per-class table in `RESULTS.md` has its **last four names shifted by
   one** (verified against MIMIC-CXR's published label statistics):
@@ -388,6 +388,7 @@ Add one row per run. Don't edit old rows; add new ones.
 | 2026-10-19 | M3 | df4fb0b | densenet121_512_ft_s0 | `test_clean` | 0.768 [0.748, 0.785] | 9 | `rad-dino_518_ft_s0` minus this: +0.019 [0.005, 0.031]. Best epoch 5 of 10. 30.4 min, 137 img/s |
 | 2026-10-19 | M3 | df4fb0b | densenet121_512_ft_s0 | `test_v1`, v1 metric | 0.796 [0.780, 0.813] | 8 | |
 | 2026-10-19 | G2 | df4fb0b | gate | `test_clean` | difference +0.012 [0.003, 0.022] | 9 | **PASS**: `rad-dino_518_ft_s1` minus `rad-dino_518_probe`, so the fine-tune is the v2 baseline; both seeds agree. `rad-dino_518_ft_s0` minus `medsiglip_448_probe_wide`: +0.005 [-0.008, 0.017], a tie. Exposure check: the fine-tunes' gaps (+0.014, +0.015) match DINOv2's (+0.016). GPU session: Lambda A100-SXM4-40GB, 2.15 instance hours, about $3-4. One environment fix: numpy<2 for Lambda's preinstalled torch (now automatic in `setup.sh`) |
+| 2026-10-20 | correction | 90be62e | v1 (reference) | | | | The v1 reference row's date is wrong: v1 was trained and reported in December 2025 (`docs/RESULTS.md`, added 2025-12-29 in 90be62e), not 2024-12. 8166273 is the `main` commit v2 branched from. The v1 docs' dates are corrected to 2025 |
 
 ## 10. Backlog (after v2.0, one at a time)
 

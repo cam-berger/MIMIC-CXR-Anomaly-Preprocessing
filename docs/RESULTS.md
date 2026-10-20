@@ -1,6 +1,6 @@
 # Production Model Results
 
-Comprehensive evaluation report for the MIMIC-CXR Multimodal Classifier trained on Lambda Cloud GH200 GPU (December 2024).
+Comprehensive evaluation report for the MIMIC-CXR Multimodal Classifier trained on Lambda Cloud GH200 GPU (December 2025).
 
 ---
 
@@ -340,6 +340,6 @@ python train_classifier.py \
 
 ---
 
-*Report generated: December 2024*
+*Report generated: December 2025*
 *Training infrastructure: Lambda Cloud GH200 (480GB)*
 *Total compute cost: ~$54*

@@ -4,7 +4,7 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
-## [1.0.0] - 2024-12-29
+## [1.0.0] - 2025-12-29
 
 ### Production Training Complete
 
@@ -24,7 +24,7 @@ See [RESULTS.md](RESULTS.md) for complete metrics.
 
 ---
 
-## [0.9.0] - 2024-12-25
+## [0.9.0] - 2025-12-25
 
 ### Validated - Lambda GH200 Validation Deployment
 
@@ -103,7 +103,7 @@ See [RESULTS.md](RESULTS.md) for complete metrics.
 
 ---
 
-### Fixed - NaN/Inf Stability Improvements (2024-12-24)
+### Fixed - NaN/Inf Stability Improvements (2025-12-24)
 
 **Critical fixes to eliminate catastrophic cascade failures during multimodal classifier training.**
 
@@ -215,17 +215,17 @@ $ python -m pytest tests/test_nan_handling.py -q
 
 ## [Previous Releases]
 
-### Classifier Training Results (2024-12-17)
+### Classifier Training Results (2025-12-17)
 - Achieved AUROC 0.669, AUPRC 0.880 before cascade failure
 - Identified and documented NaN handling issues
 - Implemented initial safety mechanisms (hard gate, weight integrity fuse)
 
-### CLIP Logit Scale Fix (2024-12-17)
+### CLIP Logit Scale Fix (2025-12-17)
 - **Fixed**: CLIP `logit_scale` parameter overflow
 - Added clamping to prevent unbounded growth
 - Reduced base LR from 1e-4 to 5e-5
 
-### FP32 Loss Computation (2024-12-17)
+### FP32 Loss Computation (2025-12-17)
 - **Fixed**: FP16 underflow in loss computations
 - All losses now compute in FP32 for numerical stability
 - Added NaN sanitization as safety net

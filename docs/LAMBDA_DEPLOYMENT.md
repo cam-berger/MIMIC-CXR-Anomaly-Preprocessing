@@ -1,7 +1,7 @@
 # Lambda GPU Deployment Guide
 ## MIMIC-CXR Classifier Training & Preprocessing
 
-**Status**: ✅ **PRODUCTION COMPLETE** - Successfully trained full multimodal classifier (December 2024)
+**Status**: ✅ **PRODUCTION COMPLETE** - Successfully trained full multimodal classifier (December 2025)
 
 > **Note**: Production training is complete. This document is retained as reference for future deployments. For results, see [RESULTS.md](RESULTS.md).
 
@@ -10,7 +10,7 @@
 
 ---
 
-## Production Training Results (December 2024)
+## Production Training Results (December 2025)
 
 ### Full Dataset Training Completed ✅
 
@@ -59,7 +59,7 @@ See [ARCHITECTURE.md](ARCHITECTURE.md#production-training-results) for complete 
 
 ## Full Dataset Deployment (27,576 Samples)
 
-### Actual Time & Cost (Completed December 2024)
+### Actual Time & Cost (Completed December 2025)
 - **Data Transfer**: ~2 hours (225 GB compressed)
 - **Preprocessing**: Already complete (data transferred pre-processed)
 - **Training (50 epochs)**: ~36 hours @ $1.50/hr = **~$54**
@@ -1050,7 +1050,7 @@ scp -i $PEM_KEY ubuntu@$LAMBDA_IP:~/mae-training/output/models/training_history.
 
 ---
 
-**Created**: 2024-11-20
-**Updated**: 2024-12-29 (Production training complete, results documented)
+**Created**: 2025-11-20
+**Updated**: 2025-12-29 (Production training complete, results documented)
 **Purpose**: Deploy and train MIMIC-CXR multimodal classifier pipeline
 **Status**: ✅ Production complete - Macro AUROC 0.701, AUPRC 0.899
