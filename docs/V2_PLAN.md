@@ -1,6 +1,6 @@
 # v2 Plan: Modern Foundation Models for CheXpert Classification
 
-**Status:** v2.0 done (M0-M3). **G2 PASS:** the fine-tuned RAD-DINO is the image-only v2 baseline, 0.787 [0.769, 0.803] on `test_clean`. **M4 done, G4 PASS:** text written before the X-ray adds +0.016 [0.009, 0.024] to frozen image features (§9). Next: the joint image-text fine-tune and reports as a training signal, in one GPU session (§6 M4, §10) · how to run: [`v2/README.md`](../v2/README.md) · **Branch:** `v2` (from `main`) · **Started:** 2026-10-18
+**Status:** v2.0 done (M0-M3). **G2 PASS:** the fine-tuned RAD-DINO is the image-only v2 baseline, 0.787 [0.769, 0.803] on `test_clean`. **M4 done, G4 PASS:** text written before the X-ray adds +0.016 [0.009, 0.024] to frozen image features (§9). Exploratory follow-ups: +0.009 [0.003, 0.014] on the fine-tuned image, and +0.009 [0.001, 0.017] on `test_v1`. Next: the joint image-text fine-tune and reports as a training signal, in one GPU session (§6 M4, §10) · how to run: [`v2/README.md`](../v2/README.md) · **Branch:** `v2` (from `main`) · **Started:** 2026-10-18
 
 ## 1. Goal
 
@@ -461,6 +461,13 @@ Add one row per run. Don't edit old rows; add new ones.
 | 2026-10-20 | M4 | f199e81 | rad-dino_518_ctx_prior | `test_clean` | 0.660 [0.635, 0.685] | 9 | Control. 0.595 on `test_v1`: priors are commoner among `test_clean` patients |
 | 2026-10-20 | M4 | f199e81 | rad-dino_518_ctx_prior | `test_v1`, v1 metric | 0.595 [0.576, 0.613] | 8 |  |
 | 2026-10-20 | G4 | f199e81 | gate | `test_clean` | difference +0.016 [0.009, 0.024] | 9 | **PASS**: `rad-dino_518_ctx_image_text` minus `rad-dino_518_ctx_image`; no leakage red flags. Inputs: indication for 99.1% of train studies, chief complaint 94.2%, prior report 56.7%, vitals 88.8%; 0 reports missing. The gain comes from the indication and the prior report; chief complaint and vitals add nothing measurable. Run on the Mac in 10 min. Next, per §6: the joint image-text fine-tune |
+| 2026-10-21 | M4, exploratory | a8060e1 | rad-dino_518_ft_s1_ctx_image | `test_clean` | 0.793 [0.775, 0.809] | 9 | Reference arm on fine-tuned features: the M1 probe refit on `rad-dino_518_ft_s1`'s embeddings. 0.006 above that fine-tune's own head (0.787); not yet paired |
+| 2026-10-21 | M4, exploratory | a8060e1 | rad-dino_518_ft_s1_ctx_image_text | `test_clean` | 0.802 [0.784, 0.819] | 9 | Minus `ft_s1_ctx_image`: +0.009 [0.003, 0.014], about half the frozen-feature gain. Likely an underestimate: the probe is fit on training studies the fine-tune has already fit, where the image looks more reliable than it is on test, so the text gets too little weight. Minus `rad-dino_518_ft_s1`: +0.015 [0.008, 0.023], which mixes the refit with the text. Highest `test_clean` score so far, but not chosen by val and not a gate |
+| 2026-10-21 | M4, exploratory | a8060e1 | rad-dino_518_ft_s1_ctx_image_indication | `test_clean` | 0.797 [0.780, 0.814] | 9 | Minus `ft_s1_ctx_image`: +0.004 [-0.000, 0.009] (+0.009 on frozen features) |
+| 2026-10-21 | M4, exploratory | a8060e1 | rad-dino_518_ft_s1_ctx_image_prior | `test_clean` | 0.797 [0.779, 0.814] | 9 | Minus `ft_s1_ctx_image`: +0.004 [0.001, 0.007] (+0.007 on frozen features) |
+| 2026-10-21 | M4, exploratory | a8060e1 | compare | `test_clean` | difference +0.005 [-0.006, 0.015] | 9 | `rad-dino_518_ctx_image_text` minus `rad-dino_518_ft_s1`: a tie. The frozen image plus text matches the fine-tuned image |
+| 2026-10-21 | M4, exploratory | a8060e1 | compare | `test_v1`, v1 metric | difference +0.009 [0.001, 0.017] | 8 | `rad-dino_518_ctx_image_text` minus `rad-dino_518_ctx_image`, now paired: the frozen text gain holds on the second test set at about half its `test_clean` size (+0.016) |
+| 2026-10-21 | M4, exploratory | a8060e1 | compare | `test_v1`, v1 metric | difference -0.000 [-0.004, 0.004] | 8 | `rad-dino_518_ctx_image_prior` minus `rad-dino_518_ctx_image`: no prior-report gain here (+0.007 on `test_clean`). Prior reports exist for 57.1% of `test_v1` studies vs 74.9% of `test_clean`, whose patients have more cohort studies each (870 / 341 = 2.6 vs 4,860 / 2,947 = 1.6). If the gain scaled with coverage alone it would be about +0.005 here, just above this CI; the classes and metric also differ. The follow-ups took 3.7 min on the Mac |
 
 ## 10. Backlog (after v2.0, one at a time)
 
