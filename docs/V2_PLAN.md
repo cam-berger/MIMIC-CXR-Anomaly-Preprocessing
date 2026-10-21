@@ -1,6 +1,6 @@
 # v2 Plan: Modern Foundation Models for CheXpert Classification
 
-**Status:** v2.0 done (M0-M3). **G2 PASS:** the fine-tuned RAD-DINO is the image-only v2 baseline, 0.787 [0.769, 0.803] on `test_clean`. **M4 done, G4 PASS:** text written before the X-ray adds +0.016 [0.009, 0.024] to frozen image features (§9). Exploratory follow-ups: +0.009 [0.003, 0.014] on the fine-tuned image; refitting the probe on the fine-tuned features adds +0.006 [0.001, 0.012]; best system by val so far: fine-tuned features + refit probe + text, 0.802 [0.784, 0.819]. Next: M4b on the Mac (§6, pre-registered 2026-10-21): text-steered attention (gate G4b), prior-study labels and a combiner fit on val. The GPU session (joint image-text fine-tune, reports as a training signal; §10) comes after G4b, which informs it. M5 (§6, pre-registered 2026-10-21): line up with published results on the standard benchmark (all frontal studies, official split), M5a on the Mac first · how to run: [`v2/README.md`](../v2/README.md) · **Branch:** `v2` (from `main`) · **Started:** 2026-10-18
+**Status:** v2.0 done (M0-M3). **G2 PASS:** the fine-tuned RAD-DINO is the image-only v2 baseline, 0.787 [0.769, 0.803] on `test_clean`. **M4 done, G4 PASS:** text written before the X-ray adds +0.016 [0.009, 0.024] to frozen image features (§9). Exploratory follow-ups: +0.009 [0.003, 0.014] on the fine-tuned image; refitting the probe on the fine-tuned features adds +0.006 [0.001, 0.012]; best system by val so far: fine-tuned features + refit probe + text, 0.802 [0.784, 0.819]. **M4b done, G4b FAIL:** text steers an attention head's focus but adds nothing detectable over late fusion (+0.004 [-0.003, 0.011]), which argues against a joint image-text fine-tune. The same head on frozen patch tokens matches the fine-tune (0.789), and fit on val, text adds +0.016 to the fine-tuned image (§9). Next: M5 (§6, pre-registered 2026-10-21): line up with published results on the standard benchmark (all frontal studies, official split), M5a on the Mac first · how to run: [`v2/README.md`](../v2/README.md) · **Branch:** `v2` (from `main`) · **Started:** 2026-10-18
 
 ## 1. Goal
 
@@ -505,6 +505,20 @@ patient-bootstrap CI, and per-class AUROC.
   budget allows). Then a probe refit on its features and M4's late fusion
   (exploratory, as in the M4 follow-ups).
 
+**Amendment (2026-10-21, before any M5 run), after M4b:** M4b's image-only
+attention head (`h0`) beat the linear probe on val (0.823 against 0.803) and
+matched the fine-tune on `test_clean`. So M5a adds M4b's heads on the
+benchmark's frozen tokens, with M4b's recipe and 5 seeds:
+- `h0` (image), like for like with ResNet-50;
+- `h1` (image + the three text sources at the logit), reported but not like
+  for like, since MMBT uses the indication only.
+
+`h2` is left out because G4b failed. One embedding pass writes both the pooled
+embeddings and the 12 x 12 token cache (about 49 GB more disk). `prepare_data`
+now stops when more than 0.5% of images fail to read, so a drive that drops
+mid-run can't silently shrink the benchmark. Everything else in M5 is
+unchanged.
+
 **Published references** (AUROC, transcribed from the papers):
 
 | Model | Inputs | Mean over our 12 classes | Paper's macro | Protocol |
@@ -539,8 +553,9 @@ frontal image per study; RAD-DINO pretrained on the official train images
 without labels, which is standard for this benchmark.
 
 **Compute:** preparing ~220k images takes 1 to 3 h (the drive's speed decides)
-and ~15 GB; RAD-DINO embeddings ~6 h on an Apple-silicon Mac; probes and
-fusion arms 1 to 2 h. M5b: about 1.7 h of an A100 per seed (~$2-3), plus
+and ~15 GB; RAD-DINO embeddings and tokens ~6 h on an Apple-silicon Mac (one
+pass, ~49 GB of tokens); probes and fusion arms 1 to 2 h; the attention heads
+about 1 h. M5b: about 1.7 h of an A100 per seed (~$2-3), plus
 uploading the images.
 
 **Done when:** `reports/lineup.md` exists for M5a (then M5b), and its rows are
@@ -699,6 +714,22 @@ Add one row per run. Don't edit old rows; add new ones.
 | 2026-10-21 | M4, exploratory | a8060e1 | compare | `test_v1`, v1 metric | difference +0.001 [-0.004, 0.006] | 8 | `rad-dino_518_ft_s1_ctx_image_text` minus `rad-dino_518_ft_s1_ctx_image`. Under the v2 policy the same gain is +0.019 on `test_v1` (unpaired: 0.836 vs 0.817) and on val (0.844 vs 0.825) |
 | 2026-10-21 | M4, exploratory | a8060e1 | rad-dino_518_ft_s1_ctx_image_text | `val` | 0.844 [0.834, 0.853] | 12 | The best val score so far (`ft_s1_ctx_image` 0.825, `ft_s1` 0.821), so fine-tuned features + refit probe + text is the best system by val: 0.802 [0.784, 0.819] on `test_clean`, 0.827 [0.811, 0.842] on `test_v1` (v1 metric). Exploratory; no gate defines it. 6 min on the Mac |
 | 2026-10-21 | correction | a8060e1 | M4 follow-ups | | | | Two notes in the 2026-10-21 rows above compared `test_v1` under the v1 metric with `test_clean` under v2. Under the same v2 policy, the frozen text gain on `test_v1` is +0.025 (unpaired: 0.820 vs 0.795) against +0.016 on `test_clean`, and the prior-report gain about +0.005 against +0.007. So `test_clean`'s higher prior coverage doesn't explain the gaps; the label policy does (§6 M4b amendment). Text gains are judged under v2 |
+| 2026-10-21 | M4b | 9e62548 | compare | `test_v1` | difference +0.025 [0.021, 0.029] | 12 | Label policy, paired: `rad-dino_518_ctx_image_text` minus `rad-dino_518_ctx_image` under v2; on fine-tuned features +0.019 [0.016, 0.022]. On `test_clean` under the v1 policy (5 classes): -0.000 [-0.014, 0.013] frozen and -0.007 [-0.018, 0.004] fine-tuned. Text gains vanish when only mentioned findings count, as the §6 M4b amendment predicts |
+| 2026-10-21 | M4b | 9e62548 | rad-dino_518_attn_h0 | `test_clean` | 0.789 [0.771, 0.805] | 9 | Head validity check passed: val 0.823 against the probe's 0.803. Minus `rad-dino_518_probe`: +0.015 [0.007, 0.023]. Attention pooling over frozen patch tokens matches the fine-tune (0.787) without one |
+| 2026-10-21 | M4b | 9e62548 | rad-dino_518_attn_h0 | `test_v1`, v1 metric | 0.818 [0.802, 0.833] | 8 | |
+| 2026-10-21 | M4b | 9e62548 | rad-dino_518_attn_h1 | `test_clean` | 0.798 [0.781, 0.813] | 9 | Minus `h0`: +0.009 [-0.002, 0.020]. Val 0.840 |
+| 2026-10-21 | M4b | 9e62548 | rad-dino_518_attn_h1 | `test_v1`, v1 metric | 0.813 [0.796, 0.828] | 8 | |
+| 2026-10-21 | M4b | 9e62548 | rad-dino_518_attn_h2 | `test_clean` | 0.802 [0.786, 0.818] | 9 | Minus `rad-dino_518_ctx_image_text`: +0.011 [0.002, 0.021], which mixes the stronger head with the fusion change. Text moves its attention (mean total variation distance 0.300), and its best epochs come earlier (2-3) than `h1`'s (5-8). Val 0.839 |
+| 2026-10-21 | M4b | 9e62548 | rad-dino_518_attn_h2 | `test_v1`, v1 metric | 0.816 [0.800, 0.831] | 8 | |
+| 2026-10-21 | G4b | 9e62548 | gate | `test_clean` | difference +0.004 [-0.003, 0.011] | 9 | **FAIL**: `rad-dino_518_attn_h2` minus `rad-dino_518_attn_h1`; on `test_v1` -0.002 [-0.006, 0.002]. Text steers the attention but not the scores, so nothing detectable is lost by fusing late; this argues against a joint image-text fine-tune (§6 M4b). 15 heads in 8.5 min on the Mac (MPS); the token cache took 53 min and 7.1 GB |
+| 2026-10-21 | M4b | 9e62548 | rad-dino_518_ctx_image_prior_labels | `test_clean` | 0.783 [0.764, 0.799] | 9 | Minus `ctx_image_prior` (TF-IDF of the same prior report): +0.001 [-0.004, 0.007]; on `test_v1` +0.003 [0.001, 0.005]. The prior study's labels add next to nothing over its report text |
+| 2026-10-21 | M4b | 9e62548 | rad-dino_518_ctx_image_prior_labels | `test_v1`, v1 metric | 0.806 [0.790, 0.821] | 8 | |
+| 2026-10-21 | M4b | 9e62548 | rad-dino_518_ctx_image_text_prior_labels | `test_clean` | 0.794 [0.776, 0.811] | 9 | Minus `ctx_image_text`: +0.003 [-0.000, 0.006]; on `test_v1` +0.002 [0.001, 0.003]. `prior_labels` alone: 0.643 [0.619, 0.667] (`test_v1`, v1 metric: 0.582); no red flags |
+| 2026-10-21 | M4b | 9e62548 | rad-dino_518_ctx_image_text_prior_labels | `test_v1`, v1 metric | 0.814 [0.799, 0.828] | 8 | |
+| 2026-10-21 | M4b | 9e62548 | rad-dino_518_ft_s1_stack_text | `test_clean` | 0.802 [0.784, 0.819] | 9 | Minus `rad-dino_518_ft_s1`: +0.016 [0.009, 0.023]; on `test_v1` +0.022 [0.018, 0.025]. Fit on val, the text gain on the fine-tuned image is close to the frozen one (+0.019, next row). The earlier +0.009 came mostly from fitting on training studies; fine-tuning absorbs little of the text |
+| 2026-10-21 | M4b | 9e62548 | rad-dino_518_ft_s1_stack_text | `test_v1`, v1 metric | 0.826 [0.810, 0.841] | 8 | |
+| 2026-10-21 | M4b | 9e62548 | rad-dino_518_probe_stack_text | `test_clean` | 0.793 [0.776, 0.810] | 9 | The check: minus `rad-dino_518_ctx_image_text` +0.002 [-0.002, 0.007], so the two-score combiner loses little. Minus `rad-dino_518_probe`: +0.019 [0.011, 0.027]. Standardized weights: image 1.12, text 0.48 |
+| 2026-10-21 | M4b | 9e62548 | rad-dino_518_probe_stack_text | `test_v1`, v1 metric | 0.811 [0.795, 0.826] | 8 | The whole M4b stage took 71 min on the Mac. The external drive dropped off the bus twice while idle; the doctor caught the stale mount before the run, which then used `caffeinate -ims` |
 
 ## 10. Backlog (after v2.0, one at a time)
 
