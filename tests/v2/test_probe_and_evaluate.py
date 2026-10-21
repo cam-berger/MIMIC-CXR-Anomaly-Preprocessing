@@ -177,3 +177,21 @@ def test_gates_ignore_flagged_encoders_and_exposure_check_is_reported(prepared, 
     assert " †" in text and "Exposure check" in text
     rep = json.loads((prepared / "reports" / "clean_probe.json").read_text())
     assert rep["exposure_check"]["classes"] == json.loads((prepared / "measurable_classes.json").read_text())["test_clean:v2"]
+
+
+def test_g4_is_only_for_frozen_features_and_log_rows_carry_the_run_date(prepared):
+    runs = {"frz_ctx_image": ("image", "frozen"), "frz_ctx_image_text": ("image_text", "frozen"),
+            "ft_ctx_image": ("image", "fine-tuned"), "ft_ctx_image_text": ("image_text", "fine-tuned")}
+    for run, (arm, features) in runs.items():
+        _fake_run(prepared, run, 0.5 if arm == "image_text" else 1.0)
+        path = prepared / "predictions" / f"{run}.json"
+        meta = json.loads(path.read_text())
+        path.write_text(json.dumps({**meta, "kind": "fuse", "arm": arm, "image_features": features,
+                                    "created": "2026-01-02T03:04:05+00:00"}))
+    text = evaluate.summarize(prepared, n_boot=20, runs=list(runs))
+    assert any(line.startswith("- **G4** (`frz_ctx_image_text`") for line in text.splitlines())
+    assert any(line.startswith("- M4 on fine-tuned features (exploratory, not G4) (`ft_ctx_image_text`")
+               for line in text.splitlines())
+    assert "| 2026-01-02 | M4 |" in text  # the run's own date, not the day the summary was written
+    only_finetuned = evaluate.summarize(prepared, n_boot=20, runs=["ft_ctx_image", "ft_ctx_image_text"])
+    assert "no M4 runs on frozen image features yet" in only_finetuned

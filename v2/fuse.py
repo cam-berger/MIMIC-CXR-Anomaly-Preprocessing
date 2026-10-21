@@ -149,8 +149,11 @@ def reproduces_probe(out_dir: Path, image_run: str, probe_run: str) -> Optional[
     return float(np.max(np.abs(both[cols].to_numpy() - both[[f"{c}_m1" for c in cols]].to_numpy())))
 
 
-def gate_report(out_dir: Path, prefix: str, runs: dict, n_boot: int) -> dict:
-    """Red flags, paired comparisons against `image` on test_clean, gate G4; writes reports/m4_{prefix}.md."""
+def gate_report(out_dir: Path, prefix: str, runs: dict, n_boot: int, features: str = "frozen") -> dict:
+    """
+    Red flags, paired comparisons against `image` on test_clean and gate G4; writes reports/m4_{prefix}.md.
+    G4 is defined on frozen image features. On fine-tuned ones the same comparison is exploratory.
+    """
     reps = {arm: evaluate_run(out_dir, run, n_boot) for arm, run in runs.items()}
     clean = {arm: _get(rep, "test_clean", "v2") for arm, rep in reps.items()}
     flags = red_flags(clean)
@@ -170,9 +173,13 @@ def gate_report(out_dir: Path, prefix: str, runs: dict, n_boot: int) -> dict:
         verdict = "FAIL: no detectable gain from pre-imaging text"
     drift = reproduces_probe(out_dir, runs[REFERENCE], f"{prefix}_probe") if REFERENCE in runs else None
 
+    gate = "G4" if features == "frozen" else "Text gain on fine-tuned features (exploratory, not G4)"
     lines = [f"# M4: pre-imaging text + image ({prefix})", "",
-             "Macro AUROC on test_clean; paired differences against `image` (docs/V2_PLAN.md §6 M4).", "",
-             "## Leakage red flags (read these first)", ""]
+             "Macro AUROC on test_clean; paired differences against `image` (docs/V2_PLAN.md §6 M4).", ""]
+    if features != "frozen":
+        lines += ["**Exploratory:** these image features come from a fine-tune that was fit on the training "
+                  "studies, which likely understates what text adds. G4 is defined on frozen features only.", ""]
+    lines += ["## Leakage red flags (read these first)", ""]
     lines += [f"- **RED FLAG:** {f}" for f in flags] or ["- none"]
     lines += ["", "## Arms", "", "| Arm | test_clean | minus `image` |", "|---|---|---|"]
     for arm, run in runs.items():
@@ -181,17 +188,19 @@ def gate_report(out_dir: Path, prefix: str, runs: dict, n_boot: int) -> dict:
         diff = fmt_ci(cmps[arm]["diff"], cmps[arm]["diff_ci"]) if arm in cmps else ""
         lines.append(f"| `{run}` | {auc} | {diff} |")
     g4_text = fmt_ci(g4["diff"], g4["diff_ci"]) if g4 else "-"
-    lines += ["", f"**G4** (`{PRIMARY}` minus `{REFERENCE}`): {g4_text} -> **{verdict}**", ""]
+    lines += ["", f"**{gate}** (`{PRIMARY}` minus `{REFERENCE}`): {g4_text} -> **{verdict}**", ""]
     if drift is not None:
         lines.append(f"`image` arm vs `{prefix}_probe`: largest score difference {drift:.2e} (should be 0).")
     (Path(out_dir) / "reports").mkdir(parents=True, exist_ok=True)
     (Path(out_dir) / "reports" / f"m4_{prefix}.md").write_text("\n".join(lines) + "\n")
-    return {"flags": flags, "g4": g4, "verdict": verdict, "probe_drift": drift}
+    return {"flags": flags, "g4": g4, "verdict": verdict, "probe_drift": drift, "gate": gate}
 
 
 def main(argv: Optional[list[str]] = None) -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--embeddings", required=True, help="Frozen image embeddings (.npz from v2.embed)")
+    parser.add_argument("--embeddings", required=True,
+                        help="Image embeddings: frozen ones from v2.embed (G4), or fine-tuned ones from "
+                             "v2.finetune --save-embeddings (exploratory)")
     parser.add_argument("--context", help="context.parquet from v2.context (default: OUT/context.parquet)")
     parser.add_argument("--out", default=None, help="v2 output dir (default: $OUTPUT_PATH/v2 or output/v2)")
     parser.add_argument("--run", help="Run-name prefix (default: {embeddings stem})")
@@ -228,7 +237,9 @@ def main(argv: Optional[list[str]] = None) -> None:
     structured = structured_block(ctx, train)
 
     prefix = args.run or Path(args.embeddings).stem
-    image_meta = {k: meta.get(k) for k in ("encoder", "size", "revision", "torch", "transformers")}
+    features = "fine-tuned" if meta.get("finetune_run") else "frozen"
+    image_meta = {**{k: meta.get(k) for k in ("encoder", "size", "revision", "torch", "transformers")},
+                  "image_features": features}
     runs = {}
     for arm in arms:
         use_image, sources, use_struct = ARMS[arm]
@@ -252,11 +263,11 @@ def main(argv: Optional[list[str]] = None) -> None:
         })
         runs[arm] = run
 
-    report = gate_report(out_dir, prefix, runs, args.n_boot)
+    report = gate_report(out_dir, prefix, runs, args.n_boot, features)
     for flag in report["flags"]:
         logger.warning("RED FLAG: %s", flag)
     g4 = report["g4"]
-    logger.info("G4 (%s - %s, test_clean): %s -> %s", PRIMARY, REFERENCE,
+    logger.info("%s (%s - %s, test_clean): %s -> %s", report["gate"], PRIMARY, REFERENCE,
                 fmt_ci(g4["diff"], g4["diff_ci"]) if g4 else "-", report["verdict"])
     if report["probe_drift"] is not None:
         logger.info("image arm vs %s_probe: largest score difference %.2e", prefix, report["probe_drift"])

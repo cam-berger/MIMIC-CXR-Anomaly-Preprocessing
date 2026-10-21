@@ -438,10 +438,14 @@ def summarize(out_dir: Path, n_boot: int = N_BOOT, runs: Optional[list[str]] = N
     else:
         lines.append(f"- **G2**: {missing('finetune') if not best_ft else missing('probe')}")
     primaries = sorted(r for r, rep in reports.items() if rep["meta"].get("arm") == "image_text")
+    frozen_seen = False
     for run in primaries:
+        exploratory = reports[run]["meta"].get("image_features", "frozen") != "frozen"
+        frozen_seen |= not exploratory
+        name = "M4 on fine-tuned features (exploratory, not G4)" if exploratory else "**G4**"
         ref = run[: -len("image_text")] + "image"
         if ref not in reports:
-            lines.append(f"- **G4**: `{ref}` is missing; it is the reference for `{run}`")
+            lines.append(f"- {name}: `{ref}` is missing; it is the reference for `{run}`")
             continue
         cmp = compare_runs(out_dir, run, ref, "test_clean", "v2", n_boot)
         if not np.isfinite(cmp["diff"]):
@@ -451,20 +455,21 @@ def summarize(out_dir: Path, n_boot: int = N_BOOT, runs: Optional[list[str]] = N
         else:
             verdict = "FAIL: no detectable gain from pre-imaging text"
         prefix = run[: -len("_ctx_image_text")]
-        lines.append(f"- **G4** (`{run}` - `{ref}` on test_clean): {fmt_ci(cmp['diff'], cmp['diff_ci'])} -> "
+        lines.append(f"- {name} (`{run}` - `{ref}` on test_clean): {fmt_ci(cmp['diff'], cmp['diff_ci'])} -> "
                      f"**{verdict}**. Read the leakage red flags in reports/m4_{prefix}.md first.")
-    if not primaries:
-        lines.append("- **G4**: no M4 runs yet")
+    if not frozen_seen:
+        lines.append("- **G4**: no M4 runs on frozen image features yet")
 
     lines += ["", "## Rows for the results log (docs/V2_PLAN.md §9)", "", "```"]
     today = date.today().isoformat()
     for run, rep in reports.items():
         meta = rep["meta"]
+        day = str(meta.get("created") or today)[:10]  # when the run was made, not when the summary is
         for test_set, metric in (("test_clean", "v2"), ("test_v1", "v1")):
             res = _get(rep, test_set, metric)
             if res:
                 label = f"`{test_set}`" + (", v1 metric" if metric == "v1" else "")
-                lines.append(f"| {today} | {MILESTONE.get(meta.get('kind'), '?')} | {meta.get('commit', '?')} | "
+                lines.append(f"| {day} | {MILESTONE.get(meta.get('kind'), '?')} | {meta.get('commit', '?')} | "
                              f"{run} | {label} | {fmt_ci(res['macro_auroc'], res['macro_auroc_ci'])} | "
                              f"{len(res['classes'])} | |")
     lines += ["```", ""]

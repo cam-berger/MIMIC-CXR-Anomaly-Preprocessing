@@ -1,6 +1,6 @@
 # v2 Plan: Modern Foundation Models for CheXpert Classification
 
-**Status:** v2.0 done (M0-M3; M4 parked). **G2 PASS:** the fine-tuned RAD-DINO is the v2 baseline, 0.787 [0.769, 0.803] on `test_clean` (§9). Next: v2.1 (§10) · how to run: [`v2/README.md`](../v2/README.md) · **Branch:** `v2` (from `main`) · **Started:** 2026-10-18
+**Status:** v2.0 done (M0-M3). **G2 PASS:** the fine-tuned RAD-DINO is the image-only v2 baseline, 0.787 [0.769, 0.803] on `test_clean`. **M4 done, G4 PASS:** text written before the X-ray adds +0.016 [0.009, 0.024] to frozen image features (§9). Next: the joint image-text fine-tune and reports as a training signal, in one GPU session (§6 M4, §10) · how to run: [`v2/README.md`](../v2/README.md) · **Branch:** `v2` (from `main`) · **Started:** 2026-10-18
 
 ## 1. Goal
 
@@ -438,6 +438,29 @@ Add one row per run. Don't edit old rows; add new ones.
 | 2026-10-19 | M3 | df4fb0b | densenet121_512_ft_s0 | `test_v1`, v1 metric | 0.796 [0.780, 0.813] | 8 | |
 | 2026-10-19 | G2 | df4fb0b | gate | `test_clean` | difference +0.012 [0.003, 0.022] | 9 | **PASS**: `rad-dino_518_ft_s1` minus `rad-dino_518_probe`, so the fine-tune is the v2 baseline; both seeds agree. `rad-dino_518_ft_s0` minus `medsiglip_448_probe_wide`: +0.005 [-0.008, 0.017], a tie. Exposure check: the fine-tunes' gaps (+0.014, +0.015) match DINOv2's (+0.016). GPU session: Lambda A100-SXM4-40GB, 2.15 instance hours, about $3-4. One environment fix: numpy<2 for Lambda's preinstalled torch (now automatic in `setup.sh`) |
 | 2026-10-20 | correction | 90be62e | v1 (reference) | | | | The v1 reference row's date is wrong: v1 was trained and reported in December 2025 (`docs/RESULTS.md`, added 2025-12-29 in 90be62e), not 2024-12. 8166273 is the `main` commit v2 branched from. The v1 docs' dates are corrected to 2025 |
+| 2026-10-20 | M4 | f199e81 | rad-dino_518_ctx_image | `test_clean` | 0.775 [0.756, 0.791] | 9 | Reference arm. Reproduces `rad-dino_518_probe` exactly (largest score difference 0) |
+| 2026-10-20 | M4 | f199e81 | rad-dino_518_ctx_image | `test_v1`, v1 metric | 0.803 [0.788, 0.818] | 8 |  |
+| 2026-10-20 | M4 | f199e81 | rad-dino_518_ctx_image_text | `test_clean` | 0.791 [0.774, 0.808] | 9 | **Primary (G4).** Minus `image`: +0.016 [0.009, 0.024] |
+| 2026-10-20 | M4 | f199e81 | rad-dino_518_ctx_image_text | `test_v1`, v1 metric | 0.812 [0.797, 0.827] | 8 | +0.009 over `image` here (not paired) |
+| 2026-10-20 | M4 | f199e81 | rad-dino_518_ctx_image_indication | `test_clean` | 0.783 [0.766, 0.800] | 9 | Minus `image`: +0.009 [0.004, 0.014], the largest single source |
+| 2026-10-20 | M4 | f199e81 | rad-dino_518_ctx_image_indication | `test_v1`, v1 metric | 0.807 [0.791, 0.822] | 8 |  |
+| 2026-10-20 | M4 | f199e81 | rad-dino_518_ctx_image_complaint | `test_clean` | 0.777 [0.760, 0.794] | 9 | Minus `image`: +0.003 [-0.001, 0.007], a tie |
+| 2026-10-20 | M4 | f199e81 | rad-dino_518_ctx_image_complaint | `test_v1`, v1 metric | 0.810 [0.794, 0.825] | 8 |  |
+| 2026-10-20 | M4 | f199e81 | rad-dino_518_ctx_image_prior | `test_clean` | 0.781 [0.763, 0.798] | 9 | Minus `image`: +0.007 [0.002, 0.012]. Priors exist for 74.9% of `test_clean` studies vs 56.7% of train |
+| 2026-10-20 | M4 | f199e81 | rad-dino_518_ctx_image_prior | `test_v1`, v1 metric | 0.803 [0.788, 0.818] | 8 | No gain here (57.1% have a prior; not paired) |
+| 2026-10-20 | M4 | f199e81 | rad-dino_518_ctx_image_vitals | `test_clean` | 0.774 [0.756, 0.791] | 9 | Minus `image`: -0.001 [-0.003, 0.001]: triage vitals, acuity, sex and age add nothing |
+| 2026-10-20 | M4 | f199e81 | rad-dino_518_ctx_image_vitals | `test_v1`, v1 metric | 0.806 [0.791, 0.820] | 8 |  |
+| 2026-10-20 | M4 | f199e81 | rad-dino_518_ctx_image_text_vitals | `test_clean` | 0.790 [0.772, 0.807] | 9 | Minus `image`: +0.016 [0.009, 0.023] |
+| 2026-10-20 | M4 | f199e81 | rad-dino_518_ctx_image_text_vitals | `test_v1`, v1 metric | 0.814 [0.799, 0.828] | 8 |  |
+| 2026-10-20 | M4 | f199e81 | rad-dino_518_ctx_text | `test_clean` | 0.692 [0.671, 0.713] | 9 | Control, text only: well below `image`; no measurable class above 0.90 |
+| 2026-10-20 | M4 | f199e81 | rad-dino_518_ctx_text | `test_v1`, v1 metric | 0.674 [0.654, 0.694] | 8 |  |
+| 2026-10-20 | M4 | f199e81 | rad-dino_518_ctx_indication | `test_clean` | 0.622 [0.600, 0.643] | 9 | Control |
+| 2026-10-20 | M4 | f199e81 | rad-dino_518_ctx_indication | `test_v1`, v1 metric | 0.620 [0.600, 0.638] | 8 |  |
+| 2026-10-20 | M4 | f199e81 | rad-dino_518_ctx_complaint | `test_clean` | 0.568 [0.546, 0.589] | 9 | Control |
+| 2026-10-20 | M4 | f199e81 | rad-dino_518_ctx_complaint | `test_v1`, v1 metric | 0.600 [0.580, 0.621] | 8 |  |
+| 2026-10-20 | M4 | f199e81 | rad-dino_518_ctx_prior | `test_clean` | 0.660 [0.635, 0.685] | 9 | Control. 0.595 on `test_v1`: priors are commoner among `test_clean` patients |
+| 2026-10-20 | M4 | f199e81 | rad-dino_518_ctx_prior | `test_v1`, v1 metric | 0.595 [0.576, 0.613] | 8 |  |
+| 2026-10-20 | G4 | f199e81 | gate | `test_clean` | difference +0.016 [0.009, 0.024] | 9 | **PASS**: `rad-dino_518_ctx_image_text` minus `rad-dino_518_ctx_image`; no leakage red flags. Inputs: indication for 99.1% of train studies, chief complaint 94.2%, prior report 56.7%, vitals 88.8%; 0 reports missing. The gain comes from the indication and the prior report; chief complaint and vitals add nothing measurable. Run on the Mac in 10 min. Next, per §6: the joint image-text fine-tune |
 
 ## 10. Backlog (after v2.0, one at a time)
 
