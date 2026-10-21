@@ -14,6 +14,9 @@
 #   m4     text written before the X-ray + frozen rad-dino embeddings (needs MIMIC_CXR_REPORTS_PATH, MIMIC_IV_ED_PATH)
 #   m4b    prior-study labels, a combiner fit on val, then rad-dino patch tokens + attention heads (gate G4b);
 #          needs m4's sources plus MIMIC_CXR_JPG_PATH, ~7 GB of disk, a few hours on a Mac (TOTAL_HOURS=8)
+#   bench  M5a: all frontal studies, official split, in BENCH_OUT; RAD-DINO 518 px embeddings + probe, then M4 fusion
+#          (if the M4 sources are set) and reports/lineup.md; ~15 GB, ~10 h on a Mac (TOTAL_HOURS=16)
+#   bench_ft  M5b on a GPU: fine-tune RAD-DINO 518 px on BENCH_OUT's train split for 3 epochs (BENCH_SEEDS, default 0)
 #   eval   reports for every run + reports/summary.md with gates G1, G2, G4 and G4b
 #   gpu    smoke m1 m2 m3 eval
 #
@@ -22,6 +25,7 @@
 #   COHORT_DIR          v1 cohort files (default: $OUTPUT_PATH/cohorts if it has anomalous_train.parquet)
 #   MIMIC_CXR_REPORTS_PATH, MIMIC_IV_ED_PATH, MIMIC_IV_PATH (optional)   M4 sources (m4 only)
 #   V2_OUT              output dir (default: $OUTPUT_PATH/v2, or output/v2)
+#   BENCH_OUT           M5's benchmark output dir (default: $OUTPUT_PATH/v2_bench); never the same as V2_OUT
 #   SIZE                encoder input size (default: 518 on CUDA, 224 on Apple MPS or CPU)
 #   MAX_TRAIN           embed and probe only N training studies (CPU pilots); default: all
 #   FT_BATCH, FT_ACCUM  fine-tune batch and accumulation (default 16 x 2; use 8 x 4 under 40 GB)
@@ -33,14 +37,14 @@ set -euo pipefail
 cd "$(dirname "$0")/../.."
 
 # Check the arguments before doing anything slow.
-[ $# -gt 0 ] || { sed -n '2,31p' "$0"; exit 2; }
+[ $# -gt 0 ] || { sed -n '2,35p' "$0"; exit 2; }
 stages=()
 for arg in "$@"; do
   if [ "$arg" = gpu ]; then stages+=(smoke m1 m2 m3 eval); else stages+=("$arg"); fi
 done
 for stage in "${stages[@]}"; do
   case "$stage" in
-    m0|smoke|m1|m2|m3|m4|m4b|eval) ;;
+    m0|smoke|m1|m2|m3|m4|m4b|bench|bench_ft|eval) ;;
     *) echo "Unknown stage: $stage (see the header of $0)" >&2; exit 2 ;;
   esac
 done
@@ -56,6 +60,7 @@ if [ -z "${PYTHON:-}" ] && [ -x .venv-v2/bin/python ]; then PY=.venv-v2/bin/pyth
 else PY=${PYTHON:-$(command -v python || command -v python3)}; fi
 OUTPUT_PATH=${OUTPUT_PATH:-output}
 OUT=${V2_OUT:-$OUTPUT_PATH/v2}
+BENCH_OUT=${BENCH_OUT:-$OUTPUT_PATH/v2_bench}
 if [ -z "${COHORT_DIR:-}" ] && [ -f "$OUTPUT_PATH/cohorts/anomalous_train.parquet" ]; then
   COHORT_DIR=$OUTPUT_PATH/cohorts
 fi
@@ -186,6 +191,43 @@ stage_m4b() {  # docs/V2_PLAN.md §6 M4b, on the 518 px embeddings: on a Mac, SI
   run m4b_stack "$PY" -m v2.stack "${pairs[@]}" --out "$OUT"
   run --hours 4 m4b_tokens "$PY" -m v2.embed --model rad-dino --size "$SIZE" --tokens 12 "${emb_args[@]}"
   run --hours 6 m4b_attend "$PY" -m v2.attend --tokens "$OUT/embeddings/${pre}_tokens12.npy" --out "$OUT"
+}
+
+bench_dir_ok() {  # M5 writes its own manifest: never into v2.0's output dir
+  if [ "$(cd "$(dirname "$BENCH_OUT")" 2>/dev/null && pwd)/$(basename "$BENCH_OUT")" = \
+       "$(cd "$(dirname "$OUT")" 2>/dev/null && pwd)/$(basename "$OUT")" ]; then
+    echo "!!! BENCH_OUT ($BENCH_OUT) must differ from the v2 output dir ($OUT)" >&2; exit 1
+  fi
+}
+
+stage_bench() {  # docs/V2_PLAN.md §6 M5a. On a Mac: TOTAL_HOURS=16 bash v2/scripts/run.sh bench
+  : "${MIMIC_CXR_JPG_PATH:?bench needs MIMIC_CXR_JPG_PATH}"
+  bench_dir_ok
+  local emb="$BENCH_OUT/embeddings/rad-dino_518.npz"
+  run --hours 6 bench_prepare "$PY" -m v2.prepare_data --mimic-cxr-jpg "$MIMIC_CXR_JPG_PATH" --population all \
+    --split-scheme official --image-format jpg --out "$BENCH_OUT" --workers "$WORKERS"
+  run --hours 12 bench_embed "$PY" -m v2.embed --model rad-dino --size 518 --out "$BENCH_OUT" --workers "$WORKERS"
+  run --hours 3 bench_probe "$PY" -m v2.probe --embeddings "$emb" --out "$BENCH_OUT"
+  if [ -n "${MIMIC_CXR_REPORTS_PATH:-}" ] && [ -n "${MIMIC_IV_ED_PATH:-}" ]; then
+    run bench_context "$PY" -m v2.context --out "$BENCH_OUT"
+    run --hours 6 bench_fuse "$PY" -m v2.fuse --embeddings "$emb" --out "$BENCH_OUT" \
+      --arms image,image_indication,image_text,indication,text
+  else
+    echo "!!! bench: MIMIC_CXR_REPORTS_PATH or MIMIC_IV_ED_PATH not set: image-only lineup"
+  fi
+  run bench_lineup "$PY" -m v2.lineup --out "$BENCH_OUT"
+  echo "Lineup: $BENCH_OUT/reports/lineup.md"
+}
+
+stage_bench_ft() {  # docs/V2_PLAN.md §6 M5b, on a GPU, with BENCH_OUT's manifest and images copied over
+  bench_dir_ok
+  [ -f "$BENCH_OUT/manifest.parquet" ] || { echo "!!! bench_ft needs $BENCH_OUT from the bench stage" >&2; exit 1; }
+  local hours=${BENCH_FT_HOURS:-3}
+  for seed in ${BENCH_SEEDS:-0}; do
+    run --hours "$(awk "BEGIN{print $hours + 0.5}")" "bench_ft_s$seed" "$PY" -m v2.finetune --model rad-dino --size 518 \
+      --seed "$seed" --epochs 3 --save-embeddings --out "$BENCH_OUT" --workers "$WORKERS" --batch-size "$FT_BATCH" \
+      --accum "$FT_ACCUM" --max-hours "$hours" --resume
+  done
 }
 
 stage_eval() {

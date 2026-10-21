@@ -106,6 +106,23 @@ def _fit_label(label, X, y, m, Xv, yv, mv, Cs, max_iter) -> LabelFit:
     return LabelFit(label, C, scores, clf.coef_[0].astype(np.float64), float(clf.intercept_[0]), note)
 
 
+def jobs_for_memory(n_jobs: int, n_rows: int, n_cols: int, share: float = 0.6) -> int:
+    """
+    Parallel workers that fit in `share` of the RAM. Each copies its label's rows of the standardized training
+    matrix (float64): 2.6 GB at M5's ~220k studies, which a dozen workers can't afford on a laptop.
+    """
+    jobs = (os.cpu_count() or 1) if n_jobs in (-1, None) else n_jobs
+    try:
+        ram = os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
+    except (AttributeError, OSError, ValueError):
+        return jobs
+    cap = max(1, int(share * ram // max(1, int(n_rows * n_cols * 8 * 1.2))))
+    if cap < jobs:
+        logger.info("Probe: %d parallel fits instead of %d, to fit in memory (%.1f GB of training features each)",
+                    cap, jobs, n_rows * n_cols * 8 / 1e9)
+    return min(jobs, cap)
+
+
 def fit_probe(
     X_tr: np.ndarray, raw_tr: np.ndarray, X_va: np.ndarray, raw_va: np.ndarray,
     Cs=DEFAULT_CS, n_jobs: int = -1, max_iter: int = 2000,
@@ -117,7 +134,7 @@ def fit_probe(
     Z_tr, Z_va = scaler.transform(X_tr), scaler.transform(X_va)
     # Keep the Cs ordered small -> large so "first best" prefers stronger regularization on ties.
     Cs = sorted(Cs)
-    fits = Parallel(n_jobs=n_jobs)(
+    fits = Parallel(n_jobs=jobs_for_memory(n_jobs, *Z_tr.shape))(
         delayed(_fit_label)(label, Z_tr, Y_tr[:, k], M_tr[:, k], Z_va, Y_va[:, k], M_va[:, k], Cs, max_iter)
         for k, label in enumerate(LABELS)
     )
@@ -142,6 +159,7 @@ def run_probe(out_dir: Path, emb_path: Path, run: Optional[str], Cs, n_jobs: int
     manifest = load_manifest(out_dir)
     ids, emb, meta = load_npz(emb_path)
     parts = split_xy(manifest, ids, emb)
+    del emb  # the splits hold their own copies; at M5's size this frees 1.4 GB before the fits
     missing = len(manifest) - sum(len(r) for r, _ in parts.values())
     if missing:
         logger.warning("%d manifest studies have no embedding (expected only for --max-train/--smoke runs)", missing)

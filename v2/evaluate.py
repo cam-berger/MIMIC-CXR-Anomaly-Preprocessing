@@ -43,8 +43,9 @@ logger = logging.getLogger("v2.evaluate")
 
 N_BOOT = 1000
 G1_THRESHOLD = 0.77
-# (test set, label policy) pairs every run is evaluated on, headline first.
-EVAL_SETS = (("test_clean", "v2"), ("test_v1", "v2"), ("test_v1", "v1"), ("val", "v2"))
+# (test set, label policy) pairs every run is evaluated on, headline first. A pair whose measurable classes were
+# not frozen at M0 is skipped: u0 (M5's "positive vs rest") exists only for manifests prepared since M5.
+EVAL_SETS = (("test_clean", "v2"), ("test_clean", "u0"), ("test_v1", "v2"), ("test_v1", "v1"), ("val", "v2"))
 MILESTONE = {"probe": "M1", "zero_shot": "M2", "finetune": "M3", "fuse": "M4", "attend": "M4b", "stack": "M4b"}
 # §6 M4b: the attention head's image-only arm (h0) may trail the M1 probe on val by at most this much.
 G4B_HEAD_MARGIN = 0.02
@@ -209,6 +210,8 @@ def evaluate_run(out_dir: Path, run: str, n_boot: int = N_BOOT, manifest=None, f
     pred, meta = read_predictions(Path(out_dir) / "predictions" / f"{run}.parquet")
     results = []
     for test_set, metric in EVAL_SETS:
+        if test_set != "val" and f"{test_set}:{metric}" not in frozen:
+            continue
         res = evaluate_set(pred, manifest, frozen, test_set, metric, n_boot)
         if res is not None:
             results.append(res)
@@ -397,6 +400,12 @@ def g4b(out_dir: Path, prefix: str, n_boot: int = N_BOOT, reports: Optional[dict
     return out
 
 
+def split_scheme(out_dir: Path) -> str:
+    """'official' for M5's benchmark output dirs, 'v2' otherwise (from prepare_data's audit)."""
+    audit = Path(out_dir) / "audit.json"
+    return json.loads(audit.read_text()).get("split_scheme", "v2") if audit.exists() else "v2"
+
+
 def summarize(out_dir: Path, n_boot: int = N_BOOT, runs: Optional[list[str]] = None) -> str:
     pred_dir = Path(out_dir) / "predictions"
     # --smoke runs only check the setup; they are never results.
@@ -450,75 +459,83 @@ def summarize(out_dir: Path, n_boot: int = N_BOOT, runs: Optional[list[str]] = N
         return f"n/a: val has too few positives/negatives to pick a {kind} run"
 
     lines += ["", "## Gates", ""]
-    best_probe = best("probe")
-    if best_probe:
-        rep = reports[best_probe]
-        res = _get(rep, "test_v1", "v1") or _get(rep, "test_clean", "v2")
-        where = f"{res['test_set']} ({res['metric']} metric)"
-        if not np.isfinite(res["macro_auroc"]):
-            verdict = "n/a: no measurable classes (rehearsal data?)"
-        elif res["macro_auroc"] >= G1_THRESHOLD:
-            verdict = "PASS: rent the GPU for M3"
-        else:
-            verdict = "FAIL: study per-class results first"
-        excluded = " (flagged encoders excluded, §4)" if any(
-            r["meta"].get("encoder") in TEST_CLEAN_ONLY for r in reports.values()) else ""
-        lines.append(f"- **G1** (best probe by val{excluded}: `{best_probe}`): "
-                     f"{fmt_ci(res['macro_auroc'], res['macro_auroc_ci'])} on {where} vs {G1_THRESHOLD} -> **{verdict}**")
+    benchmark = split_scheme(out_dir) == "official"
+    if benchmark:
+        lines.append("- None here: this directory holds M5's benchmark (official split, §6 M5). G1-G4b are defined "
+                     "on the v2 cohort; the comparisons with published results are in reports/lineup.md.")
     else:
-        lines.append(f"- **G1**: {missing('probe')}")
-    best_ft = best("finetune")
-    if best_ft and best_probe:
-        cmp = compare_runs(out_dir, best_ft, best_probe, "test_clean", "v2", n_boot)
-        if not np.isfinite(cmp["diff"]):
-            verdict = "n/a: no measurable classes (rehearsal data?)"
-        elif cmp["a_better"]:
-            verdict = "PASS: the fine-tuned model is the v2 baseline"
+        best_probe = best("probe")
+        if best_probe:
+            rep = reports[best_probe]
+            res = _get(rep, "test_v1", "v1") or _get(rep, "test_clean", "v2")
+            where = f"{res['test_set']} ({res['metric']} metric)"
+            if not np.isfinite(res["macro_auroc"]):
+                verdict = "n/a: no measurable classes (rehearsal data?)"
+            elif res["macro_auroc"] >= G1_THRESHOLD:
+                verdict = "PASS: rent the GPU for M3"
+            else:
+                verdict = "FAIL: study per-class results first"
+            excluded = " (flagged encoders excluded, §4)" if any(
+                r["meta"].get("encoder") in TEST_CLEAN_ONLY for r in reports.values()) else ""
+            lines.append(f"- **G1** (best probe by val{excluded}: `{best_probe}`): "
+                         f"{fmt_ci(res['macro_auroc'], res['macro_auroc_ci'])} on {where} vs {G1_THRESHOLD} -> **{verdict}**")
         else:
-            verdict = "FAIL: the frozen probe stays the baseline"
-        lines.append(f"- **G2** (`{best_ft}` - `{best_probe}` on test_clean): "
-                     f"{fmt_ci(cmp['diff'], cmp['diff_ci'])} -> **{verdict}**")
-    else:
-        lines.append(f"- **G2**: {missing('finetune') if not best_ft else missing('probe')}")
-    primaries = sorted(r for r, rep in reports.items() if rep["meta"].get("arm") == "image_text")
-    frozen_seen = False
-    for run in primaries:
-        exploratory = reports[run]["meta"].get("image_features", "frozen") != "frozen"
-        frozen_seen |= not exploratory
-        name = "M4 on fine-tuned features (exploratory, not G4)" if exploratory else "**G4**"
-        ref = run[: -len("image_text")] + "image"
-        if ref not in reports:
-            lines.append(f"- {name}: `{ref}` is missing; it is the reference for `{run}`")
-            continue
-        cmp = compare_runs(out_dir, run, ref, "test_clean", "v2", n_boot)
-        if not np.isfinite(cmp["diff"]):
-            verdict = "n/a: no measurable classes (rehearsal data?)"
-        elif cmp["a_better"]:
-            verdict = "PASS: pre-imaging text adds to the image"
+            lines.append(f"- **G1**: {missing('probe')}")
+        best_ft = best("finetune")
+        if best_ft and best_probe:
+            cmp = compare_runs(out_dir, best_ft, best_probe, "test_clean", "v2", n_boot)
+            if not np.isfinite(cmp["diff"]):
+                verdict = "n/a: no measurable classes (rehearsal data?)"
+            elif cmp["a_better"]:
+                verdict = "PASS: the fine-tuned model is the v2 baseline"
+            else:
+                verdict = "FAIL: the frozen probe stays the baseline"
+            lines.append(f"- **G2** (`{best_ft}` - `{best_probe}` on test_clean): "
+                         f"{fmt_ci(cmp['diff'], cmp['diff_ci'])} -> **{verdict}**")
         else:
-            verdict = "FAIL: no detectable gain from pre-imaging text"
-        prefix = run[: -len("_ctx_image_text")]
-        lines.append(f"- {name} (`{run}` - `{ref}` on test_clean): {fmt_ci(cmp['diff'], cmp['diff_ci'])} -> "
-                     f"**{verdict}**. Read the leakage red flags in reports/m4_{prefix}.md first.")
-    if not frozen_seen:
-        lines.append("- **G4**: no M4 runs on frozen image features yet")
-    for run in sorted(r for r, rep in reports.items()
-                      if rep["meta"].get("kind") == "attend" and rep["meta"].get("arm") == "h2"):
-        gate = g4b(out_dir, run[: -len("_attn_h2")], n_boot, reports)
-        diff = fmt_ci(gate["cmp"]["diff"], gate["cmp"]["diff_ci"]) if gate["cmp"] else "-"
-        lines.append(f"- **G4b** (`{gate['h2']}` - `{gate['h1']}` on test_clean): {diff} -> **{gate['verdict']}**. "
-                     f"Head validity check: {gate['check']}.")
+            lines.append(f"- **G2**: {missing('finetune') if not best_ft else missing('probe')}")
+        primaries = sorted(r for r, rep in reports.items() if rep["meta"].get("arm") == "image_text")
+        frozen_seen = False
+        for run in primaries:
+            exploratory = reports[run]["meta"].get("image_features", "frozen") != "frozen"
+            frozen_seen |= not exploratory
+            name = "M4 on fine-tuned features (exploratory, not G4)" if exploratory else "**G4**"
+            ref = run[: -len("image_text")] + "image"
+            if ref not in reports:
+                lines.append(f"- {name}: `{ref}` is missing; it is the reference for `{run}`")
+                continue
+            cmp = compare_runs(out_dir, run, ref, "test_clean", "v2", n_boot)
+            if not np.isfinite(cmp["diff"]):
+                verdict = "n/a: no measurable classes (rehearsal data?)"
+            elif cmp["a_better"]:
+                verdict = "PASS: pre-imaging text adds to the image"
+            else:
+                verdict = "FAIL: no detectable gain from pre-imaging text"
+            prefix = run[: -len("_ctx_image_text")]
+            lines.append(f"- {name} (`{run}` - `{ref}` on test_clean): {fmt_ci(cmp['diff'], cmp['diff_ci'])} -> "
+                         f"**{verdict}**. Read the leakage red flags in reports/m4_{prefix}.md first.")
+        if not frozen_seen:
+            lines.append("- **G4**: no M4 runs on frozen image features yet")
+        for run in sorted(r for r, rep in reports.items()
+                          if rep["meta"].get("kind") == "attend" and rep["meta"].get("arm") == "h2"):
+            gate = g4b(out_dir, run[: -len("_attn_h2")], n_boot, reports)
+            diff = fmt_ci(gate["cmp"]["diff"], gate["cmp"]["diff_ci"]) if gate["cmp"] else "-"
+            lines.append(f"- **G4b** (`{gate['h2']}` - `{gate['h1']}` on test_clean): {diff} -> **{gate['verdict']}**. "
+                         f"Head validity check: {gate['check']}.")
 
     lines += ["", "## Rows for the results log (docs/V2_PLAN.md §9)", "", "```"]
     today = date.today().isoformat()
     for run, rep in reports.items():
         meta = rep["meta"]
         day = str(meta.get("created") or today)[:10]  # when the run was made, not when the summary is
-        for test_set, metric in (("test_clean", "v2"), ("test_v1", "v1")):
+        sets = (("test_clean", "u0"), ("test_clean", "v2")) if benchmark else (("test_clean", "v2"), ("test_v1", "v1"))
+        for test_set, metric in sets:
             res = _get(rep, test_set, metric)
             if res:
-                label = f"`{test_set}`" + (", v1 metric" if metric == "v1" else "")
-                lines.append(f"| {day} | {MILESTONE.get(meta.get('kind'), '?')} | {meta.get('commit', '?')} | "
+                label = ("official test" if benchmark else f"`{test_set}`") + \
+                    {"v1": ", v1 metric", "u0": ", positive vs rest", "v2": ""}[metric]
+                milestone = "M5" if benchmark else MILESTONE.get(meta.get("kind"), "?")
+                lines.append(f"| {day} | {milestone} | {meta.get('commit', '?')} | "
                              f"{run} | {label} | {fmt_ci(res['macro_auroc'], res['macro_auroc_ci'])} | "
                              f"{len(res['classes'])} | |")
     lines += ["```", ""]
@@ -535,7 +552,7 @@ def main(argv: Optional[list[str]] = None) -> None:
     group.add_argument("--all", action="store_true", help="Evaluate every run and write reports/summary.md")
     group.add_argument("--compare", nargs=2, metavar=("RUN_A", "RUN_B"), help="Paired bootstrap A - B")
     parser.add_argument("--test-set", default="test_clean", choices=["test_clean", "test_v1", "val"])
-    parser.add_argument("--metric", default="v2", choices=["v2", "v1"])
+    parser.add_argument("--metric", default="v2", choices=["v2", "v1", "u0"])
     parser.add_argument("--n-boot", type=int, default=N_BOOT)
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args(argv)

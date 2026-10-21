@@ -13,6 +13,15 @@ given) v1's cohort files. Writes, under --out:
     audit.md, audit.json       counts, overlaps, drops, RAD-DINO check, gate G0
 
 Re-running is safe: existing PNGs are kept, so an interrupted run resumes.
+
+M5's standard benchmark (§6) uses every study and the official split, in its own
+output directory:
+
+    python -m v2.prepare_data --population all --split-scheme official --image-format jpg --out output/v2_bench
+
+There train, val and test are the official train, validate and test patients,
+and test_clean is the official test split. An output directory keeps the
+population and split scheme it was built with.
 """
 
 from __future__ import annotations
@@ -54,6 +63,8 @@ logger = logging.getLogger("v2.prepare_data")
 FRONTAL_RANK = {"PA": 0, "AP": 1}
 OFFICIAL_TEST = ("validate", "test")
 G0_MIN_CLASSES = 6
+POPULATIONS = {"cohort": "v1 cohort", "abnormal": "all abnormal studies", "all": "all studies"}
+SPLIT_SCHEMES = ("v2", "official")
 
 
 # ---------------------------------------------------------------------------
@@ -171,6 +182,19 @@ def assign_splits(
     return df
 
 
+def assign_official_splits(df: pd.DataFrame, official: pd.Series) -> pd.DataFrame:
+    """
+    §6 M5: train, val and test are the official train, validate and test patients, and test_clean is the
+    official test split. Studies of patients missing from the split file are dropped by the caller.
+    """
+    df = df.copy()
+    df["official_split"] = df["subject_id"].map(official).fillna("unknown")
+    df["split"] = df["official_split"].map({"train": TRAIN, "validate": VAL, "test": TEST})
+    df["in_test_clean"] = df["official_split"] == "test"
+    df["in_test_v1"] = False
+    return df
+
+
 # ---------------------------------------------------------------------------
 # Images
 # ---------------------------------------------------------------------------
@@ -183,7 +207,7 @@ def resize_shorter(img: Image.Image, size: int) -> Image.Image:
 
 
 def _convert_one(task: tuple[str, str, int]) -> tuple[str, Optional[str]]:
-    """JPG -> grayscale PNG with shorter side `size`. Returns (dst, error or None)."""
+    """JPG -> grayscale PNG (or JPEG, by dst's suffix) with shorter side `size`. Returns (dst, error or None)."""
     src, dst, size = task
     try:
         with Image.open(src) as img:
@@ -192,7 +216,10 @@ def _convert_one(task: tuple[str, str, int]) -> tuple[str, Optional[str]]:
             img = img.convert("L")
             out = resize_shorter(img, size)
         tmp = f"{dst}.tmp{os.getpid()}"
-        out.save(tmp, format="PNG", compress_level=3)
+        if dst.endswith(".jpg"):
+            out.save(tmp, format="JPEG", quality=95)
+        else:
+            out.save(tmp, format="PNG", compress_level=3)
         os.replace(tmp, dst)
         return dst, None
     except Exception as exc:  # noqa: BLE001 - any unreadable file is recorded, not fatal
@@ -212,7 +239,7 @@ def write_images(manifest: pd.DataFrame, root: Path, out_dir: Path, size: int, w
     marker.write_text(str(size))
     tasks = []
     for row in manifest.itertuples(index=False):
-        dst = img_dir / f"{row.study_id}.png"
+        dst = out_dir / row.image
         if dst.exists() and dst.stat().st_size > 0:
             continue
         tasks.append((str(root / row.jpg), str(dst), size))
@@ -324,7 +351,7 @@ def measurable_sets(manifest: pd.DataFrame, min_count: int) -> dict:
     out = {}
     for test_set, flag in (("test_clean", "in_test_clean"), ("test_v1", "in_test_v1")):
         raw = label_matrix(manifest[manifest[flag]])
-        for metric in ("v2", "v1"):
+        for metric in ("v2", "v1", "u0"):
             out[f"{test_set}:{metric}"] = measurable(raw, metric, min_count) if len(raw) else []
     return out
 
@@ -375,12 +402,19 @@ def build_audit(manifest: pd.DataFrame, drops: dict, extras: dict, min_count: in
 
 
 def audit_markdown(audit: dict) -> str:
+    official = audit.get("split_scheme") == "official"
     lines = [
-        "# v2 data audit",
+        "# v2 data audit" + (" (M5 benchmark: official split)" if official else ""),
         "",
-        f"Created {audit['created']} at commit `{audit['commit']}`. Label policy: 1 positive; "
-        "0 or blank negative; -1 ignored (v1 metric: blank ignored too).",
+        f"Created {audit['created']} at commit `{audit['commit']}`. Population: {audit.get('population')}. "
+        "Label policy: 1 positive; 0 or blank negative; -1 ignored (v1 metric: blank ignored too; u0: "
+        "everything but 1 negative).",
         "",
+    ]
+    if official:
+        lines += ["Splits are the official ones: train = official train, val = official validate, test = official test "
+                  "(test_clean here is the official test split; there is no test_v1).", ""]
+    lines += [
         "## Splits",
         "",
         "| Split | Studies | Patients |",
@@ -496,18 +530,21 @@ def build_manifest(args: argparse.Namespace, root: Path) -> tuple[pd.DataFrame, 
     drops: dict[str, int] = {}
     info: dict = {}
 
-    if args.cohort_dir:
+    if args.population == "cohort":
+        if not args.cohort_dir:
+            raise SystemExit("--population cohort needs --cohort-dir (or COHORT_DIR)")
         population, v1_val_studies = read_cohort(Path(args.cohort_dir))
-        source = "v1 cohort"
-    else:
+    elif args.population == "abnormal":
         population, v1_val_studies = abnormal_studies(chexpert), set()
-        source = "all abnormal studies"
-        logger.warning("No --cohort-dir: population = all abnormal studies; test_v1 will be empty")
+        logger.warning("Population = all abnormal studies; test_v1 will be empty")
+    else:
+        population, v1_val_studies = chexpert[["subject_id", "study_id"]].drop_duplicates("study_id"), set()
+    source = POPULATIONS[args.population]
     logger.info("Population (%s): %d studies", source, len(population))
 
     labels = chexpert.drop_duplicates("study_id")[["study_id", *LABELS]]
     frontal = select_frontal(meta)
-    if args.cohort_dir:
+    if args.population == "cohort":
         info["v1_cohort_coverage"] = cohort_coverage(population, chexpert, frontal)
 
     df = population.merge(labels, on="study_id", how="left", indicator=True)
@@ -516,12 +553,17 @@ def build_manifest(args: argparse.Namespace, root: Path) -> tuple[pd.DataFrame, 
     df = df.merge(frontal.drop(columns="subject_id"), on="study_id", how="left")
     drops["no frontal (PA/AP) image"] = int(df["dicom_id"].isna().sum())
     df = df[df["dicom_id"].notna()].copy()
-    df["source"] = "cohort"
+    df["source"] = "cohort" if args.population == "cohort" else args.population
 
     official = official_split_by_patient(split)
     unknown = int((~df["subject_id"].isin(official.index)).sum())
     if unknown:
         logger.warning("%d studies belong to patients missing from the official split file", unknown)
+    if args.split_scheme == "official":
+        drops["patient not in the official split file"] = unknown
+        df = df[df["subject_id"].isin(official.index)].copy()
+        if args.extend_test_clean:
+            raise SystemExit("--extend-test-clean is a v2-split fallback; the official scheme uses whole studies")
 
     if args.extend_test_clean:
         test_patients = set(official.index[official.isin(OFFICIAL_TEST)])
@@ -540,11 +582,14 @@ def build_manifest(args: argparse.Namespace, root: Path) -> tuple[pd.DataFrame, 
         df = df[df["subject_id"].isin(keep)].copy()
         logger.info("--limit %d: kept %d studies of %d patients", args.limit, len(df), len(keep))
 
-    df = assign_splits(df, official, v1_val_studies, args.val_frac, args.seed)
+    if args.split_scheme == "official":
+        df = assign_official_splits(df, official)
+    else:
+        df = assign_splits(df, official, v1_val_studies, args.val_frac, args.seed)
     df["jpg"] = [
         str(jpg_path(Path("."), s, t, d)) for s, t, d in zip(df["subject_id"], df["study_id"], df["dicom_id"])
     ]
-    df["image"] = "images/" + df["study_id"].astype(str) + ".png"
+    df["image"] = "images/" + df["study_id"].astype(str) + "." + args.image_format
     columns = ["study_id", "subject_id", "dicom_id", "view", "study_datetime", "official_split", "split",
                "in_test_clean", "in_test_v1", "source", "jpg", "image", *LABELS]
     df = df[columns].sort_values("study_id").reset_index(drop=True)
@@ -553,11 +598,31 @@ def build_manifest(args: argparse.Namespace, root: Path) -> tuple[pd.DataFrame, 
     return df, drops, meta, info
 
 
+def guard_existing(out_dir: Path, population: str, split_scheme: str) -> None:
+    """Refuse to replace a manifest built for another population or split scheme: its runs would be orphaned."""
+    audit = out_dir / "audit.json"
+    if not (out_dir / "manifest.parquet").exists() or not audit.exists():
+        return
+    old = json.loads(audit.read_text())
+    before = (old.get("population"), old.get("split_scheme", "v2"))
+    if before != (population, split_scheme):
+        raise SystemExit(f"{out_dir} holds a manifest for population {before[0]!r} with the {before[1]!r} split "
+                         f"scheme, not {population!r} with {split_scheme!r}. Use another --out (M5's benchmark "
+                         "lives in its own directory).")
+
+
 def main(argv: Optional[list[str]] = None) -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--mimic-cxr-jpg", help="MIMIC-CXR-JPG root (default: MIMIC_CXR_JPG_PATH)")
     parser.add_argument("--cohort-dir", help="v1 cohort dir with anomalous_{train,val}.parquet (default: "
                         "COHORT_DIR; without one, every abnormal study is used and test_v1 is empty)")
+    parser.add_argument("--population", choices=sorted(POPULATIONS),
+                        help="cohort (v1's, the default with a cohort dir), abnormal (the default without one), "
+                             "or all (every study: M5's benchmark)")
+    parser.add_argument("--split-scheme", choices=SPLIT_SCHEMES, default="v2",
+                        help="v2 (§3.1, default) or official (M5: official train / validate / test)")
+    parser.add_argument("--image-format", choices=("png", "jpg"), default="png",
+                        help="png (default) or jpg at quality 95, for large populations")
     parser.add_argument("--out", default=None, help="Output dir (default: $OUTPUT_PATH/v2 or output/v2)")
     parser.add_argument("--image-size", type=int, default=518, help="Shorter side of the saved PNGs")
     parser.add_argument("--workers", type=int, default=min(8, os.cpu_count() or 1))
@@ -577,15 +642,17 @@ def main(argv: Optional[list[str]] = None) -> None:
 
     root = resolve_mimic_root(args.mimic_cxr_jpg)  # also loads .env
     args.cohort_dir = args.cohort_dir or os.environ.get("COHORT_DIR") or None
+    args.population = args.population or ("cohort" if args.cohort_dir else "abnormal")
     out_dir = Path(args.out) if args.out else default_out_dir()
     out_dir.mkdir(parents=True, exist_ok=True)
+    guard_existing(out_dir, POPULATIONS[args.population], args.split_scheme)
     if not (root / "files").is_dir():
         raise SystemExit(f"{root}/files not found: is --mimic-cxr-jpg the 2.1.0 directory?")
 
     manifest, drops, meta, info = build_manifest(args, root)
 
-    extras: dict = {"population": "v1 cohort" if args.cohort_dir else "all abnormal studies",
-                    "image_size": args.image_size, **info}
+    extras: dict = {"population": POPULATIONS[args.population], "split_scheme": args.split_scheme,
+                    "image_size": args.image_size, "image_format": args.image_format, **info}
     if not args.skip_images:
         failures = write_images(manifest, root, out_dir, args.image_size, args.workers)
         if failures:

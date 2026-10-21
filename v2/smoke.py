@@ -6,8 +6,9 @@ Wiring check: the whole v2 pipeline on synthetic data, in about a minute on CPU.
 
 Builds a synthetic MIMIC-CXR-JPG tree with a planted signal (v2.synth), then
 runs prepare_data -> embed -> probe -> zero_shot -> finetune (+ resume) ->
-context + fuse -> M4b (tokens, attend, prior labels, stack) -> evaluate with
-test-size encoders, through the same
+context + fuse -> M4b (tokens, attend, prior labels, stack) -> M5 (the
+benchmark directory and its lineup) -> evaluate with test-size encoders,
+through the same
 command-line entry points you will use on real data. It passes only if every
 stage runs AND the planted signal is recovered end to end: with the
 "test-pixels" encoder, test_clean macro AUROC must be >= 0.9, and must fall
@@ -17,8 +18,10 @@ findings, while the same text-only arm fed whole reports must score > 0.95
 (proof that the leak trap has teeth). For M4b, the attention head must recover
 the planted signal from cached tokens, and the prior-label arm fed each study's
 own labels instead of its prior study's must score > 0.95, while the honest arm
-stays near chance (synthetic studies are independent). No downloads, no MIMIC
-data needed.
+stays near chance (synthetic studies are independent). For M5, the benchmark
+directory must hold the official split and refuse to replace the v2 manifest,
+and the planted signal must reach the lineup. No downloads, no MIMIC data
+needed.
 """
 
 from __future__ import annotations
@@ -36,7 +39,7 @@ from typing import Callable, Optional
 import numpy as np
 import pandas as pd
 
-from . import attend, context, embed, evaluate, finetune, fuse, prepare_data, probe, stack, zero_shot
+from . import attend, context, embed, evaluate, finetune, fuse, lineup, prepare_data, probe, stack, zero_shot
 from .common import CHEXPERT_COLUMNS, load_manifest, mimic_csv, setup_logging
 from .synth import make_dataset
 
@@ -191,6 +194,36 @@ def run_checks(work: Path, patients: int = 400) -> list[tuple[str, bool, str]]:
                 f"{leaked:.3f}; {len(stacked['runs'])} stack")
 
     stage("M4b tokens + attend + prior labels + stack", m4b)
+
+    def m5() -> str:
+        bench = work / "v2_bench"
+        bench_args = ["--mimic-cxr-jpg", str(paths.mimic_root), "--population", "all", "--split-scheme", "official",
+                      "--image-format", "jpg", "--image-size", "64", "--workers", "2", "--min-count", "5",
+                      "--rad-dino-list", str(paths.rad_dino_list)]
+        try:
+            prepare_data.main([*bench_args, "--skip-images", *common])
+            raise AssertionError("the benchmark replaced the v2 manifest")
+        except SystemExit:
+            pass
+        prepare_data.main([*bench_args, "--out", str(bench)])
+        m = load_manifest(bench)
+        assert set(m.loc[m["in_test_clean"], "official_split"]) == {"test"}, "test_clean is not the official test split"
+        assert set(m.loc[m["split"] == "val", "official_split"]) == {"validate"}, "val is not the official validate split"
+        out_b = ["--out", str(bench)]
+        embed.main(["--model", "test-pixels", "--workers", "0", *out_b])
+        emb = bench / "embeddings" / "test-pixels_48.npz"
+        probe.main(["--embeddings", str(emb), "--jobs", "2", *out_b])
+        context.main(["--reports", str(paths.reports), "--mimic-iv-ed", str(paths.mimic_iv_ed),
+                      "--mimic-iv", str(paths.mimic_iv), "--mimic-cxr-jpg", str(paths.mimic_root), *out_b])
+        fuse.main(["--embeddings", str(emb), "--arms", "image,image_indication,indication", "--n-boot", "50",
+                   "--jobs", "2", *out_b])
+        res = lineup.main(["--n-boot", "50", *out_b])
+        row = next(c for c in res["compared"] if c["run"] == "test-pixels_48_probe")
+        assert row["ours"] >= 0.9, f"the planted signal didn't reach the lineup: {row['ours']:.3f}"
+        return (f"{len(m)} studies, {int(m['in_test_clean'].sum())} in the official test split; probe "
+                f"{row['ours']:.3f} vs ResNet-50's {row['published_mean']:.3f} ({row['verdict'].strip('*')})")
+
+    stage("M5 benchmark + lineup", m5)
 
     def reports() -> str:
         text = evaluate.summarize(out, n_boot=100)

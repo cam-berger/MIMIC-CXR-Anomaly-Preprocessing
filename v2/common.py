@@ -78,6 +78,8 @@ def targets_and_mask(raw: np.ndarray, metric: str = "v2") -> tuple[np.ndarray, n
         -1 (uncertain) -> ignored.
     v1 (comparison with v1's reported numbers only): 1 -> positive;
         0 -> negative; -1 or blank -> ignored.
+    u0 (M5, scoring only: the published "positive vs rest" convention):
+        1 -> positive; everything else, uncertain included, negative.
 
     Returns (targets float32 in {0, 1}, mask bool); targets are 0 where the
     mask is False.
@@ -88,8 +90,10 @@ def targets_and_mask(raw: np.ndarray, metric: str = "v2") -> tuple[np.ndarray, n
         mask = raw != -1.0  # NaN != -1 is True: blanks count as negatives
     elif metric == "v1":
         mask = (raw == 1.0) | (raw == 0.0)
+    elif metric == "u0":
+        mask = np.ones_like(raw, dtype=bool)
     else:
-        raise ValueError(f"unknown label policy {metric!r} (expected 'v2' or 'v1')")
+        raise ValueError(f"unknown label policy {metric!r} (expected 'v2', 'v1' or 'u0')")
     return (positive & mask).astype(np.float32), mask
 
 
