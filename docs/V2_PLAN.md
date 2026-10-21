@@ -1,6 +1,6 @@
 # v2 Plan: Modern Foundation Models for CheXpert Classification
 
-**Status:** v2.0 done (M0-M3). **G2 PASS:** the fine-tuned RAD-DINO is the image-only v2 baseline, 0.787 [0.769, 0.803] on `test_clean`. **M4 done, G4 PASS:** text written before the X-ray adds +0.016 [0.009, 0.024] to frozen image features (§9). Exploratory follow-ups: +0.009 [0.003, 0.014] on the fine-tuned image, and +0.009 [0.001, 0.017] on `test_v1`. Next: the joint image-text fine-tune and reports as a training signal, in one GPU session (§6 M4, §10) · how to run: [`v2/README.md`](../v2/README.md) · **Branch:** `v2` (from `main`) · **Started:** 2026-10-18
+**Status:** v2.0 done (M0-M3). **G2 PASS:** the fine-tuned RAD-DINO is the image-only v2 baseline, 0.787 [0.769, 0.803] on `test_clean`. **M4 done, G4 PASS:** text written before the X-ray adds +0.016 [0.009, 0.024] to frozen image features (§9). Exploratory follow-ups: +0.009 [0.003, 0.014] on the fine-tuned image, and +0.009 [0.001, 0.017] on `test_v1`. Next: M4b on the Mac (§6, pre-registered 2026-10-21): text-steered attention (gate G4b), prior-study labels and a combiner fit on val. The GPU session (joint image-text fine-tune, reports as a training signal; §10) comes after G4b, which informs it · how to run: [`v2/README.md`](../v2/README.md) · **Branch:** `v2` (from `main`) · **Started:** 2026-10-18
 
 ## 1. Goal
 
@@ -322,6 +322,132 @@ assistant.
 **Done when:** `context_audit.md` and every arm's predictions exist, the
 red flags are checked and G4 is logged in §9.
 
+### M4b: Fusion follow-ups (CPU; written 2026-10-21, before any M4b run)
+
+**Questions:**
+1. Can text steer *where* the model looks? Late fusion (M4) adds text to each
+   class's log-odds after the image has been pooled into one vector, so the
+   text can shift the odds but can't change how the image is read. Does
+   attention that lets the text choose image regions add to late fusion?
+   (primary: gate G4b)
+2. Is the prior report more useful as its CheXpert labels than as TF-IDF?
+   (exploratory)
+3. How much does text add to the fine-tuned image when the combination is fit
+   on studies the fine-tune never trained on? (exploratory)
+
+M4's follow-ups (§9, 2026-10-21) motivate 2 and 3: text added +0.009 on the
+fine-tuned image against +0.016 on the frozen one, but that probe was fit on
+training studies the fine-tune had already fit, so the image looked more
+reliable than it is and the text got too little weight.
+
+**Part 1: text-steered attention (gate G4b).**
+
+- **Image tokens:** frozen RAD-DINO at 518 px, last hidden layer, as in M1. The
+  37 x 37 patch tokens are average-pooled to a 12 x 12 grid; with the CLS token
+  that is 145 tokens of 768 numbers per study, stored as float16
+  (`python -m v2.embed --model rad-dino --size 518 --tokens 12`, about 7 GB). The
+  CLS token must match the first half of `rad-dino_518.npz` to float16
+  precision, which checks that the two passes saw the same images in the same
+  order.
+- **Text:** exactly M4's features (TF-IDF + 128-component SVD per source,
+  fit on train, plus presence indicators), standardized on train.
+- **Heads** (same code for every arm): tokens standardized per dimension (train
+  statistics); keys are a linear map of each token plus a learned position
+  embedding; values are another linear map; 12 learned class queries attend
+  over the 145 tokens with 4 heads (width 256); each class's pooled vector goes
+  through dropout 0.1 and its own linear readout to a logit.
+
+| Arm | What it adds | Role |
+|---|---|---|
+| `h0` | image tokens only | Is the attention head a good image probe? |
+| `h1` | `h0` + a linear text term in each class's logit | Late fusion on the same head |
+| `h2` | `h1` + text-conditioned queries: each class query is shifted by an MLP of the text (387 -> 64 -> 12 x 256), its last layer initialized at 0 | Text chooses where each class looks |
+
+  `h2` contains `h1`, and with the same seed it starts as exactly `h1`, so
+  `h2` minus `h1` measures steering alone: same head, same inputs.
+- **Recipe (fixed now):** masked BCE (v2 label policy); AdamW, lr 1e-3, weight
+  decay 0.05 (none on biases, positions or queries); 1 warmup epoch, then
+  cosine over 30 epochs; batch 256; gradient clipping 1.0; at most 30 epochs,
+  stopping after 5 without a better val macro AUROC (classes with at least 10
+  positives and negatives in val, as in M3); the best epoch is kept. Seeds 0-4
+  for every arm; an arm's score is the mean of its 5 seeds' logits.
+- **Validity check, read first:** `h0`'s val macro AUROC must be at least
+  `rad-dino_518_probe`'s minus 0.02. Otherwise the head is broken: stop and
+  inspect before reading G4b.
+- **Gate G4b (fixed now):** `h2` minus `h1` on `test_clean`, with a paired 95%
+  CI above 0. If it passes, text-steered attention adds to late fusion, and a
+  joint image-text fine-tune should use text-conditioned attention over patch
+  tokens. If it fails, nothing detectable is lost by fusing late, which argues
+  against spending GPU time on a joint image-text fine-tune; that decision is
+  taken separately (§10).
+- **Reported, not gates (uncorrected):** `h0` minus `rad-dino_518_probe`
+  (head capacity); `h1` minus `h0` (text on the attention head, next to M4's
+  +0.016); `h2` minus `rad-dino_518_ctx_image_text` (best attention arm against
+  today's late fusion; mixes the head change with the fusion change); `h2`
+  minus `h1` on `test_v1` (v1 metric); per-class AUROC of `h1` and `h2` on
+  `test_clean`.
+- **Diagnostic:** how far text moves `h2`'s attention. Per class, the total
+  variation distance between the head-averaged attention map with the study's
+  text and with the text set to its train mean, averaged over `test_clean`
+  studies and the 5 seeds. 0 means `h2` learned not to steer.
+
+**Part 2: prior-study labels (exploratory).**
+
+- **Input:** the 14 CheXpert labels (`mimic-cxr-2.0.0-chexpert.csv.gz`) of the
+  same prior study M4 uses (the latest study at least 24 h earlier). They are
+  the CheXpert labeler's reading of that prior report, which is already an
+  allowed input, so they add no new information; they encode it differently.
+  Each label is one-hot over positive, negative, uncertain and not mentioned,
+  plus an indicator that a labeled prior exists: 57 features.
+- **Arms** (the M1 probe, as in M4): `prior_labels` (control, alone),
+  `image_prior_labels`, `image_text_prior_labels`.
+- **Comparisons** (paired; `test_clean`, and `test_v1` with the v1 metric):
+  `image_prior_labels` minus `image_prior` (labels against TF-IDF of the same
+  report) and `image_text_prior_labels` minus `image_text` (beyond all three
+  text sources).
+- **Red flags:** M4's rule applies to `prior_labels`: at or above `image`, or a
+  measurable class above 0.90, means stop and inspect.
+- **Caveat, fixed now:** radiologists read the prior report and often carry its
+  wording forward, and the same labeler reads both reports. Part of any gain
+  is predicting the report rather than the patient. Read the per-class gains
+  with that in mind.
+- If `image_text_prior_labels` beats `image_text` on val, the prior-label
+  encoding joins the text recipe for later work; test numbers don't decide it.
+
+**Part 3: a combiner fit on val (exploratory).**
+
+- **Method:** per class, a logistic regression (C = 1 on standardized inputs)
+  on two scores: the image run's logit and the logit of `rad-dino_518_ctx_text`
+  (text only, fit on train). It is fit on val, which no model here trained on.
+  Val's own scores come from 5-fold cross-fitting within val, grouped by
+  patient; test scores come from the fit on all of val. A class with only one
+  label value in val, or in a fold, keeps the image logit unchanged.
+- **Runs:** `rad-dino_518_ft_s1_stack_text` (fine-tuned image + text) and
+  `rad-dino_518_probe_stack_text` (frozen image + text, the check).
+- **Comparisons** (paired, `test_clean`): `ft_s1_stack_text` minus
+  `rad-dino_518_ft_s1` is the text gain on the fine-tuned image without the
+  bias; also on `test_v1` (v1 metric). The check: `probe_stack_text` minus
+  `rad-dino_518_ctx_image_text`. On frozen features there is no bias to remove,
+  so the combiner should land near the concatenation; if it is more than 0.005
+  below, the two-score combiner loses information and its fine-tuned estimate
+  is a lower bound.
+- Known limitation: val also chose the probes' C and the fine-tune's epoch, so
+  both input scores are slightly optimistic on val.
+
+**Compute:** the token pass takes about as long as M1's 518 px embedding (52
+min on the Mac) and needs about 7 GB of disk; the heads train on the cached
+tokens (15 runs; wall time to be measured); parts 2 and 3 take minutes. Parts
+2 and 3 need `context.parquet` rebuilt (`python -m v2.context`), which adds the
+prior labels; nothing else in it changes.
+
+**Outputs:** `reports/m4b_attention_rad-dino_518.md` (validity check, G4b,
+contrasts, diagnostic), `reports/m4b_rad-dino_518.md` (prior labels; the fuse
+report for those arms) and `reports/m4b_stack.md`. Everything runs locally;
+only aggregate output reaches an AI assistant.
+
+**Done when:** the three reports exist, the validity check and G4b are read in
+that order, and every M4b result is logged in §9.
+
 ## 7. Code
 
 A standalone package, `v2/`, on this branch. It doesn't touch the v1 pipeline.
@@ -339,6 +465,8 @@ v2/
   finetune.py       # M3: plain PyTorch loop, bf16, checkpoint every epoch, --resume
   context.py        # M4 inputs: indication, ED chief complaint, prior report, vitals (+ leak guards, audit)
   fuse.py           # M4 arms: text features fit on train, late fusion with the probe, red flags, gate G4
+  attend.py         # M4b part 1: attention heads over cached patch tokens, gate G4b
+  stack.py          # M4b part 3: per-class combiner of two runs' scores, fit on val
   evaluate.py       # metrics, bootstrap CIs, paired comparisons, reports, gates
   doctor.py         # setup check for any machine
   synth.py          # synthetic MIMIC-CXR-JPG tree with a planted signal (tests)
