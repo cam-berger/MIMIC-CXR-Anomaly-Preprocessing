@@ -89,3 +89,44 @@ def test_registry_and_unknown_name():
     assert {"rad-dino", "dinov2-base", "medsiglip", "densenet121"} <= set(REGISTRY)
     with pytest.raises(SystemExit):
         load_encoder("no-such-model")
+
+
+@pytest.mark.parametrize("side, grid", [(37, 12), (4, 4), (5, 3), (6, 2)])
+def test_pool_matrix_matches_adaptive_avg_pool(side, grid):
+    from v2.encoders import pool_matrix
+
+    x = torch.randn(2, 3, side, side)
+    want = torch.nn.functional.adaptive_avg_pool2d(x, grid).flatten(2)          # [B, C, g*g]
+    got = (pool_matrix(side, grid) @ x.flatten(2).transpose(1, 2)).transpose(1, 2)
+    torch.testing.assert_close(got, want)
+
+
+def test_dino_tokens_are_cls_then_pooled_patches():
+    enc = load_encoder("tiny-dinov2", size=48)  # 6 x 6 patches of 8 px
+    x = enc.eval_transform()(_img())[None]
+    with torch.no_grad():
+        hidden = enc.backbone(pixel_values=x).last_hidden_state
+        toks = enc.tokens(x, grid=12)
+        feats = enc(x)
+    assert enc.token_grid(12) == 6 and toks.shape == (1, 1 + 36, enc.token_dim)  # the grid never exceeds the patches
+    torch.testing.assert_close(toks[0, 0], feats[0, slice(*enc.pooled_slice)])   # token 0 is the embedding's CLS
+    torch.testing.assert_close(toks[0, 1:], hidden[0, 1:])                       # 6 -> 6 pooling is the identity
+    with torch.no_grad():
+        coarse = enc.tokens(x, grid=3)
+    torch.testing.assert_close(coarse[0, 1], hidden[0, 1:].reshape(6, 6, -1)[:2, :2].mean((0, 1)))
+
+
+def test_pixel_tokens_are_cell_means_after_a_global_token():
+    enc = load_encoder("test-pixels")
+    x = enc.eval_transform()(_img(seed=2))[None]
+    with torch.no_grad():
+        toks, feats = enc.tokens(x, grid=12), enc(x)
+    assert toks.shape == (1, 1 + 144, 2)
+    torch.testing.assert_close(toks[0, 0], feats[0, slice(*enc.pooled_slice)])   # global mean and std
+    cells = torch.nn.functional.adaptive_avg_pool2d(x[:, :1], 12).flatten()
+    torch.testing.assert_close(toks[0, 1:, 0], cells)
+
+
+def test_encoders_without_tokens_say_so():
+    with pytest.raises(NotImplementedError, match="tokens"):
+        load_encoder("tiny-siglip").token_grid(12)

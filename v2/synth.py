@@ -29,15 +29,7 @@ import numpy as np
 import pandas as pd
 from PIL import Image
 
-from .common import LABELS, jpg_path
-
-# Real column order of mimic-cxr-2.0.0-chexpert.csv.gz.
-CHEXPERT_COLUMNS = (
-    "Atelectasis", "Cardiomegaly", "Consolidation", "Edema",
-    "Enlarged Cardiomediastinum", "Fracture", "Lung Lesion", "Lung Opacity",
-    "No Finding", "Pleural Effusion", "Pleural Other", "Pneumonia",
-    "Pneumothorax", "Support Devices",
-)
+from .common import CHEXPERT_COLUMNS, LABELS, jpg_path
 METADATA_COLUMNS = (
     "dicom_id", "subject_id", "study_id", "PerformedProcedureStepDescription",
     "ViewPosition", "Rows", "Columns", "StudyDate", "StudyTime",

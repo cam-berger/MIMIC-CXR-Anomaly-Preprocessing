@@ -95,3 +95,27 @@ def test_load_dotenv_does_not_override(tmp_path, monkeypatch):
     assert os.environ["V2_TEST_A"] == "from_env"
     assert os.environ["V2_TEST_B"] == "quoted"
     monkeypatch.delenv("V2_TEST_B")
+
+
+def test_mention_only_labels_bias_text_gains_toward_zero():
+    """
+    §6 M4b amendment. A pre-imaging question about X makes the report address X either way. Under the v1
+    policy (mentioned findings only) that selection makes an informative question look useless or worse; under
+    v2 (unmentioned = negative) it cancels, and the question scores what it is worth against the truth.
+    """
+    from v2.evaluate import auroc
+
+    rng = np.random.default_rng(0)
+    n = 200_000
+    disease = rng.random(n) < 0.2
+    asked = np.where(disease, rng.random(n) < 0.45, rng.random(n) < 0.25)     # real but modest suspicion
+    explicit_negative = ~disease & (rng.random(n) < np.where(asked, 0.9, 0.1))  # asked -> "no X"
+    raw = np.where(disease, 1.0, np.where(explicit_negative, 0.0, np.nan))[:, None]
+    score = asked + rng.normal(0, 1e-6, n)
+    truth = auroc(disease, score)
+    got = {}
+    for policy in ("v2", "v1"):
+        y, m = targets_and_mask(raw, policy)
+        got[policy] = auroc(y[m[:, 0], 0], score[m[:, 0]])
+    assert abs(got["v2"] - truth) < 0.01
+    assert got["v1"] < 0.45 < truth  # informative text looks worse than useless under v1

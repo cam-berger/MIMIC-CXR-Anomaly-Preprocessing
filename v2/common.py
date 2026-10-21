@@ -38,6 +38,15 @@ LABELS: tuple[str, ...] = (
     "Pneumothorax",
 )
 
+# All 14 columns of mimic-cxr-2.0.0-chexpert.csv.gz, in file order: the 12 above plus
+# No Finding and Support Devices. M4b reads a prior study's full row as an input.
+CHEXPERT_COLUMNS: tuple[str, ...] = (
+    "Atelectasis", "Cardiomegaly", "Consolidation", "Edema",
+    "Enlarged Cardiomediastinum", "Fracture", "Lung Lesion", "Lung Opacity",
+    "No Finding", "Pleural Effusion", "Pleural Other", "Pneumonia",
+    "Pneumothorax", "Support Devices",
+)
+
 # Manifest `split` values. Test studies are further marked by the
 # `in_test_clean` / `in_test_v1` flags; the two test sets may overlap.
 TRAIN, VAL, TEST = "train", "val", "test"

@@ -1,6 +1,6 @@
 # v2 Plan: Modern Foundation Models for CheXpert Classification
 
-**Status:** v2.0 done (M0-M3). **G2 PASS:** the fine-tuned RAD-DINO is the image-only v2 baseline, 0.787 [0.769, 0.803] on `test_clean`. **M4 done, G4 PASS:** text written before the X-ray adds +0.016 [0.009, 0.024] to frozen image features (§9). Exploratory follow-ups: +0.009 [0.003, 0.014] on the fine-tuned image, and +0.009 [0.001, 0.017] on `test_v1`. Next: M4b on the Mac (§6, pre-registered 2026-10-21): text-steered attention (gate G4b), prior-study labels and a combiner fit on val. The GPU session (joint image-text fine-tune, reports as a training signal; §10) comes after G4b, which informs it · how to run: [`v2/README.md`](../v2/README.md) · **Branch:** `v2` (from `main`) · **Started:** 2026-10-18
+**Status:** v2.0 done (M0-M3). **G2 PASS:** the fine-tuned RAD-DINO is the image-only v2 baseline, 0.787 [0.769, 0.803] on `test_clean`. **M4 done, G4 PASS:** text written before the X-ray adds +0.016 [0.009, 0.024] to frozen image features (§9). Exploratory follow-ups: +0.009 [0.003, 0.014] on the fine-tuned image; refitting the probe on the fine-tuned features adds +0.006 [0.001, 0.012]; best system by val so far: fine-tuned features + refit probe + text, 0.802 [0.784, 0.819]. Next: M4b on the Mac (§6, pre-registered 2026-10-21): text-steered attention (gate G4b), prior-study labels and a combiner fit on val. The GPU session (joint image-text fine-tune, reports as a training signal; §10) comes after G4b, which informs it · how to run: [`v2/README.md`](../v2/README.md) · **Branch:** `v2` (from `main`) · **Started:** 2026-10-18
 
 ## 1. Goal
 
@@ -434,6 +434,22 @@ reliable than it is and the text got too little weight.
 - Known limitation: val also chose the probes' C and the fine-tune's epoch, so
   both input scores are slightly optimistic on val.
 
+**Amendment (2026-10-21, before any M4b run): label policy for text comparisons.**
+The M4 follow-ups found text gains on `test_v1` near 0 under the v1 policy but
++0.019 to +0.025 under v2. The v1 policy keeps only findings the report
+mentions, and text the radiologist reads is itself a cause of a mention: asked
+about X, the report addresses X whether or not it is there, so explicit
+negatives are mostly studies where someone asked. Keeping only mentioned
+findings selects on a common effect of the question and the disease, which
+biases a text gain toward zero or below even when the text is informative
+(`tests/v2/test_common.py` simulates this). Under v2, where an unmentioned
+finding counts as negative, the effect cancels. So every M4b text comparison on
+`test_v1` is reported under v2 first and v1 second, and text gains are judged
+under v2. Neither policy can rule out reporting bias: being asked about a
+finding may make a radiologist more likely to write it up. Only labels made
+without seeing the text could measure that. The parts above are otherwise
+unchanged, and so is G4b.
+
 **Compute:** the token pass takes about as long as M1's 518 px embedding (52
 min on the Mac) and needs about 7 GB of disk; the heads train on the cached
 tokens (15 runs; wall time to be measured); parts 2 and 3 take minutes. Parts
@@ -596,6 +612,10 @@ Add one row per run. Don't edit old rows; add new ones.
 | 2026-10-21 | M4, exploratory | a8060e1 | compare | `test_clean` | difference +0.005 [-0.006, 0.015] | 9 | `rad-dino_518_ctx_image_text` minus `rad-dino_518_ft_s1`: a tie. The frozen image plus text matches the fine-tuned image |
 | 2026-10-21 | M4, exploratory | a8060e1 | compare | `test_v1`, v1 metric | difference +0.009 [0.001, 0.017] | 8 | `rad-dino_518_ctx_image_text` minus `rad-dino_518_ctx_image`, now paired: the frozen text gain holds on the second test set at about half its `test_clean` size (+0.016) |
 | 2026-10-21 | M4, exploratory | a8060e1 | compare | `test_v1`, v1 metric | difference -0.000 [-0.004, 0.004] | 8 | `rad-dino_518_ctx_image_prior` minus `rad-dino_518_ctx_image`: no prior-report gain here (+0.007 on `test_clean`). Prior reports exist for 57.1% of `test_v1` studies vs 74.9% of `test_clean`, whose patients have more cohort studies each (870 / 341 = 2.6 vs 4,860 / 2,947 = 1.6). If the gain scaled with coverage alone it would be about +0.005 here, just above this CI; the classes and metric also differ. The follow-ups took 3.7 min on the Mac |
+| 2026-10-21 | M4, exploratory | a8060e1 | compare | `test_clean` | difference +0.006 [0.001, 0.012] | 9 | `rad-dino_518_ft_s1_ctx_image` minus `rad-dino_518_ft_s1`: refitting the M1 probe on the fine-tuned features beats the fine-tune's own head, on val too (0.825 vs 0.821). The earlier +0.015 over the baseline splits into about +0.006 from the refit and +0.009 from text |
+| 2026-10-21 | M4, exploratory | a8060e1 | compare | `test_v1`, v1 metric | difference +0.001 [-0.004, 0.006] | 8 | `rad-dino_518_ft_s1_ctx_image_text` minus `rad-dino_518_ft_s1_ctx_image`. Under the v2 policy the same gain is +0.019 on `test_v1` (unpaired: 0.836 vs 0.817) and on val (0.844 vs 0.825) |
+| 2026-10-21 | M4, exploratory | a8060e1 | rad-dino_518_ft_s1_ctx_image_text | `val` | 0.844 [0.834, 0.853] | 12 | The best val score so far (`ft_s1_ctx_image` 0.825, `ft_s1` 0.821), so fine-tuned features + refit probe + text is the best system by val: 0.802 [0.784, 0.819] on `test_clean`, 0.827 [0.811, 0.842] on `test_v1` (v1 metric). Exploratory; no gate defines it. 6 min on the Mac |
+| 2026-10-21 | correction | a8060e1 | M4 follow-ups | | | | Two notes in the 2026-10-21 rows above compared `test_v1` under the v1 metric with `test_clean` under v2. Under the same v2 policy, the frozen text gain on `test_v1` is +0.025 (unpaired: 0.820 vs 0.795) against +0.016 on `test_clean`, and the prior-report gain about +0.005 against +0.007. So `test_clean`'s higher prior coverage doesn't explain the gaps; the label policy does (§6 M4b amendment). Text gains are judged under v2 |
 
 ## 10. Backlog (after v2.0, one at a time)
 

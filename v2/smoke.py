@@ -6,14 +6,19 @@ Wiring check: the whole v2 pipeline on synthetic data, in about a minute on CPU.
 
 Builds a synthetic MIMIC-CXR-JPG tree with a planted signal (v2.synth), then
 runs prepare_data -> embed -> probe -> zero_shot -> finetune (+ resume) ->
-context + fuse -> evaluate with test-size encoders, through the same
+context + fuse -> M4b (tokens, attend, prior labels, stack) -> evaluate with
+test-size encoders, through the same
 command-line entry points you will use on real data. It passes only if every
 stage runs AND the planted signal is recovered end to end: with the
 "test-pixels" encoder, test_clean macro AUROC must be >= 0.9, and must fall
 below 0.7 when the embeddings are deliberately misaligned with their studies
 (proof that the check has teeth). For M4, no study's input may contain its own
 findings, while the same text-only arm fed whole reports must score > 0.95
-(proof that the leak trap has teeth). No downloads, no MIMIC data needed.
+(proof that the leak trap has teeth). For M4b, the attention head must recover
+the planted signal from cached tokens, and the prior-label arm fed each study's
+own labels instead of its prior study's must score > 0.95, while the honest arm
+stays near chance (synthetic studies are independent). No downloads, no MIMIC
+data needed.
 """
 
 from __future__ import annotations
@@ -31,8 +36,8 @@ from typing import Callable, Optional
 import numpy as np
 import pandas as pd
 
-from . import context, embed, evaluate, finetune, fuse, prepare_data, probe, zero_shot
-from .common import load_manifest, setup_logging
+from . import attend, context, embed, evaluate, finetune, fuse, prepare_data, probe, stack, zero_shot
+from .common import CHEXPERT_COLUMNS, load_manifest, mimic_csv, setup_logging
 from .synth import make_dataset
 
 
@@ -149,9 +154,47 @@ def run_checks(work: Path, patients: int = 400) -> list[tuple[str, bool, str]]:
 
     stage("M4 context + fuse (leak trap)", m4)
 
+    def m4b() -> str:
+        embed.main(["--model", "test-pixels", "--tokens", "12", "--workers", "0", *common])
+        # A few hundred training studies need far more steps per study than the real recipe gives.
+        res = attend.main(["--tokens", str(out / "embeddings" / "test-pixels_48_tokens12.npy"), "--seeds", "0",
+                           "--max-epochs", "30", "--patience", "30", "--batch-size", "16", "--lr", "3e-3",
+                           "--n-boot", "50", "--device", "cpu", *common])
+        h0 = evaluate._get(evaluate.evaluate_run(out, "test-pixels_48_attn_h0", n_boot=50), "test_clean",
+                           "v2")["macro_auroc"]
+        assert h0 >= 0.85, f"the attention head missed the planted signal: test_clean macro AUROC {h0:.3f}"
+        assert "G4b" in res["report"].read_text()
+        emb = out / "embeddings" / "tiny-siglip_32.npz"
+        fuse.main(["--embeddings", str(emb), "--arms", ",".join(fuse.M4B_ARMS), "--n-boot", "50", "--jobs", "2",
+                   *common])
+        m4b_report = (out / "reports" / "m4b_tiny-siglip_32.md").read_text()
+        assert "(from M4)" in m4b_report and "**G4**" not in m4b_report, "M4b must reuse M4's arms, not refit them"
+        honest = evaluate._get(evaluate.evaluate_run(out, "tiny-siglip_32_ctx_prior_labels", n_boot=50),
+                               "test_clean", "v2")["macro_auroc"]
+        # Negative control: each study's own CheXpert row in place of its prior study's must look far too good.
+        ctx = pd.read_parquet(out / "context.parquet")
+        own = pd.read_csv(mimic_csv(paths.mimic_root, "chexpert")).drop_duplicates("study_id").set_index("study_id")
+        leaky = out / "context_leaky.parquet"
+        ctx.assign(**{f"prior_label::{c}": own[c].reindex(ctx["study_id"]).to_numpy() for c in CHEXPERT_COLUMNS},
+                   prior_labels_found=ctx["study_id"].isin(own.index).to_numpy()).to_parquet(leaky, index=False)
+        fuse.main(["--embeddings", str(emb), "--context", str(leaky), "--arms", "prior_labels", "--run", "leakypl",
+                   "--n-boot", "50", "--jobs", "2", *common])
+        leaked = evaluate._get(evaluate.evaluate_run(out, "leakypl_ctx_prior_labels", n_boot=50), "test_clean",
+                               "v2")["macro_auroc"]
+        for path in [*(out / "predictions").glob("leakypl_*"), *(out / "reports").glob("leakypl_*"),
+                     out / "reports" / "m4b_leakypl.md", leaky]:
+            path.unlink(missing_ok=True)
+        assert leaked > 0.95, f"own labels scored only {leaked:.3f}: the prior-label trap has no teeth"
+        assert honest < 0.75, f"honest prior labels scored {honest:.3f} on independent synthetic studies: a leak?"
+        stacked = stack.main(["--pair", "test-pixels_48_probe", "tiny-siglip_32_ctx_text", "--n-boot", "50", *common])
+        return (f"h0 {h0:.3f}; G4b {res['gate']['verdict'].split(':')[0]}; prior labels {honest:.3f} vs own labels "
+                f"{leaked:.3f}; {len(stacked['runs'])} stack")
+
+    stage("M4b tokens + attend + prior labels + stack", m4b)
+
     def reports() -> str:
         text = evaluate.summarize(out, n_boot=100)
-        assert "G1" in text and "G2" in text and "G4" in text
+        assert "G1" in text and "G2" in text and "G4" in text and "G4b" in text
         n = len(list((out / "reports").glob("*.md")))
         return f"{n} reports, summary with gates"
 

@@ -156,3 +156,23 @@ def test_missing_sources_leave_inputs_empty(prepared, tmp_path, monkeypatch):
     ctx = pd.read_parquet(out / "context.parquet")
     assert (ctx[list(context.TEXT_SOURCES)] == "").all().all()
     assert np.isnan(ctx["temperature"]).all()
+
+
+def test_prior_labels_come_from_the_prior_study(context_table, synth):
+    from v2.common import CHEXPERT_COLUMNS, mimic_csv
+    from v2.context import PRIOR_LABEL_COLUMNS
+
+    ctx = context_table
+    chexpert = pd.read_csv(mimic_csv(synth.mimic_root, "chexpert")).set_index("study_id")
+    has = ctx["prior_labels_found"].to_numpy(bool)
+    assert has.any() and (ctx["prior_study_id"].notna() | ~has).all()
+    rows = ctx[has]
+    want = chexpert.loc[rows["prior_study_id"].astype(int), list(CHEXPERT_COLUMNS)].to_numpy(np.float64)
+    got = rows[list(PRIOR_LABEL_COLUMNS)].to_numpy(np.float64)
+    assert np.array_equal(np.nan_to_num(got, nan=9.0), np.nan_to_num(want, nan=9.0))
+    # ...and never from the study itself.
+    own_ids = rows["study_id"][rows["study_id"].isin(chexpert.index)]
+    own = chexpert.loc[own_ids, list(CHEXPERT_COLUMNS)].to_numpy(np.float64)
+    same = (np.nan_to_num(own, nan=9.0) == np.nan_to_num(got[rows["study_id"].isin(chexpert.index).to_numpy()], nan=9.0)).all(axis=1)
+    assert same.mean() < 0.5
+    assert np.isnan(ctx.loc[~has, list(PRIOR_LABEL_COLUMNS)].to_numpy(np.float64)).all()

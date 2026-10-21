@@ -78,7 +78,7 @@ def test_fuse_end_to_end(prepared, synth):
     context.main(["--out", str(prepared), "--reports", str(synth.reports), "--mimic-iv-ed", str(synth.mimic_iv_ed),
                   "--mimic-iv", str(synth.mimic_iv), "--mimic-cxr-jpg", str(synth.mimic_root)])
     fuse.main(["--embeddings", str(emb), "--out", str(prepared), "--n-boot", "50", "--jobs", "1"])
-    for arm in fuse.ARMS:
+    for arm in fuse.DEFAULT_ARMS:
         meta = json.loads((prepared / "predictions" / f"tiny-siglip_32_ctx_{arm}.json").read_text())
         assert meta["kind"] == "fuse" and meta["arm"] == arm
     # The image arm is the M1 probe, exactly.
@@ -94,3 +94,51 @@ def test_fuse_end_to_end(prepared, synth):
     report = (prepared / "reports" / "m4_tiny-siglip_32.md").read_text()
     assert "Leakage red flags" in report and "**G4**" in report
     assert "G4" in evaluate.summarize(prepared, n_boot=20)
+
+
+def test_prior_label_block_is_one_hot_with_an_indicator():
+    from v2.context import PRIOR_LABEL_COLUMNS
+
+    ctx = pd.DataFrame({col: [1.0, np.nan, np.nan] for col in PRIOR_LABEL_COLUMNS})
+    ctx["prior_labels_found"] = [True, True, False]
+    ctx[PRIOR_LABEL_COLUMNS[0]] = [1.0, -1.0, 1.0]
+    ctx[PRIOR_LABEL_COLUMNS[1]] = [0.0, np.nan, 0.0]
+    block = fuse.prior_label_block(ctx)
+    assert block.shape == (3, 4 * len(PRIOR_LABEL_COLUMNS) + 1)
+    assert block[0, :8].tolist() == [1, 0, 0, 0, 0, 1, 0, 0]  # positive; negative
+    assert block[1, :8].tolist() == [0, 0, 1, 0, 0, 0, 0, 1]  # uncertain; not mentioned
+    assert not block[2].any()                                 # no labeled prior: all zeros, whatever the columns say
+    assert block[:, -1].tolist() == [1.0, 1.0, 0.0]
+
+
+def test_prior_label_arms_end_to_end(prepared, synth):
+    from v2 import context
+
+    emb = prepared / "embeddings" / "tiny-siglip_32.npz"
+    if not emb.exists():
+        embed.main(["--model", "tiny-siglip", "--out", str(prepared), "--workers", "0"])
+    context.main(["--out", str(prepared), "--reports", str(synth.reports), "--mimic-iv-ed", str(synth.mimic_iv_ed),
+                  "--mimic-iv", str(synth.mimic_iv), "--mimic-cxr-jpg", str(synth.mimic_root)])
+    arms = "image,image_prior,image_text,prior_labels,image_prior_labels,image_text_prior_labels"
+    fuse.main(["--embeddings", str(emb), "--out", str(prepared), "--arms", arms, "--n-boot", "20", "--jobs", "1"])
+    meta = json.loads((prepared / "predictions" / "tiny-siglip_32_ctx_image_prior_labels.json").read_text())
+    assert meta["prior_labels"] is True and meta["arm"] == "image_prior_labels"
+    report = (prepared / "reports" / "m4b_tiny-siglip_32.md").read_text()
+    assert "Prior-study labels (M4b, exploratory)" in report and "Leakage red flags" in report
+    assert "`tiny-siglip_32_ctx_image_text_prior_labels` minus `tiny-siglip_32_ctx_image_text`" in report
+
+
+def test_prior_label_arms_need_a_rebuilt_context(prepared, tmp_path):
+    from v2.context import PRIOR_LABEL_COLUMNS
+
+    emb = prepared / "embeddings" / "tiny-siglip_32.npz"
+    if not emb.exists():
+        embed.main(["--model", "tiny-siglip", "--out", str(prepared), "--workers", "0"])
+    old = tmp_path / "context_m4.parquet"
+    ctx = pd.DataFrame({"study_id": [1], "indication": [""], "chief_complaint": [""], "prior_report": [""]})
+    for c in (*fuse.VITALS, "sex_male", "age"):
+        ctx[c] = np.nan
+    ctx.to_parquet(old, index=False)
+    assert not set(PRIOR_LABEL_COLUMNS) & set(ctx.columns)
+    with pytest.raises(SystemExit, match="re-run `python -m v2.context`"):
+        fuse.main(["--embeddings", str(emb), "--out", str(prepared), "--context", str(old), "--arms", "image_prior_labels"])

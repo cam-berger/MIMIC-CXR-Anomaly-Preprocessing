@@ -1,6 +1,7 @@
 """M1 embeddings: file format, skipping finished work, resuming from a partial file."""
 
 import numpy as np
+import pytest
 
 from v2 import embed
 from v2.common import load_manifest
@@ -37,3 +38,41 @@ def test_resume_from_partial(prepared, pixel_embeddings, tmp_path):
     assert np.all(emb2[:half] == 7.0)  # kept from the partial file, not recomputed
     np.testing.assert_allclose(emb2[half:], full_emb[half:], rtol=1e-6)
     assert not partial.exists()
+
+
+def test_tokens_file_resumes_and_matches_the_embeddings(prepared, pixel_embeddings):
+    from v2.embed import load_tokens, tokens_path
+
+    path = tokens_path(prepared, "test-pixels", 48, 12)
+    embed.main(["--model", "test-pixels", "--tokens", "12", "--out", str(prepared), "--workers", "0"])
+    ids, toks, meta = load_tokens(path)
+    emb_ids, emb, _ = load_npz(pixel_embeddings)
+    np.testing.assert_array_equal(ids, emb_ids)
+    assert toks.shape == (len(ids), 145, 2) and toks.dtype == np.float16 and meta["grid"] == 12
+    np.testing.assert_allclose(toks[:, 0].astype(np.float32), emb[:, 12:14], rtol=2e-3, atol=2e-3)
+    full = np.array(toks)
+    # Interrupted after half the studies: the rerun fills in only the rest.
+    half = len(ids) // 2
+    done = np.zeros(len(ids), bool)
+    done[:half] = True
+    arr = np.lib.format.open_memmap(path, mode="r+")
+    arr[:half] = 7.0
+    arr[half:] = 0.0
+    arr.flush()
+    del arr
+    np.savez(path.with_name(path.stem + ".progress.npz"), study_id=ids, done=done,
+             key=np.array(embed.json.dumps({"encoder": "test-pixels", "size": 48, "grid": 12})))
+    path.with_suffix(".json").unlink()
+    embed.main(["--model", "test-pixels", "--tokens", "12", "--out", str(prepared), "--workers", "0"])
+    _, toks2, _ = load_tokens(path)
+    assert np.all(toks2[:half] == 7.0)                     # kept, not recomputed
+    np.testing.assert_array_equal(toks2[half:], full[half:])
+    assert not path.with_name(path.stem + ".progress.npz").exists()
+
+
+def test_unfinished_tokens_are_refused(tmp_path):
+    from v2.embed import load_tokens
+
+    np.save(tmp_path / "x_tokens12.npy", np.zeros((2, 3, 4), np.float16))
+    with pytest.raises(SystemExit, match="unfinished"):
+        load_tokens(tmp_path / "x_tokens12.npy")

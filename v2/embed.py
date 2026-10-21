@@ -7,6 +7,13 @@ M1: frozen embeddings for every manifest study (docs/V2_PLAN.md §6).
 Writes embeddings/{model}_{size}.npz with `study_id`, `emb` (float32) and a
 JSON `meta` string. Progress is saved to a .partial.npz every few minutes, so
 an interrupted run resumes where it stopped.
+
+    python -m v2.embed --model rad-dino --size 518 --tokens 12   # M4b: patch tokens
+
+With --tokens G it writes, instead, embeddings/{model}_{size}_tokens{G}.npy: per
+study the CLS token and the patch tokens averaged into a G x G grid, float16,
+[n, 1 + G*G, width], plus a .json sidecar with the study ids and meta. The .npy
+is filled in place and an interrupted run resumes from its .progress.npz.
 """
 
 from __future__ import annotations
@@ -56,6 +63,24 @@ def save_npz(path: Path, study_ids: np.ndarray, emb: np.ndarray, meta: dict) -> 
 def load_npz(path: Path) -> tuple[np.ndarray, np.ndarray, dict]:
     with np.load(path, allow_pickle=False) as f:
         return f["study_id"].astype(np.int64), f["emb"].astype(np.float32), json.loads(str(f["meta"]))
+
+
+def tokens_path(out_dir: Path, name: str, size: int, grid: int) -> Path:
+    return Path(out_dir) / "embeddings" / f"{name}_{size}_tokens{grid}.npy"
+
+
+def load_tokens(path: Path) -> tuple[np.ndarray, np.ndarray, dict]:
+    """(study_ids, tokens as a read-only float16 memmap [n, 1 + g*g, width], meta); refuses unfinished files."""
+    path = Path(path)
+    sidecar = path.with_suffix(".json")
+    if not sidecar.exists():
+        raise SystemExit(f"{sidecar} not found: {path} is unfinished (re-run the same v2.embed --tokens command)")
+    info = json.loads(sidecar.read_text())
+    ids = np.asarray(info["study_id"], dtype=np.int64)
+    tokens = np.load(path, mmap_mode="r")
+    if tokens.shape[0] != len(ids):
+        raise SystemExit(f"{path}: {tokens.shape[0]} rows but {len(ids)} study ids in {sidecar.name}")
+    return ids, tokens, info["meta"]
 
 
 def select_rows(manifest: pd.DataFrame, splits: list[str], max_train: int, smoke: bool, seed: int) -> pd.DataFrame:
@@ -129,6 +154,81 @@ def run_embedding(
     return all_ids[order], all_emb[order]
 
 
+@torch.inference_mode()
+def run_tokens(
+    enc: Encoder,
+    rows: pd.DataFrame,
+    out_dir: Path,
+    grid: int,
+    path: Path,
+    batch_size: int,
+    workers: int,
+    device,
+    precision: str = "auto",
+    meta: Optional[dict] = None,
+    save_every_s: float = 300.0,
+) -> Path:
+    """Write tokens for `rows` (sorted by study_id) into a float16 .npy; resumes from its .progress.npz."""
+    ids = rows["study_id"].to_numpy(np.int64)
+    g = enc.token_grid(grid)
+    shape = (len(rows), 1 + g * g, enc.token_dim)
+    progress = path.with_name(path.stem + ".progress.npz")
+    key = {"encoder": enc.name, "size": enc.size, "grid": g}
+    done = np.zeros(len(rows), dtype=bool)
+    arr = None
+    if path.exists() and progress.exists():
+        with np.load(progress, allow_pickle=False) as f:
+            same = np.array_equal(f["study_id"], ids) and json.loads(str(f["key"])) == key
+            if same and np.load(path, mmap_mode="r").shape == shape:
+                done = f["done"].astype(bool)
+                arr = np.lib.format.open_memmap(path, mode="r+")
+                logger.info("Resuming: %d studies already done", int(done.sum()))
+    if arr is None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        arr = np.lib.format.open_memmap(path, mode="w+", dtype=np.float16, shape=shape)
+
+    def checkpoint(arr: np.ndarray) -> None:
+        arr.flush()
+        tmp = progress.with_name(progress.name + ".tmp.npz")
+        np.savez(tmp, study_id=ids, done=done, key=np.array(json.dumps(key)))
+        os.replace(tmp, progress)
+
+    todo = np.flatnonzero(~done)
+    dtype = amp_dtype(device, precision)
+    autocast = torch.autocast(device.type, dtype=dtype) if dtype is not None else nullcontext()
+    ds = ImageDataset(image_paths(out_dir, rows.iloc[todo]), enc.eval_transform())
+    dl = DataLoader(ds, batch_size=batch_size, shuffle=False, **loader_kwargs(workers, device))
+    start = last_save = time.time()
+    n_done = 0
+    for x, idx in dl:
+        with autocast:
+            toks = enc.tokens(x.to(device, non_blocking=True), grid)
+        toks = toks.float().cpu().numpy().astype(np.float16)
+        if not np.isfinite(toks).all():
+            raise RuntimeError("non-finite tokens in one batch (a value beyond float16's range, or a bad PNG; "
+                               "--precision fp32 rules out mixed precision)")
+        pos = todo[idx.numpy()]
+        arr[pos] = toks
+        done[pos] = True
+        n_done += len(idx)
+        now = time.time()
+        if now - last_save > save_every_s or n_done == len(todo):
+            rate = n_done / max(now - start, 1e-6)
+            logger.info("  %d / %d  (%.1f img/s, ~%.0f min left)", n_done, len(todo), rate,
+                        (len(todo) - n_done) / max(rate, 1e-6) / 60)
+            checkpoint(arr)
+            last_save = now
+    arr.flush()
+    del arr
+    sidecar = path.with_suffix(".json")
+    tmp = sidecar.with_name(sidecar.name + ".tmp")
+    tmp.write_text(json.dumps({"study_id": ids.tolist(), "meta": {**(meta or {}), "grid": g, "shape": list(shape),
+                                                                  "dtype": "float16"}}))
+    os.replace(tmp, sidecar)
+    progress.unlink(missing_ok=True)
+    return path
+
+
 def main(argv: Optional[list[str]] = None) -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--model", required=True, choices=sorted(REGISTRY))
@@ -141,6 +241,8 @@ def main(argv: Optional[list[str]] = None) -> None:
     parser.add_argument("--splits", default="train,val,test")
     parser.add_argument("--max-train", type=int, default=0, help="Embed only N training studies (CPU pilots)")
     parser.add_argument("--smoke", action="store_true", help="16 studies per split, to test the setup")
+    parser.add_argument("--tokens", type=int, metavar="G",
+                        help="M4b: write CLS + patch tokens pooled to a G x G grid (float16 .npy) instead")
     parser.add_argument("--seed", type=int, default=DEFAULT_SEED)
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args(argv)
@@ -155,6 +257,27 @@ def main(argv: Optional[list[str]] = None) -> None:
                 len(rows), enc.dim)
 
     suffix = "_smoke" if args.smoke else ""
+    if args.tokens:
+        g = enc.token_grid(args.tokens)
+        final = tokens_path(out_dir, enc.name, enc.size, g)
+        final = final.with_name(final.stem + suffix + ".npy")
+        if final.with_suffix(".json").exists():
+            done_ids, _, done_meta = load_tokens(final)
+            if (done_meta.get("encoder"), done_meta.get("size")) == (enc.name, enc.size) and \
+                    rows["study_id"].isin(done_ids).all():
+                logger.info("%s already covers these %d studies; delete it (and its .json) to recompute",
+                            final, len(rows))
+                return
+            final.with_suffix(".json").unlink()
+        meta = {**enc.describe(), "commit": git_commit(), "n": int(len(rows)), "max_train": args.max_train,
+                "device": str(device), "precision": args.precision, "token_dim": enc.token_dim,
+                "pooled_slice": list(enc.pooled_slice)}
+        logger.info("Tokens: CLS + %d x %d grid of %d-d tokens per study (float16, %.1f GB)", g, g, enc.token_dim,
+                    len(rows) * (1 + g * g) * enc.token_dim * 2 / 1e9)
+        run_tokens(enc, rows, out_dir, args.tokens, final, args.batch_size, args.workers, device, args.precision,
+                   meta)
+        logger.info("Wrote %s", final)
+        return
     final = embeddings_path(out_dir, enc.name, enc.size).with_name(f"{enc.name}_{enc.size}{suffix}.npz")
     if final.exists():
         done_ids, _, done_meta = load_npz(final)

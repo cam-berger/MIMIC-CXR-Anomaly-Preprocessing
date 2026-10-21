@@ -2,7 +2,7 @@
 
 import shutil
 
-from v2.doctor import Report, check_cohort, check_mimic, check_output
+from v2.doctor import Report, check_cohort, check_m4b, check_mimic, check_output
 
 
 def test_mimic_and_cohort_checks_pass_on_a_complete_tree(synth, tmp_path):
@@ -27,3 +27,9 @@ def test_missing_drive_fails(tmp_path):
     r = Report()
     check_mimic(r, tmp_path / "not-mounted", 10)
     assert r.failures == 1
+
+
+def test_m4b_check_reads_only_the_context_schema(bigger, synth):
+    r = Report()
+    check_m4b(r, bigger, synth.mimic_root)
+    assert r.failures == 0 and r.warnings == 0  # labels found, context rebuilt, tokens cached

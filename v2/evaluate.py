@@ -45,7 +45,9 @@ N_BOOT = 1000
 G1_THRESHOLD = 0.77
 # (test set, label policy) pairs every run is evaluated on, headline first.
 EVAL_SETS = (("test_clean", "v2"), ("test_v1", "v2"), ("test_v1", "v1"), ("val", "v2"))
-MILESTONE = {"probe": "M1", "zero_shot": "M2", "finetune": "M3", "fuse": "M4"}
+MILESTONE = {"probe": "M1", "zero_shot": "M2", "finetune": "M3", "fuse": "M4", "attend": "M4b", "stack": "M4b"}
+# §6 M4b: the attention head's image-only arm (h0) may trail the M1 probe on val by at most this much.
+G4B_HEAD_MARGIN = 0.02
 # Encoders whose test_v1 numbers are not reportable (§4): they may have trained on those images
 # and their reports. They are shown, flagged, but never used for the gates.
 TEST_CLEAN_ONLY = {"medsiglip"}
@@ -354,6 +356,47 @@ def _get(report: dict, test_set: str, metric: str) -> Optional[dict]:
     return None
 
 
+def g4b(out_dir: Path, prefix: str, n_boot: int = N_BOOT, reports: Optional[dict] = None) -> dict:
+    """
+    Gate G4b (§6 M4b): {prefix}_attn_h2 minus {prefix}_attn_h1 on test_clean. It is read only after the head
+    validity check passes: h0's val macro AUROC at least {prefix}_probe's minus G4B_HEAD_MARGIN.
+    """
+    reports = dict(reports or {})
+    runs = {k: f"{prefix}_attn_{k}" for k in ("h0", "h1", "h2")}
+    runs["probe"] = f"{prefix}_probe"
+
+    def val_score(run: str) -> Optional[float]:
+        if run not in reports and (Path(out_dir) / "predictions" / f"{run}.parquet").exists():
+            reports[run] = evaluate_run(out_dir, run, n_boot)
+        res = _get(reports[run], "val", "v2") if run in reports else None
+        return res["macro_auroc"] if res and np.isfinite(res["macro_auroc"]) else None
+
+    v_h0, v_probe = val_score(runs["h0"]), val_score(runs["probe"])
+    out = {**runs, "val_h0": v_h0, "val_probe": v_probe, "cmp": None}
+    if v_h0 is None or v_probe is None:
+        out["check_ok"] = False
+        out["check"] = f"could not run: no val score for `{runs['h0'] if v_h0 is None else runs['probe']}`"
+    else:
+        out["check_ok"] = v_h0 >= v_probe - G4B_HEAD_MARGIN
+        out["check"] = (f"`h0` val {fmt(v_h0)} vs `{runs['probe']}` val {fmt(v_probe)} (allowed margin "
+                        f"{G4B_HEAD_MARGIN}): " + ("passed" if out["check_ok"] else "FAILED"))
+    have = all((Path(out_dir) / "predictions" / f"{runs[k]}.parquet").exists() for k in ("h1", "h2"))
+    if not have:
+        out["verdict"] = "not run: needs the h1 and h2 arms"
+    elif not out["check_ok"]:
+        out["verdict"] = "WITHHELD: the head validity check did not pass; inspect the head before reading G4b"
+    else:
+        cmp = compare_runs(out_dir, runs["h2"], runs["h1"], "test_clean", "v2", n_boot)
+        out["cmp"] = cmp
+        if not np.isfinite(cmp["diff"]):
+            out["verdict"] = "n/a: no measurable classes (rehearsal data?)"
+        elif cmp["a_better"]:
+            out["verdict"] = "PASS: text-steered attention adds to late fusion"
+        else:
+            out["verdict"] = "FAIL: no detectable gain from letting text steer the attention"
+    return out
+
+
 def summarize(out_dir: Path, n_boot: int = N_BOOT, runs: Optional[list[str]] = None) -> str:
     pred_dir = Path(out_dir) / "predictions"
     # --smoke runs only check the setup; they are never results.
@@ -459,6 +502,12 @@ def summarize(out_dir: Path, n_boot: int = N_BOOT, runs: Optional[list[str]] = N
                      f"**{verdict}**. Read the leakage red flags in reports/m4_{prefix}.md first.")
     if not frozen_seen:
         lines.append("- **G4**: no M4 runs on frozen image features yet")
+    for run in sorted(r for r, rep in reports.items()
+                      if rep["meta"].get("kind") == "attend" and rep["meta"].get("arm") == "h2"):
+        gate = g4b(out_dir, run[: -len("_attn_h2")], n_boot, reports)
+        diff = fmt_ci(gate["cmp"]["diff"], gate["cmp"]["diff_ci"]) if gate["cmp"] else "-"
+        lines.append(f"- **G4b** (`{gate['h2']}` - `{gate['h1']}` on test_clean): {diff} -> **{gate['verdict']}**. "
+                     f"Head validity check: {gate['check']}.")
 
     lines += ["", "## Rows for the results log (docs/V2_PLAN.md §9)", "", "```"]
     today = date.today().isoformat()

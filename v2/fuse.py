@@ -14,9 +14,15 @@ predictions/{embeddings stem}_ctx_{arm}.parquet:
     text, indication, complaint, prior      text only: the controls
     image_vitals, image_text_vitals         + triage vitals, acuity, sex and age
 
+M4b (§6), only with --arms: the prior report encoded as the prior study's 14
+CheXpert labels (one-hot, 57 features), alone and with the image:
+
+    prior_labels, image_prior_labels, image_text_prior_labels
+
 Text features per source: TF-IDF over word 1-2-grams and a truncated SVD, both
 fit on train only, plus a presence indicator. Then it checks the leakage red
-flags, runs gate G4 and writes reports/m4_{prefix}.md. Only aggregates are logged.
+flags, runs gate G4 and writes reports/m4_{prefix}.md (m4b_{prefix}.md when M4b arms
+are among the arms). Only aggregates are logged.
 """
 
 from __future__ import annotations
@@ -26,7 +32,7 @@ import logging
 import os
 import warnings
 from pathlib import Path
-from typing import Optional
+from typing import NamedTuple, Optional
 
 import numpy as np
 import pandas as pd
@@ -35,7 +41,7 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 
 from .common import DEFAULT_SEED, TEST, TRAIN, VAL, default_out_dir, label_matrix, load_manifest, read_predictions
 from .common import setup_logging, write_predictions
-from .context import TEXT_SOURCES
+from .context import PRIOR_LABEL_COLUMNS, TEXT_SOURCES
 from .embed import load_npz
 from .evaluate import _get, compare_runs, evaluate_run, fmt, fmt_ci
 from .probe import DEFAULT_CS, fit_probe, split_xy
@@ -43,16 +49,31 @@ from .probe import DEFAULT_CS, fit_probe, split_xy
 logger = logging.getLogger("v2.fuse")
 
 SHORT = {"indication": "indication", "chief_complaint": "complaint", "prior_report": "prior"}
-# arm -> (uses the image, text sources, uses vitals/demographics)
-ARMS: dict[str, tuple[bool, tuple[str, ...], bool]] = {
-    "image": (True, (), False),
-    "image_text": (True, TEXT_SOURCES, False),
-    **{f"image_{SHORT[s]}": (True, (s,), False) for s in TEXT_SOURCES},
-    "text": (False, TEXT_SOURCES, False),
-    **{SHORT[s]: (False, (s,), False) for s in TEXT_SOURCES},
-    "image_vitals": (True, (), True),
-    "image_text_vitals": (True, TEXT_SOURCES, True),
+
+
+class Arm(NamedTuple):
+    image: bool                     # the image embedding
+    sources: tuple[str, ...]        # text sources
+    structured: bool = False        # triage vitals, acuity, sex and age
+    prior_labels: bool = False      # M4b: the prior study's CheXpert labels
+
+
+ARMS: dict[str, Arm] = {
+    "image": Arm(True, ()),
+    "image_text": Arm(True, TEXT_SOURCES),
+    **{f"image_{SHORT[s]}": Arm(True, (s,)) for s in TEXT_SOURCES},
+    "text": Arm(False, TEXT_SOURCES),
+    **{SHORT[s]: Arm(False, (s,)) for s in TEXT_SOURCES},
+    "image_vitals": Arm(True, (), structured=True),
+    "image_text_vitals": Arm(True, TEXT_SOURCES, structured=True),
+    "prior_labels": Arm(False, (), prior_labels=True),
+    "image_prior_labels": Arm(True, (), prior_labels=True),
+    "image_text_prior_labels": Arm(True, TEXT_SOURCES, prior_labels=True),
 }
+M4B_ARMS = ("prior_labels", "image_prior_labels", "image_text_prior_labels")
+DEFAULT_ARMS = tuple(arm for arm in ARMS if arm not in M4B_ARMS)
+# M4b's pre-registered comparisons: the labels against TF-IDF of the same prior report, and beyond all text.
+PRIOR_LABEL_CMPS = (("image_prior_labels", "image_prior"), ("image_text_prior_labels", "image_text"))
 PRIMARY, REFERENCE = "image_text", "image"
 RED_FLAG_CLASS_AUROC = 0.90
 TEXT_COMPONENTS = 128
@@ -120,12 +141,25 @@ def structured_block(ctx: pd.DataFrame, train: np.ndarray) -> np.ndarray:
     return impute_with_indicators(feats, train)
 
 
+def prior_label_block(ctx: pd.DataFrame) -> np.ndarray:
+    """
+    The prior study's 14 CheXpert labels, each one-hot over positive / negative / uncertain / not mentioned,
+    plus an indicator that a labeled prior exists (all zeros without one): 57 features.
+    """
+    found = ctx["prior_labels_found"].fillna(False).to_numpy(bool)
+    cols = []
+    for col in PRIOR_LABEL_COLUMNS:
+        v = pd.to_numeric(ctx[col], errors="coerce").to_numpy(np.float64)
+        cols += [found & (v == 1.0), found & (v == 0.0), found & (v == -1.0), found & np.isnan(v)]
+    return np.stack(cols + [found], axis=1).astype(np.float64)
+
+
 def red_flags(clean: dict) -> list[str]:
     """Leakage red flags (§6 M4): a text-only arm at or above the image, or a measurable class above 0.90."""
     flags = []
     ref = clean.get(REFERENCE)
     for arm, res in clean.items():
-        if ARMS[arm][0] or res is None:
+        if ARMS[arm].image or res is None:
             continue
         if ref is not None and np.isfinite(res["macro_auroc"]) and res["macro_auroc"] >= ref["macro_auroc"]:
             flags.append(f"text-only `{arm}` ({fmt(res['macro_auroc'])}) is not below `image` ({fmt(ref['macro_auroc'])})")
@@ -153,15 +187,33 @@ def gate_report(out_dir: Path, prefix: str, runs: dict, n_boot: int, features: s
     """
     Red flags, paired comparisons against `image` on test_clean and gate G4; writes reports/m4_{prefix}.md.
     G4 is defined on frozen image features. On fine-tuned ones the same comparison is exploratory.
+    With M4b's prior-label arms it writes reports/m4b_{prefix}.md instead: no G4, and the M4 arms its
+    comparisons need are read from M4's predictions when this call didn't fit them.
     """
+    m4b = any(arm in M4B_ARMS for arm in runs)
+    borrowed = {}
+    if m4b:
+        for arm in (REFERENCE, *(b for _, b in PRIOR_LABEL_CMPS)):
+            run = f"{prefix}_ctx_{arm}"
+            if arm not in runs and (Path(out_dir) / "predictions" / f"{run}.parquet").exists():
+                borrowed[arm] = run
+        runs = {**borrowed, **runs}
     reps = {arm: evaluate_run(out_dir, run, n_boot) for arm, run in runs.items()}
     clean = {arm: _get(rep, "test_clean", "v2") for arm, rep in reps.items()}
     flags = red_flags(clean)
     cmps = {}
     if REFERENCE in runs:
         for arm, run in runs.items():
-            if arm != REFERENCE and ARMS[arm][0]:
+            if arm != REFERENCE and ARMS[arm].image:
                 cmps[arm] = compare_runs(out_dir, run, runs[REFERENCE], "test_clean", "v2", n_boot)
+    prior_cmps = []
+    for a, b in PRIOR_LABEL_CMPS:
+        if a in runs and b in runs:
+            for test_set, metric in (("test_clean", "v2"), ("test_v1", "v2"), ("test_v1", "v1")):
+                try:
+                    prior_cmps.append(compare_runs(out_dir, runs[a], runs[b], test_set, metric, n_boot))
+                except SystemExit as exc:  # no shared studies or no frozen classes for that set
+                    logger.warning("%s - %s on %s skipped: %s", runs[a], runs[b], test_set, exc)
     g4 = cmps.get(PRIMARY)
     if g4 is None:
         verdict = "not run: needs the `image` and `image_text` arms (all three text sources)"
@@ -174,8 +226,9 @@ def gate_report(out_dir: Path, prefix: str, runs: dict, n_boot: int, features: s
     drift = reproduces_probe(out_dir, runs[REFERENCE], f"{prefix}_probe") if REFERENCE in runs else None
 
     gate = "G4" if features == "frozen" else "Text gain on fine-tuned features (exploratory, not G4)"
-    lines = [f"# M4: pre-imaging text + image ({prefix})", "",
-             "Macro AUROC on test_clean; paired differences against `image` (docs/V2_PLAN.md §6 M4).", ""]
+    title = f"# M4b: prior-study labels ({prefix})" if m4b else f"# M4: pre-imaging text + image ({prefix})"
+    lines = [title, "", "Macro AUROC on test_clean; paired differences against `image` (docs/V2_PLAN.md §6 "
+             + ("M4b part 2)." if m4b else "M4)."), ""]
     if features != "frozen":
         lines += ["**Exploratory:** these image features come from a fine-tune that was fit on the training "
                   "studies, which likely understates what text adds. G4 is defined on frozen features only.", ""]
@@ -186,14 +239,30 @@ def gate_report(out_dir: Path, prefix: str, runs: dict, n_boot: int, features: s
         res = clean[arm]
         auc = fmt_ci(res["macro_auroc"], res["macro_auroc_ci"]) if res else "-"
         diff = fmt_ci(cmps[arm]["diff"], cmps[arm]["diff_ci"]) if arm in cmps else ""
-        lines.append(f"| `{run}` | {auc} | {diff} |")
-    g4_text = fmt_ci(g4["diff"], g4["diff_ci"]) if g4 else "-"
-    lines += ["", f"**{gate}** (`{PRIMARY}` minus `{REFERENCE}`): {g4_text} -> **{verdict}**", ""]
-    if drift is not None:
-        lines.append(f"`image` arm vs `{prefix}_probe`: largest score difference {drift:.2e} (should be 0).")
-    (Path(out_dir) / "reports").mkdir(parents=True, exist_ok=True)
-    (Path(out_dir) / "reports" / f"m4_{prefix}.md").write_text("\n".join(lines) + "\n")
-    return {"flags": flags, "g4": g4, "verdict": verdict, "probe_drift": drift, "gate": gate}
+        lines.append(f"| `{run}`{' (from M4)' if arm in borrowed else ''} | {auc} | {diff} |")
+    if not m4b:
+        g4_text = fmt_ci(g4["diff"], g4["diff_ci"]) if g4 else "-"
+        lines += ["", f"**{gate}** (`{PRIMARY}` minus `{REFERENCE}`): {g4_text} -> **{verdict}**", ""]
+        if drift is not None:
+            lines.append(f"`image` arm vs `{prefix}_probe`: largest score difference {drift:.2e} (should be 0).")
+    if prior_cmps:
+        lines += ["", "## Prior-study labels (M4b, exploratory)", "", "| Comparison | Set | Difference [95% CI] |",
+                  "|---|---|---|"]
+        for c in prior_cmps:
+            where = f"{c['test_set']}" + (", v1 metric" if c["metric"] == "v1" else "")
+            lines.append(f"| `{c['a']}` minus `{c['b']}` | {where} | {fmt_ci(c['diff'], c['diff_ci'])} |")
+        lines += ["", "Read test_v1 under the v2 policy first. Under the v1 policy only findings the report mentions "
+                  "count, and text the radiologist reads makes a mention more likely, which biases text gains toward "
+                  "zero (§6 M4b amendment).", "",
+                  "Caveat (§6 M4b): radiologists read the prior report and often carry its wording forward, "
+                  "and the same labeler reads both reports, so part of any gain is predicting the report rather "
+                  "than the patient."]
+    rep_dir = Path(out_dir) / "reports"
+    rep_dir.mkdir(parents=True, exist_ok=True)
+    path = rep_dir / f"{'m4b' if m4b else 'm4'}_{prefix}.md"
+    path.write_text("\n".join(lines) + "\n")
+    return {"flags": flags, "g4": None if m4b else g4, "verdict": verdict, "probe_drift": drift, "gate": gate,
+            "prior_label_cmps": prior_cmps, "path": path, "m4b": m4b}
 
 
 def main(argv: Optional[list[str]] = None) -> None:
@@ -204,7 +273,8 @@ def main(argv: Optional[list[str]] = None) -> None:
     parser.add_argument("--context", help="context.parquet from v2.context (default: OUT/context.parquet)")
     parser.add_argument("--out", default=None, help="v2 output dir (default: $OUTPUT_PATH/v2 or output/v2)")
     parser.add_argument("--run", help="Run-name prefix (default: {embeddings stem})")
-    parser.add_argument("--arms", help=f"Comma-separated subset of: {', '.join(ARMS)} (default: all)")
+    parser.add_argument("--arms", help=f"Comma-separated subset of: {', '.join(ARMS)} "
+                                       f"(default: all but the M4b arms {', '.join(M4B_ARMS)})")
     parser.add_argument("--jobs", type=int, default=min(12, os.cpu_count() or 1))
     parser.add_argument("--n-boot", type=int, default=1000)
     parser.add_argument("-v", "--verbose", action="store_true")
@@ -214,7 +284,7 @@ def main(argv: Optional[list[str]] = None) -> None:
     ctx_path = Path(args.context) if args.context else out_dir / "context.parquet"
     if not ctx_path.exists():
         raise SystemExit(f"{ctx_path} not found: run `python -m v2.context` first")
-    arms = [a.strip() for a in args.arms.split(",")] if args.arms else list(ARMS)
+    arms = [a.strip() for a in args.arms.split(",")] if args.arms else list(DEFAULT_ARMS)
     unknown = [a for a in arms if a not in ARMS]
     if unknown:
         raise SystemExit(f"Unknown arms {unknown}; choose from {list(ARMS)}")
@@ -235,6 +305,12 @@ def main(argv: Optional[list[str]] = None) -> None:
             blocks[src] = text_block(ctx[src], train)
             logger.info("Text features for %s: %s", src, blocks[src][1])
     structured = structured_block(ctx, train)
+    prior_block = None
+    if any(ARMS[arm].prior_labels for arm in arms):
+        if "prior_labels_found" not in ctx.columns:
+            raise SystemExit(f"{ctx_path} has no prior-study labels: re-run `python -m v2.context` (M4b adds them)")
+        prior_block = prior_label_block(ctx)
+        logger.info("Prior-study labels for %.1f%% of studies", 100 * prior_block[:, -1].mean())
 
     prefix = args.run or Path(args.embeddings).stem
     features = "fine-tuned" if meta.get("finetune_run") else "frozen"
@@ -242,12 +318,15 @@ def main(argv: Optional[list[str]] = None) -> None:
                   "image_features": features}
     runs = {}
     for arm in arms:
-        use_image, sources, use_struct = ARMS[arm]
+        use_image, sources, use_struct, use_prior = ARMS[arm]
         absent = [s for s in sources if not available[s]]
+        if use_prior and not prior_block[:, -1].any():
+            absent.append("prior-label")
         if absent:
-            logger.warning("Arm %s skipped: no %s text in the context", arm, ", ".join(absent))
+            logger.warning("Arm %s skipped: no %s input in the context", arm, ", ".join(absent))
             continue
-        extra = [blocks[s][0] for s in sources] + ([structured] if use_struct else [])
+        extra = [blocks[s][0] for s in sources] + ([structured] if use_struct else []) + \
+            ([prior_block] if use_prior else [])
         # float32 throughout, as in M1: the `image` arm is then the M1 probe exactly.
         X = emb if not extra else np.concatenate(([emb] if use_image else []) + extra, axis=1).astype(np.float32)
         parts = split_xy(manifest, ids, X)
@@ -257,6 +336,7 @@ def main(argv: Optional[list[str]] = None) -> None:
         run = f"{prefix}_ctx_{arm}"
         write_predictions(out_dir, run, rows["study_id"], rows["split"], probe.predict(np.concatenate([X_va, X_te])), {
             "kind": "fuse", "arm": arm, "image": use_image, "sources": list(sources), "structured": use_struct,
+            "prior_labels": use_prior,
             "embeddings": str(args.embeddings), "context": str(ctx_path),
             **(image_meta if use_image else {"encoder": None}),
             "text_features": {s: blocks[s][1] for s in sources}, "per_label": probe.summary(),
@@ -267,11 +347,15 @@ def main(argv: Optional[list[str]] = None) -> None:
     for flag in report["flags"]:
         logger.warning("RED FLAG: %s", flag)
     g4 = report["g4"]
-    logger.info("%s (%s - %s, test_clean): %s -> %s", report["gate"], PRIMARY, REFERENCE,
-                fmt_ci(g4["diff"], g4["diff_ci"]) if g4 else "-", report["verdict"])
-    if report["probe_drift"] is not None:
+    if not report["m4b"]:
+        logger.info("%s (%s - %s, test_clean): %s -> %s", report["gate"], PRIMARY, REFERENCE,
+                    fmt_ci(g4["diff"], g4["diff_ci"]) if g4 else "-", report["verdict"])
+    if report["probe_drift"] is not None and not report["m4b"]:
         logger.info("image arm vs %s_probe: largest score difference %.2e", prefix, report["probe_drift"])
-    logger.info("Report: %s", out_dir / "reports" / f"m4_{prefix}.md")
+    for c in report["prior_label_cmps"]:
+        logger.info("M4b %s - %s (%s, %s metric): %s", c["a"], c["b"], c["test_set"], c["metric"],
+                    fmt_ci(c["diff"], c["diff_ci"]))
+    logger.info("Report: %s", report["path"])
 
 
 if __name__ == "__main__":

@@ -12,7 +12,9 @@
 #   m2     medsiglip embeddings + zero-shot + probe      skipped without Hugging Face access
 #   m3     fine-tune rad-dino (seeds 0 and 1) + densenet121
 #   m4     text written before the X-ray + frozen rad-dino embeddings (needs MIMIC_CXR_REPORTS_PATH, MIMIC_IV_ED_PATH)
-#   eval   reports for every run + reports/summary.md with gates G1, G2 and G4
+#   m4b    prior-study labels, a combiner fit on val, then rad-dino patch tokens + attention heads (gate G4b);
+#          needs m4's sources plus MIMIC_CXR_JPG_PATH, ~7 GB of disk, a few hours on a Mac (TOTAL_HOURS=8)
+#   eval   reports for every run + reports/summary.md with gates G1, G2, G4 and G4b
 #   gpu    smoke m1 m2 m3 eval
 #
 # Settings (environment or .env):
@@ -31,14 +33,14 @@ set -euo pipefail
 cd "$(dirname "$0")/../.."
 
 # Check the arguments before doing anything slow.
-[ $# -gt 0 ] || { sed -n '2,30p' "$0"; exit 2; }
+[ $# -gt 0 ] || { sed -n '2,31p' "$0"; exit 2; }
 stages=()
 for arg in "$@"; do
   if [ "$arg" = gpu ]; then stages+=(smoke m1 m2 m3 eval); else stages+=("$arg"); fi
 done
 for stage in "${stages[@]}"; do
   case "$stage" in
-    m0|smoke|m1|m2|m3|m4|eval) ;;
+    m0|smoke|m1|m2|m3|m4|m4b|eval) ;;
     *) echo "Unknown stage: $stage (see the header of $0)" >&2; exit 2 ;;
   esac
 done
@@ -161,6 +163,29 @@ stage_m4() {  # the plan's M4 uses the 518 px embeddings: on a Mac, run it as SI
   [ -f "$emb" ] || { echo "!!! m4 needs $emb (run m1 at SIZE=$SIZE first)" >&2; exit 1; }
   run m4_context "$PY" -m v2.context --out "$OUT"
   run m4_fuse "$PY" -m v2.fuse --embeddings "$emb" --out "$OUT"
+}
+
+stage_m4b() {  # docs/V2_PLAN.md §6 M4b, on the 518 px embeddings: on a Mac, SIZE=518 TOTAL_HOURS=8 bash v2/scripts/run.sh m4b eval
+  : "${MIMIC_CXR_REPORTS_PATH:?m4b needs MIMIC_CXR_REPORTS_PATH (it may rebuild context.parquet)}"
+  : "${MIMIC_IV_ED_PATH:?m4b needs MIMIC_IV_ED_PATH (it may rebuild context.parquet)}"
+  : "${MIMIC_CXR_JPG_PATH:?m4b needs MIMIC_CXR_JPG_PATH (prior-study labels)}"
+  local emb="$OUT/embeddings/rad-dino_${SIZE}.npz" pre="rad-dino_${SIZE}"
+  [ -f "$emb" ] || { echo "!!! m4b needs $emb (run m1 at SIZE=$SIZE first)" >&2; exit 1; }
+  for run in "${pre}_probe" "${pre}_ctx_image" "${pre}_ctx_image_prior" "${pre}_ctx_image_text" "${pre}_ctx_text"; do
+    [ -f "$OUT/predictions/$run.parquet" ] || { echo "!!! m4b needs predictions/$run.parquet (run m4 first)" >&2; exit 1; }
+  done
+  # Rebuild context.parquet only if it predates M4b; the schema check reads no rows.
+  if ! "$PY" -c 'import sys, pyarrow.parquet as pq; sys.exit("prior_labels_found" not in pq.read_schema(sys.argv[1]).names)' \
+      "$OUT/context.parquet" 2>/dev/null; then
+    run m4b_context "$PY" -m v2.context --out "$OUT"
+  fi
+  run m4b_prior_labels "$PY" -m v2.fuse --embeddings "$emb" --out "$OUT" \
+    --arms prior_labels,image_prior_labels,image_text_prior_labels
+  local pairs=(--pair "${pre}_probe" "${pre}_ctx_text")
+  [ -f "$OUT/predictions/${pre}_ft_s1.parquet" ] && pairs=(--pair "${pre}_ft_s1" "${pre}_ctx_text" "${pairs[@]}")
+  run m4b_stack "$PY" -m v2.stack "${pairs[@]}" --out "$OUT"
+  run --hours 4 m4b_tokens "$PY" -m v2.embed --model rad-dino --size "$SIZE" --tokens 12 "${emb_args[@]}"
+  run --hours 6 m4b_attend "$PY" -m v2.attend --tokens "$OUT/embeddings/${pre}_tokens12.npy" --out "$OUT"
 }
 
 stage_eval() {

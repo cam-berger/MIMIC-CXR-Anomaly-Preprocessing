@@ -7,8 +7,8 @@ task definition and decision gates are in [`docs/V2_PLAN.md`](../docs/V2_PLAN.md
 This file covers how to run it.
 
 ```
-M0 prepare_data -> M1 embed + probe -> (M2 zero-shot) -> M3 fine-tune -> M4 pre-imaging text -> evaluate
-     laptop           laptop or GPU          optional         GPU (or Apple GPU)    laptop       anywhere
+M0 prepare_data -> M1 embed + probe -> (M2 zero-shot) -> M3 fine-tune -> M4 pre-imaging text -> M4b fusion follow-ups -> evaluate
+     laptop           laptop or GPU          optional         GPU (or Apple GPU)    laptop               laptop (Apple GPU)      anywhere
 ```
 
 ## 1. Set up (any machine)
@@ -58,6 +58,7 @@ them with v1's `python build_cohort.py --anomalous-only`.
 | M2 (optional) | `bash v2/scripts/run.sh m2 eval` (accept the MedSigLIP terms first, see §6) | laptop or GPU | like M1 |
 | M3 | `bash v2/scripts/run.sh smoke m3 eval` (§3); `gpu` also runs M1 and M2 there | rented GPU | about 2 h on an A100-40GB (measured: 2.15 instance hours, about $3-4) |
 | M4: text written before the X-ray | `SIZE=518 bash v2/scripts/run.sh m4 eval`; read `reports/m4_rad-dino_518.md` (red flags, then **G4**) | laptop | about 15 min |
+| M4b: text-steered attention, prior-study labels, val combiner | `SIZE=518 TOTAL_HOURS=8 bash v2/scripts/run.sh m4b eval`; read `reports/m4b_attention_rad-dino_518.md` (the head check, then **G4b**), `reports/m4b_rad-dino_518.md` and `reports/m4b_stack.md` | laptop with an Apple GPU, ~7 GB free | prior labels and combiner: minutes; patch tokens ~1 h; attention heads (15 runs): to be measured |
 
 `run.sh` writes a log per step to `output/v2/logs/` and stops at the first
 failure. Its settings (`SIZE`, `MAX_TRAIN`, `FT_BATCH`/`FT_ACCUM`,
@@ -138,11 +139,16 @@ reports/{run}.md|json                     per-class AUROC [95% CI], AUPRC, preva
 reports/summary.md                        all runs side by side, gates G1 and G2, rows for the results log
 reports/compare_A__B__{test set}.md       paired bootstrap comparisons
 reports/m4_{embeddings}.md                M4: leakage red flags, every arm against `image`, gate G4
+embeddings/{model}_{size}_tokens{G}.npy   M4b: CLS + patch tokens pooled to G x G, float16 (+ .json with ids; record-level)
+reports/m4b_attention_{model}_{size}.md   M4b: head validity check, gate G4b, contrasts, how far text moves attention
+reports/m4b_{embeddings}.md               M4b: prior-study label arms against M4's arms
+reports/m4b_stack.md                      M4b: the combiner fit on val, and its check against concatenation
 logs/                                     one log per run.sh step
 ```
 
 Runs are named `{model}_{size}_probe`, `{model}_{size}_zeroshot`,
-`{model}_{size}_ft_s{seed}` and `{embeddings}_ctx_{arm}` (M4; arms in `v2/fuse.py`). Runs
+`{model}_{size}_ft_s{seed}`, `{embeddings}_ctx_{arm}` (M4 and M4b's prior-label arms; arms in `v2/fuse.py`),
+`{model}_{size}_attn_{h0,h1,h2}` (M4b) and `{image run}_stack_text` (M4b). Runs
 ending in `_smoke` only check the setup and are left out of the summary.
 
 ## 5. Reading the results
@@ -157,6 +163,11 @@ ending in `_smoke` only check the setup and are left out of the summary.
   best fine-tune by val, then runs the gates:
   - **G1:** the best probe on `test_v1` (v1 metric) is ≥ 0.77, so the GPU run is worth it.
   - **G2:** the fine-tune beats the best probe on `test_clean`, with a paired CI above 0.
+  - **G4** (M4): image + pre-imaging text beats the image alone on `test_clean` (frozen features).
+  - **G4b** (M4b): `h2` minus `h1` on `test_clean`, read only after the head validity check passes.
+- **Text gains: read the v2 policy first.** The v1 metric counts only findings
+  the report mentions. Text the radiologist reads makes a mention more likely,
+  so under v1 text gains look smaller than they are (§6 M4b amendment).
 - To compare any two runs: `python -m v2.evaluate --compare RUN_A RUN_B --test-set test_clean`.
 - Paste the summary's results-log rows into `docs/V2_PLAN.md` §9.
 
@@ -173,6 +184,9 @@ python -m v2.zero_shot --model medsiglip
 python -m v2.finetune --model rad-dino --size 518 --seed 0 [--resume] [--smoke] [--max-hours H] [--save-embeddings]
 python -m v2.context [--reports ZIP_OR_DIR] [--mimic-iv-ed DIR] [--mimic-iv DIR]   # M4 inputs -> context.parquet
 python -m v2.fuse --embeddings output/v2/embeddings/rad-dino_518.npz [--arms image,image_text]
+python -m v2.embed --model rad-dino --size 518 --tokens 12      # M4b: patch tokens (resumable)
+python -m v2.attend --tokens output/v2/embeddings/rad-dino_518_tokens12.npy [--arms h0,h1,h2] [--seeds 0,1,2,3,4]
+python -m v2.stack --pair rad-dino_518_ft_s1 rad-dino_518_ctx_text [--pair IMAGE_RUN TEXT_RUN ...]
 python -m v2.evaluate --all | --run RUN... | --compare RUN_A RUN_B
 python -m v2.doctor [--load-models]
 python -m v2.smoke                # the synthetic end-to-end wiring check
@@ -218,6 +232,11 @@ Verified, on a CPU-only Linux container:
   DenseNet-121.
 - The SigLIP code path works with the open SigLIP-base weights and its real
   tokenizer.
+- M4b on synthetic data only: patch tokens (resume included), the attention
+  heads (with a planted signal that only text-steered attention can solve: `h2`
+  scores > 0.95, `h1` < 0.85), prior-study labels (a leak trap: the arm fed each
+  study's own labels scores > 0.95) and the val combiner (cross-fitted val
+  scores). Not yet run on real data or on MPS.
 
 Verified on the real data (October 2026; results in `docs/V2_PLAN.md` §9):
 - M0-M2 on an Apple-silicon Mac (MPS), including MedSigLIP's gated weights.
@@ -240,8 +259,8 @@ verified that your account's data handling meets those requirements, keep MIMIC
 content out of the conversation:
 
 - Let the assistant run the v2 commands, but not open, print or list the
-  dataset, the cohort files, `manifest.parquet`, `context.parquet`, embeddings or
-  predictions.
+  dataset, the cohort files, `manifest.parquet`, `context.parquet`, embeddings
+  (including the M4b token caches and their `.json` sidecars) or predictions.
 - v2's console output is aggregate only: counts, metrics and paths.
   Record-level diagnostics, such as which images were unreadable, go to local
   files like `output/v2/unreadable_images.csv`, and those stay local.
@@ -265,3 +284,7 @@ content out of the conversation:
 | M2 skipped | No MedSigLIP access, see §6 |
 | `m4 needs MIMIC_CXR_REPORTS_PATH` | Download `mimic-cxr-reports.zip` from the MIMIC-CXR project (not MIMIC-CXR-JPG) and set the path in `.env`; `python -m v2.doctor` checks it |
 | `RED FLAG` in the M4 report | A text-only arm is as good as the image, or a class scores above 0.90 on text alone. Don't read G4: inspect the extraction locally, without sharing the text |
+| `RED FLAG` for `prior_labels` in the M4b report | The prior study's labels alone reach the image, or a class above 0.90. Check locally that `prior_study_id` is never the study itself and is at least 24 h older; then read the copy-forward caveat (§6 M4b) |
+| `predates M4b` from doctor, or fuse says the context has no prior-study labels | `run.sh m4b` rebuilds `context.parquet` (by hand: `python -m v2.context`); its text columns don't change |
+| G4b `WITHHELD` | `h0` scored more than 0.02 below the M1 probe on val, or the check couldn't run. Don't read G4b: look at the per-seed histories in `predictions/*_attn_h0.json` (aggregate) first |
+| `token 0 differs from ... npz` in attend | The tokens and the M1 embeddings came from different images, preprocessing or transformers versions. Re-run `v2.embed --tokens` in the pinned venv |

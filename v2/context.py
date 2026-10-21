@@ -14,6 +14,8 @@ For every manifest study:
                      at least 24 h before (reports carry no sign time; 24 h makes it near
                      certain the report existed)
     vitals           triage vitals and acuity of that ED stay, sex, and age (with --mimic-iv)
+    prior labels     (M4b) the 14 CheXpert values of that same earlier study, from
+                     mimic-cxr-2.0.0-chexpert.csv.gz: the labeler's reading of the prior report
 
 Writes context.parquet, which holds record-level text: keep it local and never
 print it. context_audit.md and context_audit.json hold counts only.
@@ -34,7 +36,8 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 
-from .common import TRAIN, VAL, default_out_dir, git_commit, load_dotenv, load_manifest, mimic_csv, setup_logging
+from .common import CHEXPERT_COLUMNS, TRAIN, VAL, default_out_dir, git_commit, load_dotenv, load_manifest, mimic_csv
+from .common import setup_logging
 from .prepare_data import study_datetime
 
 logger = logging.getLogger("v2.context")
@@ -45,6 +48,7 @@ ED_WINDOW = pd.Timedelta(hours=24)       # chief complaint: ED arrival at most t
 PRIOR_MIN_GAP = pd.Timedelta(hours=24)   # prior report: that study at least this long before the X-ray
 INDICATION_MAX_CHARS = 400
 PRIOR_MAX_CHARS = 4000
+PRIOR_LABEL_COLUMNS = tuple(f"prior_label::{name}" for name in CHEXPERT_COLUMNS)
 
 # ---------------------------------------------------------------------------
 # Report sections
@@ -206,6 +210,17 @@ def link_priors(studies: pd.DataFrame, all_studies: pd.DataFrame) -> pd.DataFram
     return linked[["study_id", "prior_study_id", "prior_days"]]
 
 
+def add_prior_labels(ctx: pd.DataFrame, chexpert: pd.DataFrame) -> pd.DataFrame:
+    """The prior study's 14 CheXpert values (1 / 0 / -1 / NaN) as prior_label::{name}, and whether it has a row."""
+    labels = chexpert[["study_id", *CHEXPERT_COLUMNS]].drop_duplicates("study_id")
+    labels = labels.rename(columns={"study_id": "prior_study_id", **dict(zip(CHEXPERT_COLUMNS, PRIOR_LABEL_COLUMNS))})
+    labels["prior_study_id"] = labels["prior_study_id"].astype("Int64")
+    labels["prior_labels_found"] = True
+    out = ctx.drop(columns=[*PRIOR_LABEL_COLUMNS, "prior_labels_found"]).merge(labels, on="prior_study_id", how="left")
+    out["prior_labels_found"] = out["prior_labels_found"].astype("boolean").fillna(False).astype(bool)
+    return out
+
+
 def all_study_times(mimic_root: Path, subjects: set) -> pd.DataFrame:
     """Every MIMIC-CXR study of these patients with its earliest image time."""
     meta = pd.read_csv(mimic_csv(mimic_root, "metadata"), usecols=["subject_id", "study_id", "StudyDate", "StudyTime"],
@@ -228,6 +243,9 @@ def build_context(manifest: pd.DataFrame, reports: Optional[Reports], mimic_root
         ctx[col] = ""
     ctx["prior_study_id"] = pd.array([pd.NA] * len(ctx), dtype="Int64")
     ctx["prior_days"] = np.nan
+    for col in PRIOR_LABEL_COLUMNS:
+        ctx[col] = np.nan
+    ctx["prior_labels_found"] = False
     ctx["ed_hours_before"] = np.nan
     for col in (*TRIAGE, "sex_male", "age"):
         ctx[col] = np.nan
@@ -254,19 +272,25 @@ def build_context(manifest: pd.DataFrame, reports: Optional[Reports], mimic_root
                                "cut_at_blank_line": cuts["paragraph"], "cut_at_post_imaging_word": cuts["guard"],
                                "cut_at_length": cuts["length"]}
 
-        if mimic_root is not None:
-            priors = link_priors(ctx, all_study_times(mimic_root, subjects))
-            ctx = ctx.drop(columns=["prior_study_id", "prior_days"]).merge(priors, on="study_id", how="left")
-            ctx["prior_study_id"] = ctx["prior_study_id"].astype("Int64")
+    if mimic_root is not None:
+        priors = link_priors(ctx, all_study_times(mimic_root, subjects))
+        ctx = ctx.drop(columns=["prior_study_id", "prior_days"]).merge(priors, on="study_id", how="left")
+        ctx["prior_study_id"] = ctx["prior_study_id"].astype("Int64")
+        stats["prior"] = {"with_earlier_study": int(ctx["prior_study_id"].notna().sum())}
+        if reports is not None:
             prior_texts, prior_found = [], 0
             for subject_id, prior_id in zip(ctx["subject_id"], ctx["prior_study_id"]):
                 report = None if pd.isna(prior_id) else reports.get(subject_id, int(prior_id))
                 prior_found += report is not None
                 prior_texts.append("" if report is None else prior_text(report))
             ctx["prior_report"] = prior_texts
-            stats["prior"] = {"with_earlier_study": int(ctx["prior_study_id"].notna().sum()),
-                              "report_found": int(prior_found),
-                              "median_days_before": _median(ctx["prior_days"])}
+            stats["prior"]["report_found"] = int(prior_found)
+        labels_path = mimic_csv(mimic_root, "chexpert")
+        if labels_path.exists():
+            chexpert = pd.read_csv(labels_path, usecols=["study_id", *CHEXPERT_COLUMNS], dtype={"study_id": np.int64})
+            ctx = add_prior_labels(ctx, chexpert)
+            stats["prior"]["labels_found"] = int(ctx["prior_labels_found"].sum())
+        stats["prior"]["median_days_before"] = _median(ctx["prior_days"])
 
     if ed_root is not None:
         edstays_path, triage_path = find_csv(ed_root, "edstays"), find_csv(ed_root, "triage")
@@ -299,7 +323,7 @@ def build_context(manifest: pd.DataFrame, reports: Optional[Reports], mimic_root
         ctx["sex_male"] = ctx["subject_id"].map(patients["gender"]).map({"M": 1.0, "F": 0.0}).fillna(ctx["sex_male"])
 
     keep = ["study_id", "subject_id", "split", "in_test_clean", "in_test_v1", *TEXT_SOURCES, "prior_study_id",
-            "prior_days", "ed_hours_before", *TRIAGE, "sex_male", "age"]
+            "prior_days", "ed_hours_before", *TRIAGE, "sex_male", "age", *PRIOR_LABEL_COLUMNS, "prior_labels_found"]
     return ctx[keep], stats
 
 
@@ -317,6 +341,7 @@ def build_audit(ctx: pd.DataFrame, stats: dict) -> dict:
               "test_clean": ctx["in_test_clean"].astype(bool), "test_v1": ctx["in_test_v1"].astype(bool)}
     has = {src: ctx[src].fillna("").str.strip().ne("") for src in TEXT_SOURCES}
     has["vitals"] = ctx[list(TRIAGE)].notna().any(axis=1)
+    has["prior_labels"] = ctx["prior_labels_found"].astype(bool)
     coverage = {name: {"studies": int(m.sum()), **{k: round(float(v[m].mean()), 3) if m.any() else None
                                                    for k, v in has.items()}}
                 for name, m in groups.items()}
@@ -335,7 +360,7 @@ def build_audit(ctx: pd.DataFrame, stats: dict) -> dict:
 
 
 def audit_markdown(audit: dict) -> str:
-    cols = ["studies", *TEXT_SOURCES, "vitals"]
+    cols = ["studies", *TEXT_SOURCES, "vitals", "prior_labels"]
     lines = ["# M4 context audit", "",
              "Pre-imaging inputs per study (docs/V2_PLAN.md §6 M4). Counts only; the text stays in context.parquet.", "",
              f"Sources found: {', '.join(k for k, v in audit['sources'].items() if v) or 'none'}. "

@@ -221,6 +221,30 @@ def check_context_sources(r: Report, out_dir: Path) -> None:
                                                                     "not found: M4 runs without age"))
 
 
+def check_m4b(r: Report, out_dir: Path, mimic_root: Optional[Path]) -> None:
+    """M4b inputs (docs/V2_PLAN.md §6 M4b): prior-study labels in the context table, and room for the token cache."""
+    r.section("M4b (text-steered attention, prior-study labels, val combiner)")
+    from .common import mimic_csv
+
+    if mimic_root is not None and mimic_root.exists():
+        found = mimic_csv(mimic_root, "chexpert").exists()
+        (r.ok if found else r.warn)("mimic-cxr-2.0.0-chexpert.csv.gz " + ("found: prior-study labels available" if found
+                                                                          else "not found: no prior-study labels"))
+    ctx = out_dir / "context.parquet"
+    if ctx.exists():
+        import pyarrow.parquet as pq
+
+        has = "prior_labels_found" in pq.read_schema(ctx).names  # the schema only: no rows are read
+        (r.ok if has else r.warn)("context.parquet " + ("has prior-study labels" if has else
+                                                         "predates M4b: the m4b stage rebuilds it"))
+    cached = sorted((out_dir / "embeddings").glob("*_tokens*.json")) if (out_dir / "embeddings").exists() else []
+    if cached:
+        r.ok("token cache: " + ", ".join(p.with_suffix(".npy").name for p in cached))
+    elif out_dir.exists():
+        free = shutil.disk_usage(out_dir).free / 1e9
+        (r.ok if free >= 10 else r.warn)(f"no token cache yet; {free:.0f} GB free (RAD-DINO 518 px tokens need ~7 GB)")
+
+
 def check_output(r: Report, out_dir: Path) -> None:
     r.section("Output directory")
     try:
@@ -315,6 +339,7 @@ def main(argv: Optional[list[str]] = None) -> None:
     check_cohort(r, Path(cohort) if cohort else None)
     check_output(r, out_dir)
     check_context_sources(r, out_dir)
+    check_m4b(r, out_dir, Path(root).expanduser() if root else None)
     check_hub(r, args.load_models, args.device)
     print(f"\n{r.failures} failed, {r.warnings} warnings")
     sys.exit(1 if r.failures else 0)
