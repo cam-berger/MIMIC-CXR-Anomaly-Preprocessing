@@ -1,6 +1,6 @@
 # v2 Plan: Modern Foundation Models for CheXpert Classification
 
-**Status:** v2.0 done (M0-M3). **G2 PASS:** the fine-tuned RAD-DINO is the image-only v2 baseline, 0.787 [0.769, 0.803] on `test_clean`. **M4 done, G4 PASS:** text written before the X-ray adds +0.016 [0.009, 0.024] to frozen image features (§9). Exploratory follow-ups: +0.009 [0.003, 0.014] on the fine-tuned image; refitting the probe on the fine-tuned features adds +0.006 [0.001, 0.012]; best system by val so far: fine-tuned features + refit probe + text, 0.802 [0.784, 0.819]. Next: M4b on the Mac (§6, pre-registered 2026-10-21): text-steered attention (gate G4b), prior-study labels and a combiner fit on val. The GPU session (joint image-text fine-tune, reports as a training signal; §10) comes after G4b, which informs it · how to run: [`v2/README.md`](../v2/README.md) · **Branch:** `v2` (from `main`) · **Started:** 2026-10-18
+**Status:** v2.0 done (M0-M3). **G2 PASS:** the fine-tuned RAD-DINO is the image-only v2 baseline, 0.787 [0.769, 0.803] on `test_clean`. **M4 done, G4 PASS:** text written before the X-ray adds +0.016 [0.009, 0.024] to frozen image features (§9). Exploratory follow-ups: +0.009 [0.003, 0.014] on the fine-tuned image; refitting the probe on the fine-tuned features adds +0.006 [0.001, 0.012]; best system by val so far: fine-tuned features + refit probe + text, 0.802 [0.784, 0.819]. Next: M4b on the Mac (§6, pre-registered 2026-10-21): text-steered attention (gate G4b), prior-study labels and a combiner fit on val. The GPU session (joint image-text fine-tune, reports as a training signal; §10) comes after G4b, which informs it. M5 (§6, pre-registered 2026-10-21): line up with published results on the standard benchmark (all frontal studies, official split), M5a on the Mac first · how to run: [`v2/README.md`](../v2/README.md) · **Branch:** `v2` (from `main`) · **Started:** 2026-10-18
 
 ## 1. Goal
 
@@ -464,6 +464,88 @@ only aggregate output reaches an AI assistant.
 **Done when:** the three reports exist, the validity check and G4b are read in
 that order, and every M4b result is logged in §9.
 
+### M5: Line up with published results (written 2026-10-21, before any M5 run)
+
+**Question:** how do our models compare with published MIMIC-CXR results when
+scored the same way?
+
+v2.0's cohort (abnormal studies linked to ED stays) and its test sets are not a
+published benchmark, so v2.0's numbers can't be placed against the literature.
+The best-documented published protocol is MMBT's (Jacenków, O'Neil and
+Tsaftaris, ISBI 2022): MIMIC-CXR-JPG studies with a frontal image, the official
+split (205,923 / 1,695 / 2,920 studies that have an indication or history
+field), 14 CheXpert labels scored positive against the rest, and macro AUROC on
+the official test split. M5 runs our models under that protocol.
+
+**Data (backlog item 1, §10):** every MIMIC-CXR study with a CheXpert row and a
+frontal image (one per study, PA over AP), in its own output directory, so
+v2.0's manifest and runs stay untouched. Splits follow the official split by
+patient: train is official train; val is official validate (500 patients),
+used for every model choice; test is official test (293 patients, 89% of its
+studies have a finding). RAD-DINO left the official validate and test images
+out of pretraining, so the test set stays clean for it. Images are stored at
+518 px as JPEG (quality 95), which keeps about 220k images near 15 GB.
+
+**Labels and scoring:** our 12 pathologies; No Finding and Support Devices are
+not v2 classes, so published 14-label macros are compared through their
+per-class tables. Models train as in v2 (uncertain labels ignored). On the
+official test split they are scored under positive vs rest (the `u0` policy:
+uncertain and unmentioned count as negative), which is MMBT's policy, and
+under v2's policy. Reported: macro AUROC over the 12 classes with a 95%
+patient-bootstrap CI, and per-class AUROC.
+
+**Runs:**
+- **M5a (Mac):** frozen RAD-DINO 518 px embeddings and the M1 probe (C chosen
+  on val). Then M4's late fusion on the same embeddings: `image`,
+  `image_indication` (MMBT's inputs), `image_text`, and the text-only
+  `indication` and `text` controls, with M4's red flags.
+- **M5b (GPU, after M5a):** fine-tune RAD-DINO 518 px on all train studies.
+  The M3 recipe with 3 epochs (1 of warm-up, then cosine), since both v2.0
+  fine-tunes peaked at epoch 1 of 10. Best epoch on val, seed 0 (seed 1 if the
+  budget allows). Then a probe refit on its features and M4's late fusion
+  (exploratory, as in the M4 follow-ups).
+
+**Published references** (AUROC, transcribed from the papers):
+
+| Model | Inputs | Mean over our 12 classes | Paper's macro | Protocol |
+|---|---|---|---|---|
+| ResNet-50 (MMBT paper) | image, 224 px | 0.725 | 0.738 (14 labels) | MMBT's: official split, positive vs rest |
+| BERT (MMBT paper) | indication | 0.704 | 0.711 (14 labels; its per-class table averages 0.719) | same |
+| Attentive (MMBT paper) | image + indication | 0.751 | 0.766 (14 labels) | same |
+| MMBT | image + indication | 0.794 | 0.806 (14 labels) | same |
+| CheXclusion DenseNet-121 | image | 0.823 | 0.834 (14 labels) | context only: random patient split, frontal and lateral images |
+| DenseNet-121 (Wang, Zhang and Oberst, CHIL 2026) | image | - | 0.803 (13 labels) | context only: random patient split |
+| MBRANet | image | - | 0.805 | context only: split not verified |
+| CaMCheX | two views + indication + vitals, 1024 px | - | 0.934 (14 labels) | context only: no leakage control described |
+
+The 12-class means are the averages of each paper's per-class table (MMBT
+paper Table 3; CheXclusion Table 2).
+
+**How a comparison is read (fixed now):** a published 12-class mean is
+*below* ours if it lies under the lower bound of our 95% CI, *above* if it
+lies over the upper bound, and *level* otherwise. Published numbers carry their
+own uncertainty (MMBT reports SDs of 0.1 to 2.5 points over 3 seeds), so
+*level* means a tie. The like-for-like pairs are `image` with ResNet-50
+(image only), `image_indication` with Attentive and MMBT (image +
+indication), and `indication` with BERT (indication only). MMBT's test set
+keeps only studies with an indication or history field, so each comparison is
+also reported on the official-test studies whose indication is not empty. If a
+red flag fires on a text-only arm, the lineup isn't read until the extraction
+is inspected.
+
+**Caveats, fixed now:** 12 of 14 labels; labels from the MIMIC-CXR-JPG
+CheXpert file, where MMBT ran the CheXpert labeler on full reports itself; one
+frontal image per study; RAD-DINO pretrained on the official train images
+without labels, which is standard for this benchmark.
+
+**Compute:** preparing ~220k images takes 1 to 3 h (the drive's speed decides)
+and ~15 GB; RAD-DINO embeddings ~6 h on an Apple-silicon Mac; probes and
+fusion arms 1 to 2 h. M5b: about 1.7 h of an A100 per seed (~$2-3), plus
+uploading the images.
+
+**Done when:** `reports/lineup.md` exists for M5a (then M5b), and its rows are
+logged in §9.
+
 ## 7. Code
 
 A standalone package, `v2/`, on this branch. It doesn't touch the v1 pipeline.
@@ -483,6 +565,7 @@ v2/
   fuse.py           # M4 arms: text features fit on train, late fusion with the probe, red flags, gate G4
   attend.py         # M4b part 1: attention heads over cached patch tokens, gate G4b
   stack.py          # M4b part 3: per-class combiner of two runs' scores, fit on val
+  lineup.py         # M5: our runs next to published MIMIC-CXR results, scored the same way
   evaluate.py       # metrics, bootstrap CIs, paired comparisons, reports, gates
   doctor.py         # setup check for any machine
   synth.py          # synthetic MIMIC-CXR-JPG tree with a planted signal (tests)
