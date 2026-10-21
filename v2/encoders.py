@@ -143,6 +143,10 @@ class Encoder(nn.Module):
     def tokens(self, pixel_values: torch.Tensor, grid: int) -> torch.Tensor:
         raise NotImplementedError(f"{self.name} has no patch tokens; --tokens supports dinov2-type encoders")
 
+    def tokens_and_pooled(self, pixel_values: torch.Tensor, grid: int) -> tuple[torch.Tensor, torch.Tensor]:
+        """tokens() and forward() together; encoders that can share one backbone pass override this."""
+        return self.tokens(pixel_values, grid), self(pixel_values)
+
     @property
     def name(self) -> str:
         return self.spec.name
@@ -175,13 +179,18 @@ class DinoEncoder(Encoder):
 
     def tokens(self, pixel_values: torch.Tensor, grid: int) -> torch.Tensor:
         """The CLS token, then the patch tokens averaged into grid x grid cells: [B, 1 + g*g, hidden]."""
+        return self.tokens_and_pooled(pixel_values, grid)[0]
+
+    def tokens_and_pooled(self, pixel_values: torch.Tensor, grid: int) -> tuple[torch.Tensor, torch.Tensor]:
+        """tokens() and forward()'s embedding from one backbone pass (M5 writes both)."""
         hidden = self.backbone(pixel_values=pixel_values).last_hidden_state
         patches = hidden[:, self.n_prefix:]
         side = math.isqrt(patches.shape[1])
         if side * side != patches.shape[1]:
             raise ValueError(f"{patches.shape[1]} patch tokens don't form a square grid")
         pool = pool_matrix(side, min(grid, side)).to(patches.device, patches.dtype)
-        return torch.cat([hidden[:, :1], pool @ patches], dim=1)
+        tokens = torch.cat([hidden[:, :1], pool @ patches], dim=1)
+        return tokens, torch.cat([hidden[:, 0], patches.mean(dim=1)], dim=-1)
 
 
 class SiglipEncoder(Encoder):

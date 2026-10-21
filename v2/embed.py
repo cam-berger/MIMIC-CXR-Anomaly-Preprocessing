@@ -13,7 +13,8 @@ an interrupted run resumes where it stopped.
 With --tokens G it writes, instead, embeddings/{model}_{size}_tokens{G}.npy: per
 study the CLS token and the patch tokens averaged into a G x G grid, float16,
 [n, 1 + G*G, width], plus a .json sidecar with the study ids and meta. The .npy
-is filled in place and an interrupted run resumes from its .progress.npz.
+is filled in place and an interrupted run resumes from its .progress.npz. With
+--with-pooled the same pass also writes embeddings/{model}_{size}.npz (M5).
 """
 
 from __future__ import annotations
@@ -167,28 +168,38 @@ def run_tokens(
     precision: str = "auto",
     meta: Optional[dict] = None,
     save_every_s: float = 300.0,
+    pooled_path: Optional[Path] = None,
 ) -> Path:
-    """Write tokens for `rows` (sorted by study_id) into a float16 .npy; resumes from its .progress.npz."""
+    """
+    Write tokens for `rows` (sorted by study_id) into a float16 .npy; resumes from its .progress.npz. With
+    `pooled_path`, the same pass also writes the pooled embeddings there, as v2.embed would.
+    """
     ids = rows["study_id"].to_numpy(np.int64)
     g = enc.token_grid(grid)
     shape = (len(rows), 1 + g * g, enc.token_dim)
     progress = path.with_name(path.stem + ".progress.npz")
-    key = {"encoder": enc.name, "size": enc.size, "grid": g}
+    pooled_tmp = path.with_name(path.stem + ".pooled.npy")
+    key = {"encoder": enc.name, "size": enc.size, "grid": g, "pooled": pooled_path is not None}
     done = np.zeros(len(rows), dtype=bool)
-    arr = None
+    arr = pooled = None
     if path.exists() and progress.exists():
         with np.load(progress, allow_pickle=False) as f:
             same = np.array_equal(f["study_id"], ids) and json.loads(str(f["key"])) == key
-            if same and np.load(path, mmap_mode="r").shape == shape:
+            if same and np.load(path, mmap_mode="r").shape == shape and (pooled_path is None or pooled_tmp.exists()):
                 done = f["done"].astype(bool)
                 arr = np.lib.format.open_memmap(path, mode="r+")
+                pooled = np.lib.format.open_memmap(pooled_tmp, mode="r+") if pooled_path is not None else None
                 logger.info("Resuming: %d studies already done", int(done.sum()))
     if arr is None:
         path.parent.mkdir(parents=True, exist_ok=True)
         arr = np.lib.format.open_memmap(path, mode="w+", dtype=np.float16, shape=shape)
+        if pooled_path is not None:
+            pooled = np.lib.format.open_memmap(pooled_tmp, mode="w+", dtype=np.float32, shape=(len(rows), enc.dim))
 
     def checkpoint(arr: np.ndarray) -> None:
         arr.flush()
+        if pooled is not None:
+            pooled.flush()
         tmp = progress.with_name(progress.name + ".tmp.npz")
         np.savez(tmp, study_id=ids, done=done, key=np.array(json.dumps(key)))
         os.replace(tmp, progress)
@@ -202,13 +213,18 @@ def run_tokens(
     n_done = 0
     for x, idx in dl:
         with autocast:
-            toks = enc.tokens(x.to(device, non_blocking=True), grid)
+            if pooled is None:
+                toks, feats = enc.tokens(x.to(device, non_blocking=True), grid), None
+            else:
+                toks, feats = enc.tokens_and_pooled(x.to(device, non_blocking=True), grid)
         toks = toks.float().cpu().numpy().astype(np.float16)
         if not np.isfinite(toks).all():
             raise RuntimeError("non-finite tokens in one batch (a value beyond float16's range, or a bad PNG; "
                                "--precision fp32 rules out mixed precision)")
         pos = todo[idx.numpy()]
         arr[pos] = toks
+        if pooled is not None:
+            pooled[pos] = feats.float().cpu().numpy()
         done[pos] = True
         n_done += len(idx)
         now = time.time()
@@ -220,6 +236,12 @@ def run_tokens(
             last_save = now
     arr.flush()
     del arr
+    if pooled is not None:
+        pooled.flush()
+        save_npz(pooled_path, ids, np.asarray(pooled), {k: v for k, v in (meta or {}).items()
+                                                        if k not in ("token_dim", "pooled_slice")})
+        del pooled
+        pooled_tmp.unlink()
     sidecar = path.with_suffix(".json")
     tmp = sidecar.with_name(sidecar.name + ".tmp")
     tmp.write_text(json.dumps({"study_id": ids.tolist(), "meta": {**(meta or {}), "grid": g, "shape": list(shape),
@@ -243,6 +265,8 @@ def main(argv: Optional[list[str]] = None) -> None:
     parser.add_argument("--smoke", action="store_true", help="16 studies per split, to test the setup")
     parser.add_argument("--tokens", type=int, metavar="G",
                         help="M4b: write CLS + patch tokens pooled to a G x G grid (float16 .npy) instead")
+    parser.add_argument("--with-pooled", action="store_true",
+                        help="With --tokens: write the usual {model}_{size}.npz from the same pass (M5)")
     parser.add_argument("--seed", type=int, default=DEFAULT_SEED)
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args(argv)
@@ -261,10 +285,11 @@ def main(argv: Optional[list[str]] = None) -> None:
         g = enc.token_grid(args.tokens)
         final = tokens_path(out_dir, enc.name, enc.size, g)
         final = final.with_name(final.stem + suffix + ".npy")
+        pooled_final = embeddings_path(out_dir, enc.name, enc.size).with_name(f"{enc.name}_{enc.size}{suffix}.npz")
         if final.with_suffix(".json").exists():
             done_ids, _, done_meta = load_tokens(final)
             if (done_meta.get("encoder"), done_meta.get("size")) == (enc.name, enc.size) and \
-                    rows["study_id"].isin(done_ids).all():
+                    rows["study_id"].isin(done_ids).all() and (not args.with_pooled or pooled_final.exists()):
                 logger.info("%s already covers these %d studies; delete it (and its .json) to recompute",
                             final, len(rows))
                 return
@@ -274,9 +299,10 @@ def main(argv: Optional[list[str]] = None) -> None:
                 "pooled_slice": list(enc.pooled_slice)}
         logger.info("Tokens: CLS + %d x %d grid of %d-d tokens per study (float16, %.1f GB)", g, g, enc.token_dim,
                     len(rows) * (1 + g * g) * enc.token_dim * 2 / 1e9)
+        pooled_path = pooled_final if args.with_pooled else None
         run_tokens(enc, rows, out_dir, args.tokens, final, args.batch_size, args.workers, device, args.precision,
-                   meta)
-        logger.info("Wrote %s", final)
+                   meta, pooled_path=pooled_path)
+        logger.info("Wrote %s%s", final, f" and {pooled_path}" if pooled_path else "")
         return
     final = embeddings_path(out_dir, enc.name, enc.size).with_name(f"{enc.name}_{enc.size}{suffix}.npz")
     if final.exists():

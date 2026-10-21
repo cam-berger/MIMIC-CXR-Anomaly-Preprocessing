@@ -58,7 +58,7 @@ them with v1's `python build_cohort.py --anomalous-only`.
 | M2 (optional) | `bash v2/scripts/run.sh m2 eval` (accept the MedSigLIP terms first, see §6) | laptop or GPU | like M1 |
 | M3 | `bash v2/scripts/run.sh smoke m3 eval` (§3); `gpu` also runs M1 and M2 there | rented GPU | about 2 h on an A100-40GB (measured: 2.15 instance hours, about $3-4) |
 | M4: text written before the X-ray | `SIZE=518 bash v2/scripts/run.sh m4 eval`; read `reports/m4_rad-dino_518.md` (red flags, then **G4**) | laptop | about 15 min |
-| M5a: line up with published results | `TOTAL_HOURS=16 bash v2/scripts/run.sh bench`; read `$OUTPUT_PATH/v2_bench/reports/lineup.md` (red flags, then the like-for-like table) | laptop with an Apple GPU and the data drive, ~15 GB free | prepare 1-3 h, embeddings ~6 h, probes and fusion 1-2 h |
+| M5a: line up with published results | `TOTAL_HOURS=20 bash v2/scripts/run.sh bench`; read `$OUTPUT_PATH/v2_bench/reports/lineup.md` (red flags, then the like-for-like table) | laptop with an Apple GPU and the data drive, ~65 GB free | prepare 1-3 h, embeddings and tokens ~6 h (one pass), probes and fusion 1-2 h, attention heads 1-2 h (10 heads on ~9x M4b's training studies) |
 | M5b: fine-tune on the benchmark | `bash v2/scripts/run.sh bench_ft` with `BENCH_OUT` copied over, then fusion and the lineup back on the Mac | rented GPU | ~1.7 h of an A100 per seed |
 | M4b: text-steered attention, prior-study labels, val combiner | `SIZE=518 TOTAL_HOURS=8 bash v2/scripts/run.sh m4b eval`; read `reports/m4b_attention_rad-dino_518.md` (the head check, then **G4b**), `reports/m4b_rad-dino_518.md` and `reports/m4b_stack.md` | laptop with an Apple GPU, ~7 GB free | prior labels and combiner: minutes; patch tokens ~1 h; attention heads (15 runs): to be measured |
 
@@ -307,6 +307,7 @@ content out of the conversation:
 | `RED FLAG` for `prior_labels` in the M4b report | The prior study's labels alone reach the image, or a class above 0.90. Check locally that `prior_study_id` is never the study itself and is at least 24 h older; then read the copy-forward caveat (§6 M4b) |
 | `predates M4b` from doctor, or fuse says the context has no prior-study labels | `run.sh m4b` rebuilds `context.parquet` (by hand: `python -m v2.context`); its text columns don't change |
 | `prepare_data` says a directory "holds a manifest for population ..." | You pointed M5's benchmark (or another population) at an existing output dir. Use its own `--out` (`BENCH_OUT`) |
+| `prepare_data` stops with "is the drive still mounted?" | More than 0.5% of JPGs failed to read, which usually means the drive dropped off the bus or the mount went stale. Remount it (read-only is fine), check with `python -m v2.doctor`, keep the Mac awake (`caffeinate -ims`), and rerun: written images are kept |
 | The M5 probe runs fewer parallel fits than `--jobs` | Each fit copies the training features (2.6 GB at M5's size); the probe caps the workers to fit in memory and logs it |
 | G4b `WITHHELD` | `h0` scored more than 0.02 below the M1 probe on val, or the check couldn't run. Don't read G4b: look at the per-seed histories in `predictions/*_attn_h0.json` (aggregate) first |
 | `token 0 differs from ... npz` in attend | The tokens and the M1 embeddings came from different images, preprocessing or transformers versions. Re-run `v2.embed --tokens` in the pinned venv |

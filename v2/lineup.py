@@ -84,6 +84,8 @@ def role(meta: dict) -> Optional[str]:
         return "image"
     if meta.get("kind") == "fuse":
         return ROLE_BY_ARM.get(meta.get("arm"))
+    if meta.get("kind") == "attend" and meta.get("arm") == "h0":
+        return "image"
     return None
 
 

@@ -210,14 +210,18 @@ def run_checks(work: Path, patients: int = 400) -> list[tuple[str, bool, str]]:
         assert set(m.loc[m["in_test_clean"], "official_split"]) == {"test"}, "test_clean is not the official test split"
         assert set(m.loc[m["split"] == "val", "official_split"]) == {"validate"}, "val is not the official validate split"
         out_b = ["--out", str(bench)]
-        embed.main(["--model", "test-pixels", "--workers", "0", *out_b])
+        embed.main(["--model", "test-pixels", "--tokens", "12", "--with-pooled", "--workers", "0", *out_b])
         emb = bench / "embeddings" / "test-pixels_48.npz"
         probe.main(["--embeddings", str(emb), "--jobs", "2", *out_b])
         context.main(["--reports", str(paths.reports), "--mimic-iv-ed", str(paths.mimic_iv_ed),
                       "--mimic-iv", str(paths.mimic_iv), "--mimic-cxr-jpg", str(paths.mimic_root), *out_b])
         fuse.main(["--embeddings", str(emb), "--arms", "image,image_indication,indication", "--n-boot", "50",
                    "--jobs", "2", *out_b])
+        attend.main(["--tokens", str(bench / "embeddings" / "test-pixels_48_tokens12.npy"), "--arms", "h0",
+                     "--seeds", "0", "--max-epochs", "20", "--patience", "20", "--batch-size", "16", "--lr", "3e-3",
+                     "--n-boot", "50", "--device", "cpu", *out_b])
         res = lineup.main(["--n-boot", "50", *out_b])
+        assert any(c["run"] == "test-pixels_48_attn_h0" for c in res["compared"]), "the attention head is not lined up"
         row = next(c for c in res["compared"] if c["run"] == "test-pixels_48_probe")
         assert row["ours"] >= 0.9, f"the planted signal didn't reach the lineup: {row['ours']:.3f}"
         return (f"{len(m)} studies, {int(m['in_test_clean'].sum())} in the official test split; probe "

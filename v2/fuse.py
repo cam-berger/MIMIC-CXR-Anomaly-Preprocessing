@@ -335,8 +335,8 @@ def main(argv: Optional[list[str]] = None) -> None:
         rows = pd.concat([va_rows, te_rows], ignore_index=True)
         run = f"{prefix}_ctx_{arm}"
         write_predictions(out_dir, run, rows["study_id"], rows["split"], probe.predict(np.concatenate([X_va, X_te])), {
-            "kind": "fuse", "arm": arm, "image": use_image, "sources": list(sources), "structured": use_struct,
-            "prior_labels": use_prior,
+            "kind": "fuse", "milestone": "M4b" if arm in M4B_ARMS else "M4", "arm": arm, "image": use_image,
+            "sources": list(sources), "structured": use_struct, "prior_labels": use_prior,
             "embeddings": str(args.embeddings), "context": str(ctx_path),
             **(image_meta if use_image else {"encoder": None}),
             "text_features": {s: blocks[s][1] for s in sources}, "per_label": probe.summary(),

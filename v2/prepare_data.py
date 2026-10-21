@@ -636,6 +636,9 @@ def main(argv: Optional[list[str]] = None) -> None:
     parser.add_argument("--extend-test-clean", action="store_true",
                         help="§3.1 fallback: add every abnormal frontal study of official validate/test patients")
     parser.add_argument("--skip-images", action="store_true", help="Manifest and audit only")
+    parser.add_argument("--max-unreadable", type=float, default=0.005,
+                        help="Stop if more than this share of images fail to read (default 0.005): usually a "
+                             "dropped or stale drive mount, not bad files")
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args(argv)
     setup_logging(args.verbose)
@@ -662,6 +665,12 @@ def main(argv: Optional[list[str]] = None) -> None:
             pd.DataFrame({"study_id": [Path(p).stem for p in failures], "error": list(failures.values())}).to_csv(
                 report, index=False)
             kinds = pd.Series([e.split(":")[0] for e in failures.values()]).value_counts().to_dict()
+            limit = max(20, int(args.max_unreadable * len(manifest)))
+            if len(failures) > limit:
+                raise SystemExit(
+                    f"{len(failures)} of {len(manifest)} images failed to read {kinds}, more than {limit}: is the "
+                    f"drive still mounted (and not a stale mount)? Fix it and rerun; written images are kept. "
+                    f"Details in {report}")
             logger.warning("%d images missing or unreadable %s; details in %s", len(failures), kinds, report)
             manifest = manifest[~manifest["study_id"].astype(str).isin(bad)].reset_index(drop=True)
         drops["image missing or unreadable"] = len(failures)

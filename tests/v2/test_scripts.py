@@ -29,6 +29,7 @@ def _run(args, tmp_path):
 def test_run_without_stages_prints_usage(tmp_path):
     res = _run([], tmp_path)
     assert res.returncode == 2 and "Stages:" in res.stdout
+    assert "WORKERS" in res.stdout and "set -euo" not in res.stdout  # the whole header, nothing after it
 
 
 def test_run_rejects_unknown_stage(tmp_path):

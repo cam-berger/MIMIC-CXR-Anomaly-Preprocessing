@@ -14,8 +14,9 @@
 #   m4     text written before the X-ray + frozen rad-dino embeddings (needs MIMIC_CXR_REPORTS_PATH, MIMIC_IV_ED_PATH)
 #   m4b    prior-study labels, a combiner fit on val, then rad-dino patch tokens + attention heads (gate G4b);
 #          needs m4's sources plus MIMIC_CXR_JPG_PATH, ~7 GB of disk, a few hours on a Mac (TOTAL_HOURS=8)
-#   bench  M5a: all frontal studies, official split, in BENCH_OUT; RAD-DINO 518 px embeddings + probe, then M4 fusion
-#          (if the M4 sources are set) and reports/lineup.md; ~15 GB, ~10 h on a Mac (TOTAL_HOURS=16)
+#   bench  M5a: all frontal studies, official split, in BENCH_OUT; RAD-DINO 518 px embeddings and tokens (one pass),
+#          probe, M4b's h0/h1 heads, M4 fusion (if the M4 sources are set), reports/lineup.md and summary.md;
+#          ~65 GB, ~12 h on a Mac (TOTAL_HOURS=20)
 #   bench_ft  M5b on a GPU: fine-tune RAD-DINO 518 px on BENCH_OUT's train split for 3 epochs (BENCH_SEEDS, default 0)
 #   eval   reports for every run + reports/summary.md with gates G1, G2, G4 and G4b
 #   gpu    smoke m1 m2 m3 eval
@@ -37,7 +38,7 @@ set -euo pipefail
 cd "$(dirname "$0")/../.."
 
 # Check the arguments before doing anything slow.
-[ $# -gt 0 ] || { sed -n '2,35p' "$0"; exit 2; }
+[ $# -gt 0 ] || { sed -n '2,36p' "$0"; exit 2; }
 stages=()
 for arg in "$@"; do
   if [ "$arg" = gpu ]; then stages+=(smoke m1 m2 m3 eval); else stages+=("$arg"); fi
@@ -200,23 +201,30 @@ bench_dir_ok() {  # M5 writes its own manifest: never into v2.0's output dir
   fi
 }
 
-stage_bench() {  # docs/V2_PLAN.md §6 M5a. On a Mac: TOTAL_HOURS=16 bash v2/scripts/run.sh bench
+stage_bench() {  # docs/V2_PLAN.md §6 M5a. On a Mac: TOTAL_HOURS=20 bash v2/scripts/run.sh bench
   : "${MIMIC_CXR_JPG_PATH:?bench needs MIMIC_CXR_JPG_PATH}"
   bench_dir_ok
   local emb="$BENCH_OUT/embeddings/rad-dino_518.npz"
   run --hours 6 bench_prepare "$PY" -m v2.prepare_data --mimic-cxr-jpg "$MIMIC_CXR_JPG_PATH" --population all \
     --split-scheme official --image-format jpg --out "$BENCH_OUT" --workers "$WORKERS"
-  run --hours 12 bench_embed "$PY" -m v2.embed --model rad-dino --size 518 --out "$BENCH_OUT" --workers "$WORKERS"
+  # One pass writes the pooled embeddings and the 12 x 12 token cache (§6 M5 amendment).
+  run --hours 12 bench_embed "$PY" -m v2.embed --model rad-dino --size 518 --tokens 12 --with-pooled \
+    --out "$BENCH_OUT" --workers "$WORKERS"
   run --hours 3 bench_probe "$PY" -m v2.probe --embeddings "$emb" --out "$BENCH_OUT"
+  local heads=h0
   if [ -n "${MIMIC_CXR_REPORTS_PATH:-}" ] && [ -n "${MIMIC_IV_ED_PATH:-}" ]; then
     run bench_context "$PY" -m v2.context --out "$BENCH_OUT"
     run --hours 6 bench_fuse "$PY" -m v2.fuse --embeddings "$emb" --out "$BENCH_OUT" \
       --arms image,image_indication,image_text,indication,text
+    heads=h0,h1
   else
     echo "!!! bench: MIMIC_CXR_REPORTS_PATH or MIMIC_IV_ED_PATH not set: image-only lineup"
   fi
+  run --hours 6 bench_attend "$PY" -m v2.attend --tokens "$BENCH_OUT/embeddings/rad-dino_518_tokens12.npy" \
+    --out "$BENCH_OUT" --arms "$heads"
   run bench_lineup "$PY" -m v2.lineup --out "$BENCH_OUT"
-  echo "Lineup: $BENCH_OUT/reports/lineup.md"
+  run bench_eval "$PY" -m v2.evaluate --all --out "$BENCH_OUT"
+  echo "Lineup: $BENCH_OUT/reports/lineup.md; results-log rows: $BENCH_OUT/reports/summary.md"
 }
 
 stage_bench_ft() {  # docs/V2_PLAN.md §6 M5b, on a GPU, with BENCH_OUT's manifest and images copied over

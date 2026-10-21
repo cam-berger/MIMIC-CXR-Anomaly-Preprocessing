@@ -46,7 +46,7 @@ from .common import LABELS, MIN_COUNT_VAL, TEST, TRAIN, VAL, default_out_dir, la
 from .common import pick_device, seed_everything, setup_logging, targets_and_mask, write_predictions
 from .context import TEXT_SOURCES
 from .embed import embeddings_path, load_npz, load_tokens
-from .evaluate import _get, compare_runs, evaluate_run, fmt, fmt_ci, g4b
+from .evaluate import _get, compare_runs, evaluate_run, fmt, fmt_ci, g4b, split_scheme
 from .finetune import masked_bce, val_macro_auroc, warmup_cosine
 from .fuse import text_block
 
@@ -375,7 +375,10 @@ def write_report(out_dir: Path, prefix: str, runs: dict, infos: dict, shift: Opt
         return fmt_ci(res["macro_auroc"], res["macro_auroc_ci"]) if res else "-"
 
     meta = json.loads((Path(out_dir) / "predictions" / f"{next(iter(runs.values()))}.json").read_text())
-    lines = [f"# M4b: text-steered attention ({prefix})", "",
+    bench = split_scheme(out_dir) == "official"
+    title = f"# M5: attention heads on the benchmark ({prefix}; M4b's recipe)" if bench else \
+        f"# M4b: text-steered attention ({prefix})"
+    lines = [title, "",
              f"Frozen `{meta.get('encoder')}` tokens ({meta.get('token_grid')} x {meta.get('token_grid')} grid + "
              f"CLS) with M4's text features; seeds {meta.get('seeds')}, mean of their logits (docs/V2_PLAN.md §6 M4b).",
              ""]
@@ -397,7 +400,12 @@ def write_report(out_dir: Path, prefix: str, runs: dict, infos: dict, shift: Opt
         lines += ["", f"Best epoch is the last allowed one for {', '.join(still)}: those heads may still have been "
                   "improving (the recipe caps training at " f"{recipe.max_epochs} epochs)."]
     diff = fmt_ci(gate["cmp"]["diff"], gate["cmp"]["diff_ci"]) if gate["cmp"] else "-"
-    lines += ["", "## 3. Gate G4b", "", f"**G4b** (`h2` minus `h1` on test_clean): {diff} -> **{gate['verdict']}**", ""]
+    if bench:
+        lines += ["", "## 3. Gate G4b", "", "Not here: G4b is defined on the v2 cohort, and M5 drops `h2` (§6 M5 "
+                  "amendment). The comparisons with published results are in reports/lineup.md.", ""]
+    else:
+        lines += ["", "## 3. Gate G4b", "", f"**G4b** (`h2` minus `h1` on test_clean): {diff} -> **{gate['verdict']}**",
+                  ""]
 
     full = {arm: f"{prefix}_attn_{arm}" for arm in ARMS}
     contrasts = [("h0", gate["probe"], "test_clean", "v2", "head capacity"),

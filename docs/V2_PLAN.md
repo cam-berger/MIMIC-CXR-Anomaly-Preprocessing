@@ -555,7 +555,7 @@ without labels, which is standard for this benchmark.
 **Compute:** preparing ~220k images takes 1 to 3 h (the drive's speed decides)
 and ~15 GB; RAD-DINO embeddings and tokens ~6 h on an Apple-silicon Mac (one
 pass, ~49 GB of tokens); probes and fusion arms 1 to 2 h; the attention heads
-about 1 h. M5b: about 1.7 h of an A100 per seed (~$2-3), plus
+1 to 2 h. M5b: about 1.7 h of an A100 per seed (~$2-3), plus
 uploading the images.
 
 **Done when:** `reports/lineup.md` exists for M5a (then M5b), and its rows are

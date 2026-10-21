@@ -61,7 +61,7 @@ def test_tokens_file_resumes_and_matches_the_embeddings(prepared, pixel_embeddin
     arr.flush()
     del arr
     np.savez(path.with_name(path.stem + ".progress.npz"), study_id=ids, done=done,
-             key=np.array(embed.json.dumps({"encoder": "test-pixels", "size": 48, "grid": 12})))
+             key=np.array(embed.json.dumps({"encoder": "test-pixels", "size": 48, "grid": 12, "pooled": False})))
     path.with_suffix(".json").unlink()
     embed.main(["--model", "test-pixels", "--tokens", "12", "--out", str(prepared), "--workers", "0"])
     _, toks2, _ = load_tokens(path)
@@ -76,3 +76,35 @@ def test_unfinished_tokens_are_refused(tmp_path):
     np.save(tmp_path / "x_tokens12.npy", np.zeros((2, 3, 4), np.float16))
     with pytest.raises(SystemExit, match="unfinished"):
         load_tokens(tmp_path / "x_tokens12.npy")
+
+
+def test_one_pass_writes_tokens_and_the_usual_embeddings(prepared, pixel_embeddings, tmp_path):
+    """--with-pooled (M5): the same pass gives the tokens and an .npz matching a separate v2.embed run."""
+    import shutil
+
+    from v2.embed import load_tokens, tokens_path
+
+    out = tmp_path / "v2"
+    shutil.copytree(prepared, out, ignore=shutil.ignore_patterns("embeddings", "predictions", "reports", "runs"))
+    embed.main(["--model", "test-pixels", "--tokens", "12", "--with-pooled", "--out", str(out), "--workers", "0"])
+    ids, emb, meta = load_npz(out / "embeddings" / "test-pixels_48.npz")
+    ref_ids, ref_emb, _ = load_npz(pixel_embeddings)
+    np.testing.assert_array_equal(ids, ref_ids)
+    np.testing.assert_allclose(emb, ref_emb, rtol=1e-5, atol=1e-6)
+    assert meta["encoder"] == "test-pixels" and "pooled_slice" not in meta
+    tok_ids, toks, _ = load_tokens(tokens_path(out, "test-pixels", 48, 12))
+    np.testing.assert_array_equal(tok_ids, ids)
+    assert not list((out / "embeddings").glob("*.pooled.npy"))  # the temporary file is gone
+
+
+def test_dino_shares_one_backbone_pass():
+    import torch
+
+    from v2.encoders import load_encoder
+
+    enc = load_encoder("tiny-dinov2", size=48)
+    x = torch.randn(2, 3, 48, 48)
+    with torch.no_grad():
+        toks, pooled = enc.tokens_and_pooled(x, 12)
+        torch.testing.assert_close(toks, enc.tokens(x, 12))
+        torch.testing.assert_close(pooled, enc(x))

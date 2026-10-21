@@ -6,7 +6,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from v2 import context, embed, evaluate, fuse, lineup, prepare_data, probe
+from v2 import attend, context, embed, evaluate, fuse, lineup, prepare_data, probe
 from v2.common import LABELS, TEST, TRAIN, VAL, load_manifest, targets_and_mask
 
 
@@ -22,13 +22,17 @@ def bench(synth, tmp_path_factory):
     prepare_data.main(["--mimic-cxr-jpg", str(synth.mimic_root), "--out", str(out), "--population", "all",
                        "--split-scheme", "official", "--image-format", "jpg", "--image-size", "48", "--workers", "0",
                        "--min-count", "3", "--rad-dino-list", str(synth.rad_dino_list)])
-    embed.main(["--model", "test-pixels", "--out", str(out), "--workers", "0"])
+    # One pass for the embeddings and the tokens, as run.sh bench does (§6 M5 amendment).
+    embed.main(["--model", "test-pixels", "--tokens", "12", "--with-pooled", "--out", str(out), "--workers", "0"])
     emb = out / "embeddings" / "test-pixels_48.npz"
     probe.main(["--embeddings", str(emb), "--out", str(out), "--jobs", "1"])
     context.main(["--out", str(out), "--reports", str(synth.reports), "--mimic-iv-ed", str(synth.mimic_iv_ed),
                   "--mimic-iv", str(synth.mimic_iv), "--mimic-cxr-jpg", str(synth.mimic_root)])
     fuse.main(["--embeddings", str(emb), "--out", str(out), "--arms", "image,image_indication,image_text,indication,text",
                "--n-boot", "20", "--jobs", "1"])
+    attend.main(["--tokens", str(out / "embeddings" / "test-pixels_48_tokens12.npy"), "--out", str(out),
+                 "--arms", "h0,h1", "--seeds", "0", "--max-epochs", "6", "--batch-size", "16", "--lr", "3e-3",
+                 "--n-boot", "20", "--device", "cpu"])
     return out
 
 
@@ -73,6 +77,10 @@ def test_lineup_report(bench):
     assert ("test-pixels_48_probe", "ResNet-50") in pairs
     assert ("test-pixels_48_ctx_image_indication", "MMBT") in pairs
     assert ("test-pixels_48_ctx_indication", "BERT") in pairs
+    assert ("test-pixels_48_attn_h0", "ResNet-50") in pairs                       # M5 amendment
+    assert not any(run == "test-pixels_48_attn_h1" for run, _ in pairs)           # reported, not like for like
+    attn = (bench / "reports" / "m4b_attention_test-pixels_48.md").read_text()
+    assert attn.startswith("# M5: attention heads on the benchmark") and "**G4b**" not in attn
     assert all(c["published"] not in ("CheXclusion DenseNet-121", "CaMCheX") for c in res["compared"])  # other protocols
     summary = evaluate.summarize(bench, n_boot=20)
     assert "M5's benchmark" in summary and "**G1**" not in summary and "| M5 |" in summary

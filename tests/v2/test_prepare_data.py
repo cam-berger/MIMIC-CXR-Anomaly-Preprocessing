@@ -145,3 +145,19 @@ def test_v1_lateral_share(tmp_path):
             g.create_dataset(str(i), data=json.dumps({"study_id": i, "image_path": f"/x/s{i}/{d}.jpg"}))
     res = prepare_data.v1_lateral_share(tmp_path, meta)
     assert res["images"] == 3 and res["non_frontal_share"] == pytest.approx(1 / 3, abs=1e-3)
+
+
+def test_a_dropped_drive_stops_the_run_instead_of_shrinking_the_population(synth, tmp_path):
+    """Many unreadable JPGs mean a lost mount, not bad files: stop, keep what was written, and say why."""
+    import shutil
+
+    root = tmp_path / "mimic"
+    shutil.copytree(synth.mimic_root, root)
+    jpgs = sorted((root / "files").rglob("*.jpg"))
+    for path in jpgs[: len(jpgs) // 3]:
+        path.write_bytes(b"\x01\x00" * 64)  # what a stale mount returned on the real drive
+    with pytest.raises(SystemExit, match="drive still mounted"):
+        prepare_data.main(["--mimic-cxr-jpg", str(root), "--out", str(tmp_path / "out"), "--image-size", "32",
+                           "--workers", "0", "--rad-dino-list", "skip"])
+    assert not (tmp_path / "out" / "manifest.parquet").exists()
+    assert (tmp_path / "out" / "unreadable_images.csv").exists()

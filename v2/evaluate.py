@@ -534,7 +534,7 @@ def summarize(out_dir: Path, n_boot: int = N_BOOT, runs: Optional[list[str]] = N
             if res:
                 label = ("official test" if benchmark else f"`{test_set}`") + \
                     {"v1": ", v1 metric", "u0": ", positive vs rest", "v2": ""}[metric]
-                milestone = "M5" if benchmark else MILESTONE.get(meta.get("kind"), "?")
+                milestone = "M5" if benchmark else meta.get("milestone") or MILESTONE.get(meta.get("kind"), "?")
                 lines.append(f"| {day} | {milestone} | {meta.get('commit', '?')} | "
                              f"{run} | {label} | {fmt_ci(res['macro_auroc'], res['macro_auroc_ci'])} | "
                              f"{len(res['classes'])} | |")
