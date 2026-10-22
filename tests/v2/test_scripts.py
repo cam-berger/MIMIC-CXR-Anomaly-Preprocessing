@@ -38,6 +38,9 @@ def test_run_rejects_unknown_stage(tmp_path):
 
 
 def test_bench_stack_needs_the_bench_stage_first(tmp_path):
+    env_file = ROOT / ".env"
+    if env_file.exists() and "BENCH_OUT" in env_file.read_text():  # run.sh would read the real benchmark
+        pytest.skip("a local .env sets BENCH_OUT")
     res = _run(["bench_stack"], tmp_path, BENCH_OUT=str(tmp_path / "bench"))
     assert res.returncode != 0 and "needs the bench stage's text arms" in res.stderr
     assert "bench stages: RAD-DINO at 518 px" in res.stdout
