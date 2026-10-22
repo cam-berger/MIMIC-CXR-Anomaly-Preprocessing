@@ -19,9 +19,9 @@ def test_scripts_parse(name):
     subprocess.run(["bash", "-n", str(SCRIPTS / name)], check=True)
 
 
-def _run(args, tmp_path):
+def _run(args, tmp_path, **extra):
     env = {k: v for k, v in os.environ.items() if k != "MIMIC_CXR_JPG_PATH"}
-    env.update({"PYTHON": sys.executable, "V2_OUT": str(tmp_path / "v2"), "ALLOW_UNPINNED": "1"})
+    env.update({"PYTHON": sys.executable, "V2_OUT": str(tmp_path / "v2"), "ALLOW_UNPINNED": "1", **extra})
     return subprocess.run(["bash", str(SCRIPTS / "run.sh"), *args], cwd=ROOT, env=env,
                           capture_output=True, text=True, timeout=120)
 
@@ -35,6 +35,12 @@ def test_run_without_stages_prints_usage(tmp_path):
 def test_run_rejects_unknown_stage(tmp_path):
     res = _run(["m9"], tmp_path)
     assert res.returncode == 2 and "Unknown stage" in res.stderr
+
+
+def test_bench_stack_needs_the_bench_stage_first(tmp_path):
+    res = _run(["bench_stack"], tmp_path, BENCH_OUT=str(tmp_path / "bench"))
+    assert res.returncode != 0 and "needs the bench stage's text arms" in res.stderr
+    assert "bench stages: RAD-DINO at 518 px" in res.stdout
 
 
 def test_m0_requires_the_data_path(tmp_path):

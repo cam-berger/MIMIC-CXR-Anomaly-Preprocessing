@@ -95,3 +95,40 @@ def test_finetune_writes_checkpoints_predictions_and_resumes(prepared):
     history = json.loads((run_dir / "history.json").read_text())
     assert [h["epoch"] for h in history] == [0, 1, 2]
     assert history[-1]["steps"] == 6  # 2 optimizer steps per epoch, continued from step 4
+
+
+def test_attention_classifier_starts_at_the_priors():
+    """--head attention (§6 M5b amendment): M4b's h0 head on the encoder's tokens, bias at the label priors."""
+    enc = load_encoder("tiny-dinov2")
+    g = enc.token_grid(12)
+    p = np.linspace(0.05, 0.6, len(LABELS))
+    model = finetune.AttentionClassifier(enc, 12, np.zeros(enc.token_dim, np.float32),
+                                         np.ones(enc.token_dim, np.float32), p)
+    torch.testing.assert_close(model.head.bias.detach(), torch.as_tensor(np.log(p / (1 - p)), dtype=torch.float32))
+    x = torch.randn(2, 3, enc.size, enc.size)
+    assert model.features(x).shape == (2, 1 + g * g, enc.token_dim) and model(x).shape == (2, len(LABELS))
+    groups = _groups(model)
+    assert _lr_of(groups, "head.queries")["lr"] == pytest.approx(1e-3)
+    assert _lr_of(groups, "head.bias")["weight_decay"] == 0.0
+
+
+def test_attention_head_finetune_writes_its_own_run(prepared, tmp_path):
+    import shutil
+
+    out = tmp_path / "v2"
+    shutil.copytree(prepared, out, ignore=shutil.ignore_patterns("embeddings", "predictions", "reports", "runs"))
+    args = ["--model", "tiny-dinov2", "--head", "attention", "--out", str(out), "--epochs", "2", "--batch-size", "8",
+            "--accum", "1", "--workers", "0", "--steps-per-epoch", "3"]
+    run = finetune.main(args)
+    assert run.endswith("_ft_attn_s0")
+    meta = json.loads((out / "predictions" / f"{run}.json").read_text())
+    assert meta["kind"] == "finetune" and meta["head"] == "attention" and meta["config"]["grid"] == 12
+    state = torch.load(out / "runs" / run / "best.pt", map_location="cpu", weights_only=False)["model"]
+    assert "head.queries" in state and float(state["head.token_std"].min()) > 0  # normalization from the encoder
+    assert float(state["head.token_mean"].abs().sum()) > 0
+    assert not (out / "embeddings").exists() or not list((out / "embeddings").glob(f"{run}*"))
+
+
+def test_the_attention_head_has_no_embeddings_to_save():
+    with pytest.raises(SystemExit):
+        finetune.build_args(["--head", "attention", "--save-embeddings"])

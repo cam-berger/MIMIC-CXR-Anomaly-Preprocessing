@@ -26,7 +26,7 @@ import pandas as pd
 
 from .common import LABELS, default_out_dir, load_manifest, load_measurable, read_predictions, setup_logging
 from .evaluate import _get, evaluate_run, evaluate_set, fmt, fmt_ci, split_scheme
-from .fuse import red_flags
+from .fuse import ARMS, red_flags
 
 logger = logging.getLogger("v2.lineup")
 
@@ -79,13 +79,20 @@ ROLE_BY_ARM = {"image": "image", "image_indication": "image + indication", "indi
 
 
 def role(meta: dict) -> Optional[str]:
-    """What a run of ours is compared as: its inputs, if a published model had the same ones."""
+    """
+    What a run of ours is compared as: its inputs, if a published model had the same ones. Text on a stronger
+    image model is lined up through the val combiner (a stack with the `indication` run); M4's fusion on
+    fine-tuned features stays exploratory (§6 M5b amendment).
+    """
     if meta.get("kind") in ("probe", "finetune"):
         return "image"
     if meta.get("kind") == "fuse":
-        return ROLE_BY_ARM.get(meta.get("arm"))
+        return None if meta.get("image_features") == "fine-tuned" else ROLE_BY_ARM.get(meta.get("arm"))
     if meta.get("kind") == "attend" and meta.get("arm") == "h0":
         return "image"
+    if meta.get("kind") == "stack" and meta.get("text_arm") and \
+            role({"kind": meta.get("image_kind"), "arm": meta.get("image_arm")}) == "image":
+        return ROLE_BY_ARM.get(f"image_{meta['text_arm']}")
     return None
 
 
@@ -144,8 +151,8 @@ def lineup(out_dir: Path, n_boot: int = 1000, runs: Optional[list] = None) -> di
     # M4's red flags on the text-only arms come first: a flagged lineup isn't read (§6 M5).
     flags = []
     for prefix in sorted({r[: -len("_ctx_image")] for r in rows if r.endswith("_ctx_image")}):
-        clean = {arm: rows[f"{prefix}_ctx_{arm}"]["v2"] for arm in ("image", "indication", "text")
-                 if f"{prefix}_ctx_{arm}" in rows}
+        clean = {arm: rows[f"{prefix}_ctx_{arm}"]["v2"] for arm in ARMS
+                 if (arm == "image" or not ARMS[arm].image) and f"{prefix}_ctx_{arm}" in rows}
         flags += red_flags(clean)
 
     audit = json.loads((Path(out_dir) / "audit.json").read_text())

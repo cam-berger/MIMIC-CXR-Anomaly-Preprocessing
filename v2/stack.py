@@ -13,10 +13,11 @@ come from 5-fold cross-fitting within val, grouped by patient; test scores come
 from the fit on all of val. A class with only one label value in val, or in a
 fold's training part, keeps the image run's score unchanged.
 
-Writes predictions/{image_run}_stack_{text arm}.parquet and reports/m4b_stack.md.
+Writes predictions/{image_run}_stack_{text arm}.parquet and reports/m4b_stack.md
+(reports/m5_stack.md in M5's benchmark directory, scored on the official test).
 On frozen features (an image run of kind "probe") it also compares the stack with
-M4's concatenation, {prefix}_ctx_image_text: the check that the two-score
-combiner loses little.
+the concatenation of the same inputs, {prefix}_ctx_image_{text arm}: the check
+that the two-score combiner loses little.
 """
 
 from __future__ import annotations
@@ -36,7 +37,7 @@ from sklearn.preprocessing import StandardScaler
 
 from .common import LABELS, VAL, default_out_dir, label_matrix, load_manifest, read_predictions, setup_logging
 from .common import targets_and_mask, write_predictions
-from .evaluate import _get, compare_runs, evaluate_run, fmt, fmt_ci
+from .evaluate import _get, compare_runs, evaluate_run, fmt, fmt_ci, split_scheme
 
 logger = logging.getLogger("v2.stack")
 
@@ -108,26 +109,36 @@ def stack_pair(out_dir: Path, image_run: str, text_run: str, folds: int = FOLDS)
     run = f"{image_run}_stack_{meta_b.get('arm') or text_run}"
     write_predictions(out_dir, run, both["study_id"], both["split"], scores, {
         "kind": "stack", "image_run": image_run, "text_run": text_run, "folds": folds, "C": C,
-        "image_kind": meta_a.get("kind"), "encoder": meta_a.get("encoder"), "size": meta_a.get("size"),
+        "image_kind": meta_a.get("kind"), "image_arm": meta_a.get("arm"), "image_head": meta_a.get("head"),
+        "text_arm": meta_b.get("arm"), "encoder": meta_a.get("encoder"), "size": meta_a.get("size"),
         "image_features": "fine-tuned" if meta_a.get("kind") == "finetune" else meta_a.get("image_features", "frozen"),
         "n_val": int(is_val.sum()), "per_label": info,
     })
-    return run, {"image_run": image_run, "text_run": text_run, "image_kind": meta_a.get("kind"), "info": info,
-                 "kept": kept}
+    return run, {"image_run": image_run, "text_run": text_run, "image_kind": meta_a.get("kind"),
+                 "text_arm": meta_b.get("arm"), "info": info, "kept": kept}
 
 
 def write_report(out_dir: Path, stacks: dict, n_boot: int) -> Path:
-    lines = ["# M4b: a combiner fit on val (exploratory)", "",
+    bench = split_scheme(out_dir) == "official"
+    if bench:  # M5: test_clean is the official test split, and test_v1 is empty
+        title, where = "# M5: combiners fit on val, on the benchmark", "§6 M5b amendment"
+        head = "| Stacked run | Image run | Text run | official test | minus the image run | minus the image run, " \
+               "positive vs rest |"
+        sets = (("test_clean", "v2"), ("test_clean", "u0"))
+    else:
+        title, where = "# M4b: a combiner fit on val (exploratory)", "§6 M4b part 3"
+        head = "| Stacked run | Image run | Text run | test_clean | minus the image run, test_clean | " \
+               "minus the image run, test_v1 | minus the image run, test_v1 (v1 metric) |"
+        sets = (("test_clean", "v2"), ("test_v1", "v2"), ("test_v1", "v1"))
+    lines = [title, "",
              f"Per class, a logistic regression on two runs' logits (C = {C}, standardized), fit on val; val's own "
              f"scores are cross-fitted ({FOLDS} folds grouped by patient), test scores come from the fit on all of "
-             "val (docs/V2_PLAN.md §6 M4b part 3).", "",
-             "| Stacked run | Image run | Text run | test_clean | minus the image run, test_clean | "
-             "minus the image run, test_v1 | minus the image run, test_v1 (v1 metric) |", "|---|---|---|---|---|---|---|"]
+             f"val (docs/V2_PLAN.md {where}).", "", head, "|---" * (len(sets) + 4) + "|"]
     checks, weights = [], []
     for run, s in stacks.items():
         clean = _get(evaluate_run(out_dir, run, n_boot), "test_clean", "v2")
         diffs = []
-        for test_set, metric in (("test_clean", "v2"), ("test_v1", "v2"), ("test_v1", "v1")):
+        for test_set, metric in sets:
             try:
                 c = compare_runs(out_dir, run, s["image_run"], test_set, metric, n_boot)
                 diffs.append(fmt_ci(c["diff"], c["diff_ci"]))
@@ -136,29 +147,33 @@ def write_report(out_dir: Path, stacks: dict, n_boot: int) -> Path:
                 diffs.append("-")
         auc = fmt_ci(clean["macro_auroc"], clean["macro_auroc_ci"]) if clean else "-"
         lines.append(f"| `{run}` | `{s['image_run']}` | `{s['text_run']}` | {auc} | " + " | ".join(diffs) + " |")
-        concat = f"{s['image_run'][: -len('_probe')]}_ctx_image_text" if s["image_run"].endswith("_probe") else None
+        concat = f"{s['image_run'][: -len('_probe')]}_ctx_image_{s['text_arm']}" \
+            if s["image_run"].endswith("_probe") and s["text_arm"] else None
         if s["image_kind"] == "probe" and concat and (Path(out_dir) / "predictions" / f"{concat}.parquet").exists():
             checks.append((run, concat, compare_runs(out_dir, run, concat, "test_clean", "v2", n_boot)))
         used = [i for i in s["info"].values() if not i["kept_image_score"]]
         if used:
             weights.append((run, np.mean([i["image_weight"] for i in used]), np.mean([i["text_weight"] for i in used]),
                             s["kept"]))
-    lines += ["", "## The check: the stack against M4's concatenation, on frozen features", ""]
+    lines += ["", "## The check: the stack against the concatenation of the same inputs, on frozen features", ""]
     if not checks:
-        lines.append("- not run: needs a stack on a `*_probe` image run and its `*_ctx_image_text` run")
+        lines.append("- not run: needs a stack on a `*_probe` image run and its `*_ctx_image_{text arm}` run")
     for run, concat, c in checks:
         verdict = (f"more than {CHECK_MARGIN} below: the two-score combiner loses information, so its fine-tuned "
                    "estimate is a lower bound" if c["diff"] < -CHECK_MARGIN else
                    f"within {CHECK_MARGIN} or above: the combiner loses little")
-        lines.append(f"- `{run}` minus `{concat}` on test_clean: {fmt_ci(c['diff'], c['diff_ci'])} -> {verdict}")
+        on = "the official test" if bench else "test_clean"
+        lines.append(f"- `{run}` minus `{concat}` on {on}: {fmt_ci(c['diff'], c['diff_ci'])} -> {verdict}")
     lines += ["", "## Weights (fit on all of val, standardized inputs; mean over classes)", "",
               "| Stacked run | Image weight | Text weight | Classes kept at the image score |", "|---|---|---|---|"]
     for run, wi, wt, kept in weights:
         lines.append(f"| `{run}` | {fmt(wi)} | {fmt(wt)} | {', '.join(kept) or 'none'} |")
     lines += ["", "Known limitation: val also chose the probes' C and the fine-tune's epoch, so both inputs are "
-              "slightly optimistic on val. Under the v1 metric only findings the report mentions count, which biases "
-              "text gains toward zero (§6 M4b amendment): read the v2 columns first."]
-    path = Path(out_dir) / "reports" / "m4b_stack.md"
+              "slightly optimistic on val."]
+    if not bench:
+        lines[-1] += (" Under the v1 metric only findings the report mentions count, which biases text gains toward "
+                      "zero (§6 M4b amendment): read the v2 columns first.")
+    path = Path(out_dir) / "reports" / ("m5_stack.md" if bench else "m4b_stack.md")
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("\n".join(lines) + "\n")
     return path

@@ -16,8 +16,11 @@
 #          needs m4's sources plus MIMIC_CXR_JPG_PATH, ~7 GB of disk, a few hours on a Mac (TOTAL_HOURS=8)
 #   bench  M5a: all frontal studies, official split, in BENCH_OUT; RAD-DINO 518 px embeddings and tokens (one pass),
 #          probe, M4b's h0/h1 heads, M4 fusion (if the M4 sources are set), reports/lineup.md and summary.md;
-#          ~65 GB, ~12 h on a Mac (TOTAL_HOURS=20)
-#   bench_ft  M5b on a GPU: fine-tune RAD-DINO 518 px on BENCH_OUT's train split for 3 epochs (BENCH_SEEDS, default 0)
+#          ~65 GB, 10-18 h on a Mac (TOTAL_HOURS=20; reading the JPGs from a USB hard drive took 9 h)
+#   bench_ft  M5b on a GPU: fine-tune RAD-DINO 518 px on BENCH_OUT's train split for 3 epochs, with the mean-pool
+#          and the attention head (BENCH_HEADS), seeds BENCH_SEEDS (default 0); a smoke run of each first
+#   bench_stack  M5b on the Mac: text on every image run through the val combiner (h0 now, the fine-tunes once
+#          copied back), prior-label text arms, M4 fusion on the mean fine-tune's features, lineup and summary
 #   eval   reports for every run + reports/summary.md with gates G1, G2, G4 and G4b
 #   gpu    smoke m1 m2 m3 eval
 #
@@ -38,14 +41,14 @@ set -euo pipefail
 cd "$(dirname "$0")/../.."
 
 # Check the arguments before doing anything slow.
-[ $# -gt 0 ] || { sed -n '2,36p' "$0"; exit 2; }
+[ $# -gt 0 ] || { sed -n '2,/^set -euo pipefail/p' "$0" | sed '$d'; exit 2; }
 stages=()
 for arg in "$@"; do
   if [ "$arg" = gpu ]; then stages+=(smoke m1 m2 m3 eval); else stages+=("$arg"); fi
 done
 for stage in "${stages[@]}"; do
   case "$stage" in
-    m0|smoke|m1|m2|m3|m4|m4b|bench|bench_ft|eval) ;;
+    m0|smoke|m1|m2|m3|m4|m4b|bench|bench_ft|bench_stack|eval) ;;
     *) echo "Unknown stage: $stage (see the header of $0)" >&2; exit 2 ;;
   esac
 done
@@ -80,6 +83,7 @@ mkdir -p "$LOG_DIR"
 START=$(date +%s)
 TIMEOUT=$(command -v timeout || command -v gtimeout || true)
 echo "v2 run: device $DEVICE, size $SIZE, output $OUT, cohort ${COHORT_DIR:-none}, logs $LOG_DIR"
+case " ${stages[*]} " in *" bench"*) echo "bench stages: RAD-DINO at 518 px whatever SIZE says, output $BENCH_OUT" ;; esac
 PINNED=$(sed -n 's/^transformers==\([0-9.]*\).*/\1/p' v2/requirements.txt)
 FOUND=$("$PY" -c 'import transformers; print(transformers.__version__)' 2>/dev/null || echo none)
 echo "python $PY, transformers $FOUND"
@@ -227,15 +231,46 @@ stage_bench() {  # docs/V2_PLAN.md §6 M5a. On a Mac: TOTAL_HOURS=20 bash v2/scr
   echo "Lineup: $BENCH_OUT/reports/lineup.md; results-log rows: $BENCH_OUT/reports/summary.md"
 }
 
-stage_bench_ft() {  # docs/V2_PLAN.md §6 M5b, on a GPU, with BENCH_OUT's manifest and images copied over
+stage_bench_ft() {  # docs/V2_PLAN.md §6 M5b and its amendment, on a GPU, with BENCH_OUT's manifest and images
   bench_dir_ok
   [ -f "$BENCH_OUT/manifest.parquet" ] || { echo "!!! bench_ft needs $BENCH_OUT from the bench stage" >&2; exit 1; }
-  local hours=${BENCH_FT_HOURS:-3}
-  for seed in ${BENCH_SEEDS:-0}; do
-    run --hours "$(awk "BEGIN{print $hours + 0.5}")" "bench_ft_s$seed" "$PY" -m v2.finetune --model rad-dino --size 518 \
-      --seed "$seed" --epochs 3 --save-embeddings --out "$BENCH_OUT" --workers "$WORKERS" --batch-size "$FT_BATCH" \
-      --accum "$FT_ACCUM" --max-hours "$hours" --resume
+  local hours=${BENCH_FT_HOURS:-3} head seed name
+  local ft=(--model rad-dino --size 518 --out "$BENCH_OUT" --workers "$WORKERS" --batch-size "$FT_BATCH"
+            --accum "$FT_ACCUM")
+  for head in ${BENCH_HEADS:-mean attention}; do  # a few real studies through each head before the long runs
+    run "bench_ft_smoke_$head" "$PY" -m v2.finetune "${ft[@]}" --head "$head" --smoke
   done
+  for seed in ${BENCH_SEEDS:-0}; do
+    for head in ${BENCH_HEADS:-mean attention}; do
+      if [ "$head" = mean ]; then name="bench_ft_s$seed"; else name="bench_ft_attn_s$seed"; fi
+      # The mean head's features feed the refit probe and M4's fusion in bench_stack; the attention head has none.
+      run --hours "$(awk "BEGIN{print $hours + 0.5}")" "$name" "$PY" -m v2.finetune "${ft[@]}" --head "$head" \
+        --seed "$seed" --epochs 3 --max-hours "$hours" --resume $([ "$head" = mean ] && echo --save-embeddings)
+    done
+  done
+}
+
+stage_bench_stack() {  # docs/V2_PLAN.md §6 M5b amendment, on the Mac: text on every image run via the val combiner
+  bench_dir_ok
+  local p=rad-dino_518 pred="$BENCH_OUT/predictions" img seed pairs=()
+  [ -f "$pred/${p}_ctx_indication.parquet" ] || {
+    echo "!!! bench_stack needs the bench stage's text arms (run bench with the M4 sources set)" >&2; exit 1; }
+  run --hours 3 bench_fuse_prior "$PY" -m v2.fuse --embeddings "$BENCH_OUT/embeddings/$p.npz" --out "$BENCH_OUT" \
+    --arms text_prior_labels,image_text_prior_labels
+  for seed in ${BENCH_SEEDS:-0}; do  # M5b's refit probe and M4's fusion on the fine-tuned features (exploratory)
+    if [ -f "$BENCH_OUT/embeddings/${p}_ft_s$seed.npz" ]; then
+      run --hours 3 "bench_fuse_ft_s$seed" "$PY" -m v2.fuse --embeddings "$BENCH_OUT/embeddings/${p}_ft_s$seed.npz" \
+        --out "$BENCH_OUT" --arms image,image_indication,image_text_prior_labels
+    fi
+  done
+  for img in probe attn_h0 $(for seed in ${BENCH_SEEDS:-0}; do echo "ft_s$seed ft_attn_s$seed"; done); do
+    [ -f "$pred/${p}_$img.parquet" ] || continue
+    pairs+=(--pair "${p}_$img" "${p}_ctx_indication" --pair "${p}_$img" "${p}_ctx_text_prior_labels")
+  done
+  run bench_stack "$PY" -m v2.stack "${pairs[@]}" --out "$BENCH_OUT"
+  run bench_lineup "$PY" -m v2.lineup --out "$BENCH_OUT"
+  run bench_eval "$PY" -m v2.evaluate --all --out "$BENCH_OUT"
+  echo "Lineup: $BENCH_OUT/reports/lineup.md; combiners: $BENCH_OUT/reports/m5_stack.md"
 }
 
 stage_eval() {

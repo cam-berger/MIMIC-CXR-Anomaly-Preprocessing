@@ -11,7 +11,13 @@ decay); 1 warmup epoch then cosine; 10 epochs; effective batch 32; bf16 on
 CUDA; gradient clipping 1.0. The epoch with the best val macro AUROC is kept,
 and val/test predictions are written once, at the end, from that checkpoint.
 
-Outputs: runs/{run}/{last.pt,best.pt,history.json} and predictions/{run}.parquet.
+The head is one linear layer on the pooled features. With --head attention
+(§6 M5b amendment) it is M4b's h0 head instead, on the CLS token and the patch
+tokens averaged to a 12 x 12 grid: it starts at random, with its token
+normalization fixed from the frozen encoder on 512 training studies.
+
+Outputs: runs/{run}/{last.pt,best.pt,history.json} and predictions/{run}.parquet
+(run {model}_{size}_ft_s{seed}, or _ft_attn_s{seed} with --head attention).
 Interrupted? Re-run the same command with --resume.
 """
 
@@ -60,6 +66,15 @@ from .evaluate import auroc
 logger = logging.getLogger("v2.finetune")
 
 NO_DECAY_NAMES = ("position_embeddings", "cls_token", "mask_token", "register_tokens", "position_embedding")
+TOKEN_STATS_STUDIES = 512  # --head attention: training studies whose frozen tokens fix the head's normalization
+
+
+def _start_at_priors(bias: torch.Tensor, prevalence: Optional[np.ndarray]) -> None:
+    """Start each logit at its label's prior: smaller, saner first gradients."""
+    if prevalence is not None:
+        p = np.clip(prevalence, 0.01, 0.99)
+        with torch.no_grad():
+            bias.copy_(torch.as_tensor(np.log(p / (1 - p)), dtype=torch.float32))
 
 
 class Classifier(nn.Module):
@@ -69,13 +84,50 @@ class Classifier(nn.Module):
         super().__init__()
         self.encoder = encoder
         self.head = nn.Linear(encoder.dim, len(LABELS))
-        if prevalence is not None:  # start from the label priors: smaller, saner first gradients
-            p = np.clip(prevalence, 0.01, 0.99)
-            with torch.no_grad():
-                self.head.bias.copy_(torch.as_tensor(np.log(p / (1 - p)), dtype=torch.float32))
+        _start_at_priors(self.head.bias, prevalence)
+
+    def features(self, x: torch.Tensor) -> torch.Tensor:
+        return self.encoder(x)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.head(self.encoder(x))
+        return self.head(self.features(x))
+
+
+class AttentionClassifier(nn.Module):
+    """Encoder tokens (CLS + patch tokens averaged to grid x grid cells) -> M4b's h0 head -> 12 logits."""
+
+    def __init__(self, encoder: Encoder, grid: int, token_mean: np.ndarray, token_std: np.ndarray,
+                 prevalence: Optional[np.ndarray] = None):
+        super().__init__()
+        from .attend import TokenAttentionHead  # attend imports this module
+
+        self.encoder, self.grid = encoder, grid
+        g = encoder.token_grid(grid)
+        self.head = TokenAttentionHead(1 + g * g, encoder.token_dim, len(LABELS), token_mean=token_mean,
+                                       token_std=token_std)
+        _start_at_priors(self.head.bias, prevalence)
+
+    def features(self, x: torch.Tensor) -> torch.Tensor:
+        return self.encoder.tokens(x, self.grid)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.head(self.features(x))
+
+
+@torch.inference_mode()
+def token_stats(encoder: Encoder, loader: DataLoader, device, dtype, grid: int) -> tuple[np.ndarray, np.ndarray]:
+    """Per-dimension mean and SD of the frozen encoder's tokens over `loader`'s images (every position)."""
+    encoder.eval()
+    autocast = torch.autocast(device.type, dtype=dtype) if dtype is not None else nullcontext()
+    total, sq, n = 0.0, 0.0, 0
+    for batch in loader:
+        with autocast:
+            toks = encoder.tokens(batch[0].to(device, non_blocking=True), grid)
+        x = toks.float().reshape(-1, toks.shape[-1]).double().cpu()
+        total, sq, n = total + x.sum(0), sq + (x * x).sum(0), n + len(x)
+    mean = total / n
+    std = torch.sqrt(torch.clamp(sq / n - mean ** 2, min=0.0))
+    return mean.float().numpy(), np.maximum(std.float().numpy(), 1e-6)
 
 
 def masked_bce(logits: torch.Tensor, targets: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
@@ -97,7 +149,7 @@ def _dino_layer(name: str, n_layers: int) -> int:
     return n_layers + 1
 
 
-def param_groups(model: Classifier, encoder_lr: float, head_lr: float, weight_decay: float, llrd: float) -> list:
+def param_groups(model: nn.Module, encoder_lr: float, head_lr: float, weight_decay: float, llrd: float) -> list:
     """AdamW groups: layer-wise lr decay for ViTs (BEiT/DINOv2 recipe), no decay on norms/biases/tokens."""
     groups: dict[tuple, dict] = {}
 
@@ -151,15 +203,15 @@ class EpochShuffle(Sampler):
 
 
 @torch.inference_mode()
-def predict(model: Classifier, loader: DataLoader, device, dtype, with_features: bool = False):
-    """Logits (and encoder features) in dataset order."""
+def predict(model: nn.Module, loader: DataLoader, device, dtype, with_features: bool = False):
+    """Logits (and the head's input features) in dataset order."""
     model.eval()
     autocast = torch.autocast(device.type, dtype=dtype) if dtype is not None else nullcontext()
     logits, feats = [], []
     for batch in loader:
         x = batch[0].to(device, non_blocking=True)
         with autocast:
-            f = model.encoder(x)
+            f = model.features(x)
             out = model.head(f)
         logits.append(out.float().cpu().numpy())
         if with_features:
@@ -198,7 +250,12 @@ def build_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     parser.add_argument("--model", default="rad-dino", choices=sorted(REGISTRY))
     parser.add_argument("--size", type=int, help="Input size in px (default: the model's native size)")
     parser.add_argument("--out", default=None, help="v2 output dir (default: $OUTPUT_PATH/v2 or output/v2)")
-    parser.add_argument("--run", help="Run name (default: {model}_{size}_ft_s{seed})")
+    parser.add_argument("--run", help="Run name (default: {model}_{size}_ft_s{seed}, _ft_attn_s{seed} with "
+                                      "--head attention)")
+    parser.add_argument("--head", default="mean", choices=["mean", "attention"],
+                        help="mean: a linear layer on the pooled features; attention: M4b's h0 head on the tokens "
+                             "(§6 M5b amendment)")
+    parser.add_argument("--grid", type=int, default=12, help="--head attention: patch tokens averaged to G x G")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--epochs", type=int, default=10)
     parser.add_argument("--warmup-epochs", type=float, default=1.0)
@@ -227,6 +284,8 @@ def build_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
         args.epochs = min(args.epochs, 2)
         args.batch_size = min(args.batch_size, 8)
         args.accum = 1
+    if args.head == "attention" and args.save_embeddings:
+        parser.error("--save-embeddings needs --head mean: the attention head has no single feature vector")
     return args
 
 
@@ -258,22 +317,34 @@ def main(argv: Optional[list[str]] = None) -> str:
             raise SystemExit(f"--grad-checkpointing is not supported for {enc.name}")
         backbone.gradient_checkpointing_enable()
     encoder_lr = args.encoder_lr or (1e-4 if REGISTRY[args.model].kind == "densenet" else 2e-5)
-    run = args.run or f"{enc.name}_{enc.size}_ft_s{args.seed}" + ("_smoke" if args.smoke else "")
+    run = args.run or f"{enc.name}_{enc.size}_ft{'_attn' if args.head == 'attention' else ''}_s{args.seed}" + \
+        ("_smoke" if args.smoke else "")
     run_dir = out_dir / "runs" / run
     run_dir.mkdir(parents=True, exist_ok=True)
 
     raw_tr = label_matrix(splits[TRAIN])
     y_tr, m_tr = targets_and_mask(raw_tr, "v2")
     prevalence = (y_tr * m_tr).sum(0) / np.maximum(m_tr.sum(0), 1)
-    model = Classifier(enc, prevalence).to(device)
+    eval_tf = enc.eval_transform()
+    eval_kw = loader_kwargs(args.workers, device, persistent=False)
+    if args.head == "attention":
+        if enc.token_dim is None:
+            raise SystemExit(f"--head attention needs patch tokens, which {enc.name} doesn't give")
+        rows = splits[TRAIN].head(TOKEN_STATS_STUDIES)
+        stats_dl = DataLoader(ImageDataset(image_paths(out_dir, rows), eval_tf), batch_size=args.batch_size * 2,
+                              shuffle=False, **eval_kw)
+        token_mean, token_std = token_stats(enc, stats_dl, device, dtype, args.grid)
+        model = AttentionClassifier(enc, args.grid, token_mean, token_std, prevalence).to(device)
+        logger.info("Attention head on %d tokens (grid %d), normalized from %d training studies",
+                    1 + enc.token_grid(args.grid) ** 2, enc.token_grid(args.grid), len(rows))
+    else:
+        model = Classifier(enc, prevalence).to(device)
 
     train_ds = ImageDataset(image_paths(out_dir, splits[TRAIN]), enc.train_transform(), y_tr, m_tr)
     sampler = EpochShuffle(len(train_ds), args.seed)
     kw = loader_kwargs(args.workers, device)
     train_dl = DataLoader(train_ds, batch_size=args.batch_size, sampler=sampler,
                           drop_last=len(train_ds) > args.batch_size, **kw)
-    eval_tf = enc.eval_transform()
-    eval_kw = loader_kwargs(args.workers, device, persistent=False)
     val_dl = DataLoader(ImageDataset(image_paths(out_dir, splits[VAL]), eval_tf), batch_size=args.batch_size * 2,
                         shuffle=False, **eval_kw)
     raw_val = label_matrix(splits[VAL])
@@ -401,7 +472,7 @@ def main(argv: Optional[list[str]] = None) -> str:
                     shuffle=False, **eval_kw)
     logits, _ = predict(model, dl, device, dtype)
     write_predictions(out_dir, run, rows["study_id"], rows["split"], logits, {
-        "kind": "finetune", **enc.describe(), "best_epoch": best["epoch"],
+        "kind": "finetune", "head": args.head, **enc.describe(), "best_epoch": best["epoch"],
         "best_val_macro_auroc": best["val_macro_auroc"], "stopped_early": stopped_early,
         "history": state["history"], "config": config,
     })

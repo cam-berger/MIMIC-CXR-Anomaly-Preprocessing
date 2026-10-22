@@ -18,11 +18,14 @@ M4b (§6), only with --arms: the prior report encoded as the prior study's 14
 CheXpert labels (one-hot, 57 features), alone and with the image:
 
     prior_labels, image_prior_labels, image_text_prior_labels
+    text_prior_labels                       all text with them, text only (§6 M5b amendment)
 
 Text features per source: TF-IDF over word 1-2-grams and a truncated SVD, both
 fit on train only, plus a presence indicator. Then it checks the leakage red
 flags, runs gate G4 and writes reports/m4_{prefix}.md (m4b_{prefix}.md when M4b arms
-are among the arms). Only aggregates are logged.
+are among the arms). In M5's benchmark directory the report has no gate: the
+comparisons with published results are in reports/lineup.md. Only aggregates are
+logged.
 """
 
 from __future__ import annotations
@@ -43,7 +46,7 @@ from .common import DEFAULT_SEED, TEST, TRAIN, VAL, default_out_dir, label_matri
 from .common import setup_logging, write_predictions
 from .context import PRIOR_LABEL_COLUMNS, TEXT_SOURCES
 from .embed import load_npz
-from .evaluate import _get, compare_runs, evaluate_run, fmt, fmt_ci
+from .evaluate import _get, compare_runs, evaluate_run, fmt, fmt_ci, split_scheme
 from .probe import DEFAULT_CS, fit_probe, split_xy
 
 logger = logging.getLogger("v2.fuse")
@@ -69,8 +72,9 @@ ARMS: dict[str, Arm] = {
     "prior_labels": Arm(False, (), prior_labels=True),
     "image_prior_labels": Arm(True, (), prior_labels=True),
     "image_text_prior_labels": Arm(True, TEXT_SOURCES, prior_labels=True),
+    "text_prior_labels": Arm(False, TEXT_SOURCES, prior_labels=True),
 }
-M4B_ARMS = ("prior_labels", "image_prior_labels", "image_text_prior_labels")
+M4B_ARMS = ("prior_labels", "image_prior_labels", "image_text_prior_labels", "text_prior_labels")
 DEFAULT_ARMS = tuple(arm for arm in ARMS if arm not in M4B_ARMS)
 # M4b's pre-registered comparisons: the labels against TF-IDF of the same prior report, and beyond all text.
 PRIOR_LABEL_CMPS = (("image_prior_labels", "image_prior"), ("image_text_prior_labels", "image_text"))
@@ -191,6 +195,7 @@ def gate_report(out_dir: Path, prefix: str, runs: dict, n_boot: int, features: s
     comparisons need are read from M4's predictions when this call didn't fit them.
     """
     m4b = any(arm in M4B_ARMS for arm in runs)
+    bench = split_scheme(out_dir) == "official"  # M5: test_clean is the official test split, test_v1 is empty
     borrowed = {}
     if m4b:
         for arm in (REFERENCE, *(b for _, b in PRIOR_LABEL_CMPS)):
@@ -209,7 +214,9 @@ def gate_report(out_dir: Path, prefix: str, runs: dict, n_boot: int, features: s
     prior_cmps = []
     for a, b in PRIOR_LABEL_CMPS:
         if a in runs and b in runs:
-            for test_set, metric in (("test_clean", "v2"), ("test_v1", "v2"), ("test_v1", "v1")):
+            sets = (("test_clean", "v2"), ("test_clean", "u0")) if bench else \
+                (("test_clean", "v2"), ("test_v1", "v2"), ("test_v1", "v1"))
+            for test_set, metric in sets:
                 try:
                     prior_cmps.append(compare_runs(out_dir, runs[a], runs[b], test_set, metric, n_boot))
                 except SystemExit as exc:  # no shared studies or no frozen classes for that set
@@ -227,40 +234,52 @@ def gate_report(out_dir: Path, prefix: str, runs: dict, n_boot: int, features: s
 
     gate = "G4" if features == "frozen" else "Text gain on fine-tuned features (exploratory, not G4)"
     title = f"# M4b: prior-study labels ({prefix})" if m4b else f"# M4: pre-imaging text + image ({prefix})"
-    lines = [title, "", "Macro AUROC on test_clean; paired differences against `image` (docs/V2_PLAN.md §6 "
-             + ("M4b part 2)." if m4b else "M4)."), ""]
+    if bench:
+        title = f"# M5: text arms on the benchmark ({prefix})"
+    lines = [title, "", f"Macro AUROC on {'the official test split' if bench else 'test_clean'}; paired differences "
+             "against `image` (docs/V2_PLAN.md §6 " + ("M4b part 2)." if m4b else "M4)."), ""]
     if features != "frozen":
         lines += ["**Exploratory:** these image features come from a fine-tune that was fit on the training "
                   "studies, which likely understates what text adds. G4 is defined on frozen features only.", ""]
     lines += ["## Leakage red flags (read these first)", ""]
     lines += [f"- **RED FLAG:** {f}" for f in flags] or ["- none"]
-    lines += ["", "## Arms", "", "| Arm | test_clean | minus `image` |", "|---|---|---|"]
+    lines += ["", "## Arms", "", f"| Arm | {'official test' if bench else 'test_clean'} | minus `image` |",
+              "|---|---|---|"]
     for arm, run in runs.items():
         res = clean[arm]
         auc = fmt_ci(res["macro_auroc"], res["macro_auroc_ci"]) if res else "-"
         diff = fmt_ci(cmps[arm]["diff"], cmps[arm]["diff_ci"]) if arm in cmps else ""
-        lines.append(f"| `{run}`{' (from M4)' if arm in borrowed else ''} | {auc} | {diff} |")
+        lines.append(f"| `{run}`{(' (from M5a)' if bench else ' (from M4)') if arm in borrowed else ''} | {auc} | "
+                     f"{diff} |")
     if not m4b:
-        g4_text = fmt_ci(g4["diff"], g4["diff_ci"]) if g4 else "-"
-        lines += ["", f"**{gate}** (`{PRIMARY}` minus `{REFERENCE}`): {g4_text} -> **{verdict}**", ""]
+        if bench:
+            lines += ["", "No gate here: G4 is defined on the v2 cohort. The comparisons with published results are "
+                      "in reports/lineup.md.", ""]
+        else:
+            g4_text = fmt_ci(g4["diff"], g4["diff_ci"]) if g4 else "-"
+            lines += ["", f"**{gate}** (`{PRIMARY}` minus `{REFERENCE}`): {g4_text} -> **{verdict}**", ""]
         if drift is not None:
             lines.append(f"`image` arm vs `{prefix}_probe`: largest score difference {drift:.2e} (should be 0).")
     if prior_cmps:
         lines += ["", "## Prior-study labels (M4b, exploratory)", "", "| Comparison | Set | Difference [95% CI] |",
                   "|---|---|---|"]
         for c in prior_cmps:
-            where = f"{c['test_set']}" + (", v1 metric" if c["metric"] == "v1" else "")
+            where = ("official test" if bench else f"{c['test_set']}") + \
+                {"v1": ", v1 metric", "u0": ", positive vs rest", "v2": ""}[c["metric"]]
             lines.append(f"| `{c['a']}` minus `{c['b']}` | {where} | {fmt_ci(c['diff'], c['diff_ci'])} |")
-        lines += ["", "Read test_v1 under the v2 policy first. Under the v1 policy only findings the report mentions "
-                  "count, and text the radiologist reads makes a mention more likely, which biases text gains toward "
-                  "zero (§6 M4b amendment).", "",
-                  "Caveat (§6 M4b): radiologists read the prior report and often carry its wording forward, "
+        if not bench:
+            lines += ["", "Read test_v1 under the v2 policy first. Under the v1 policy only findings the report "
+                      "mentions count, and text the radiologist reads makes a mention more likely, which biases text "
+                      "gains toward zero (§6 M4b amendment)."]
+        lines += ["", "Caveat (§6 M4b): radiologists read the prior report and often carry its wording forward, "
                   "and the same labeler reads both reports, so part of any gain is predicting the report rather "
                   "than the patient."]
     rep_dir = Path(out_dir) / "reports"
     rep_dir.mkdir(parents=True, exist_ok=True)
     path = rep_dir / f"{'m4b' if m4b else 'm4'}_{prefix}.md"
     path.write_text("\n".join(lines) + "\n")
+    if bench:
+        verdict = "not a gate here: G4 is defined on the v2 cohort"
     return {"flags": flags, "g4": None if m4b else g4, "verdict": verdict, "probe_drift": drift, "gate": gate,
             "prior_label_cmps": prior_cmps, "path": path, "m4b": m4b}
 

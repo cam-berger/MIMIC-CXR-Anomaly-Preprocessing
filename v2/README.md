@@ -58,9 +58,10 @@ them with v1's `python build_cohort.py --anomalous-only`.
 | M2 (optional) | `bash v2/scripts/run.sh m2 eval` (accept the MedSigLIP terms first, see §6) | laptop or GPU | like M1 |
 | M3 | `bash v2/scripts/run.sh smoke m3 eval` (§3); `gpu` also runs M1 and M2 there | rented GPU | about 2 h on an A100-40GB (measured: 2.15 instance hours, about $3-4) |
 | M4: text written before the X-ray | `SIZE=518 bash v2/scripts/run.sh m4 eval`; read `reports/m4_rad-dino_518.md` (red flags, then **G4**) | laptop | about 15 min |
-| M5a: line up with published results | `TOTAL_HOURS=20 bash v2/scripts/run.sh bench`; read `$OUTPUT_PATH/v2_bench/reports/lineup.md` (red flags, then the like-for-like table) | laptop with an Apple GPU and the data drive, ~65 GB free | prepare 1-3 h, embeddings and tokens ~6 h (one pass), probes and fusion 1-2 h, attention heads 1-2 h (10 heads on ~9x M4b's training studies) |
-| M5b: fine-tune on the benchmark | `bash v2/scripts/run.sh bench_ft` with `BENCH_OUT` copied over, then fusion and the lineup back on the Mac | rented GPU | ~1.7 h of an A100 per seed |
-| M4b: text-steered attention, prior-study labels, val combiner | `SIZE=518 TOTAL_HOURS=8 bash v2/scripts/run.sh m4b eval`; read `reports/m4b_attention_rad-dino_518.md` (the head check, then **G4b**), `reports/m4b_rad-dino_518.md` and `reports/m4b_stack.md` | laptop with an Apple GPU, ~7 GB free | prior labels and combiner: minutes; patch tokens ~1 h; attention heads (15 runs): to be measured |
+| M4b: text-steered attention, prior-study labels, val combiner | `SIZE=518 TOTAL_HOURS=8 bash v2/scripts/run.sh m4b eval`; read `reports/m4b_attention_rad-dino_518.md` (the head check, then **G4b**), `reports/m4b_rad-dino_518.md` and `reports/m4b_stack.md` | laptop with an Apple GPU, ~7 GB free | measured: 71 min (patch tokens 53 min, 15 attention heads 8.5 min) |
+| M5a: line up with published results | `TOTAL_HOURS=20 bash v2/scripts/run.sh bench`; read `$OUTPUT_PATH/v2_bench/reports/lineup.md` (red flags, then the like-for-like table) | laptop with an Apple GPU and the data drive, ~65 GB free | measured: prepare 9 h from a USB hard drive (1-3 h from a fast disk), embeddings and tokens 6.1 h, probe and fusion 27 min, attention heads 2.3 h |
+| M5b, on the Mac: text through the val combiner | `bash v2/scripts/run.sh bench_stack`; read `reports/m5_stack.md` (the check first), then `lineup.md` | laptop | about 30 min; run it again after the GPU part |
+| M5b, on a GPU: two fine-tunes on the benchmark | `bash v2/scripts/run.sh bench_ft` (§3, M5b) | rented GPU | about 3.5 h of an A100 for seed 0 of both heads, plus uploading ~16 GB |
 
 `run.sh` writes a log per step to `output/v2/logs/` and stops at the first
 failure. Its settings (`SIZE`, `MAX_TRAIN`, `FT_BATCH`/`FT_ACCUM`,
@@ -122,6 +123,23 @@ fine-tuning is too slow (about 1.5 images/s on 4 cores); use a GPU.
    ```
    If you ran `gpu`, bring home `predictions`, `embeddings` and `reports` too.
 
+**M5b (§6 M5b amendment)** follows the same steps with the benchmark directory.
+Upload about 16 GB (`rsync -a output/v2_bench/manifest.parquet
+output/v2_bench/measurable_classes.json output/v2_bench/audit.json
+output/v2_bench/images <gpu>:MIMIC-CXR-Anomaly-Preprocessing/output/v2_bench/`),
+then run `bash v2/scripts/run.sh bench_ft` in `tmux`. It runs a smoke
+fine-tune of each head on a few real studies, then the mean-pool and the
+attention-head fine-tunes (3 epochs each, at most `BENCH_FT_HOURS`, default 3).
+Bring the results home and run the Mac part:
+```bash
+ssh <gpu> 'cd MIMIC-CXR-Anomaly-Preprocessing/output && tar -czf m5b.tgz v2_bench/predictions/*_ft_*s[0-9].* \
+    v2_bench/runs/*_ft_*s[0-9]/best.pt v2_bench/runs/*_ft_*s[0-9]/*.json v2_bench/embeddings/*_ft_s[0-9].npz v2/logs'
+scp <gpu>:MIMIC-CXR-Anomaly-Preprocessing/output/m5b.tgz output/
+tar -xzf output/m5b.tgz -C output && rm output/m5b.tgz
+ssh <gpu> 'rm -rf MIMIC-CXR-Anomaly-Preprocessing/output'
+bash v2/scripts/run.sh bench_stack
+```
+
 The MIMIC data stays under your PhysioNet credential. Use a provider you
 trust, and keep the data on the machine only for the run.
 
@@ -145,6 +163,7 @@ embeddings/{model}_{size}_tokens{G}.npy   M4b: CLS + patch tokens pooled to G x 
 reports/m4b_attention_{model}_{size}.md   M4b: head validity check, gate G4b, contrasts, how far text moves attention
 reports/m4b_{embeddings}.md               M4b: prior-study label arms against M4's arms
 reports/m4b_stack.md                      M4b: the combiner fit on val, and its check against concatenation
+reports/m5_stack.md                       M5b (BENCH_OUT): the combiners on the benchmark, and their checks
 ```
 
 M5's benchmark (§6 M5) lives in its own directory, `BENCH_OUT` (default
@@ -158,9 +177,10 @@ split scheme, so v2.0's directory can't be overwritten by mistake.
 ```
 
 Runs are named `{model}_{size}_probe`, `{model}_{size}_zeroshot`,
-`{model}_{size}_ft_s{seed}`, `{embeddings}_ctx_{arm}` (M4 and M4b's prior-label arms; arms in `v2/fuse.py`),
-`{model}_{size}_attn_{h0,h1,h2}` (M4b) and `{image run}_stack_text` (M4b). Runs
-ending in `_smoke` only check the setup and are left out of the summary.
+`{model}_{size}_ft_s{seed}` (`_ft_attn_s{seed}` with the attention head, M5b), `{embeddings}_ctx_{arm}`
+(M4 and M4b's prior-label arms; arms in `v2/fuse.py`), `{model}_{size}_attn_{h0,h1,h2}` (M4b) and
+`{image run}_stack_{text arm}` (M4b, M5b). Runs ending in `_smoke` only check the setup and are left out of
+the summary.
 
 ## 5. Reading the results
 
@@ -180,6 +200,9 @@ ending in `_smoke` only check the setup and are left out of the summary.
   unmentioned count as negative), so `lineup.md` scores the official test
   split that way (`--metric u0` in `evaluate`). A published number reads as
   below, level with or above ours by where it falls against our 95% CI.
+  From M5b on, text on the stronger image models (the attention head, the
+  fine-tunes) is added by the val combiner: `*_stack_indication` runs are the
+  image + indication rows, like for like with MMBT (§6 M5b amendment).
 - **Text gains: read the v2 policy first.** The v1 metric counts only findings
   the report mentions. Text the radiologist reads makes a mention more likely,
   so under v1 text gains look smaller than they are (§6 M4b amendment).
@@ -196,13 +219,14 @@ python -m v2.prepare_data --mimic-cxr-jpg PATH [--cohort-dir DIR] [--extend-test
 python -m v2.embed --model {rad-dino,dinov2-base,medsiglip,densenet121} --size 224 [--max-train N] [--smoke]
 python -m v2.probe --embeddings output/v2/embeddings/rad-dino_224.npz
 python -m v2.zero_shot --model medsiglip
-python -m v2.finetune --model rad-dino --size 518 --seed 0 [--resume] [--smoke] [--max-hours H] [--save-embeddings]
+python -m v2.finetune --model rad-dino --size 518 --seed 0 [--head attention] [--resume] [--smoke] [--max-hours H] [--save-embeddings]
 python -m v2.context [--reports ZIP_OR_DIR] [--mimic-iv-ed DIR] [--mimic-iv DIR]   # M4 inputs -> context.parquet
 python -m v2.fuse --embeddings output/v2/embeddings/rad-dino_518.npz [--arms image,image_text]
 python -m v2.embed --model rad-dino --size 518 --tokens 12      # M4b: patch tokens (resumable)
 python -m v2.attend --tokens output/v2/embeddings/rad-dino_518_tokens12.npy [--arms h0,h1,h2] [--seeds 0,1,2,3,4]
 python -m v2.stack --pair rad-dino_518_ft_s1 rad-dino_518_ctx_text [--pair IMAGE_RUN TEXT_RUN ...]
 python -m v2.prepare_data --population all --split-scheme official --image-format jpg --out output/v2_bench   # M5
+python -m v2.stack --pair rad-dino_518_attn_h0 rad-dino_518_ctx_indication --out output/v2_bench   # M5b
 python -m v2.lineup --out output/v2_bench                       # M5: reports/lineup.md
 python -m v2.evaluate --all | --run RUN... | --compare RUN_A RUN_B
 python -m v2.doctor [--load-models]
@@ -254,15 +278,18 @@ Verified, on a CPU-only Linux container:
   scores > 0.95, `h1` < 0.85), prior-study labels (a leak trap: the arm fed each
   study's own labels scores > 0.95) and the val combiner (cross-fitted val
   scores). Not yet run on real data or on MPS.
-- M5 on synthetic data only: the official split, the guard that keeps the
-  benchmark out of v2.0's directory, positive-vs-rest scoring and the lineup.
-  The published per-class tables are checked against the papers' own macros.
+- M5b on synthetic data only: the attention-head fine-tune (learns the planted
+  signal in the wiring check) and the val combiner on the benchmark. The
+  published per-class tables are checked against the papers' own macros.
 
 Verified on the real data (October 2026; results in `docs/V2_PLAN.md` §9):
 - M0-M2 on an Apple-silicon Mac (MPS), including MedSigLIP's gated weights.
 - M3 on a Lambda A100-SXM4-40GB (CUDA, bf16): three fine-tunes with no
   non-finite steps, in about 2 h of instance time. Lambda's preinstalled torch
   needed `numpy<2`, which `setup.sh` now installs when needed.
+- M4b and M5a on an Apple M5 Pro (MPS, 64 GB): patch tokens, attention heads,
+  prior labels and the val combiner; the whole benchmark (218k studies) with
+  its 49 GB token cache.
 
 Not verified: other providers' machine images. Start every new machine with
 `bash v2/scripts/run.sh smoke`.
@@ -308,6 +335,8 @@ content out of the conversation:
 | `predates M4b` from doctor, or fuse says the context has no prior-study labels | `run.sh m4b` rebuilds `context.parquet` (by hand: `python -m v2.context`); its text columns don't change |
 | `prepare_data` says a directory "holds a manifest for population ..." | You pointed M5's benchmark (or another population) at an existing output dir. Use its own `--out` (`BENCH_OUT`) |
 | `prepare_data` stops with "is the drive still mounted?" | More than 0.5% of JPGs failed to read, which usually means the drive dropped off the bus or the mount went stale. Remount it (read-only is fine), check with `python -m v2.doctor`, keep the Mac awake (`caffeinate -ims`), and rerun: written images are kept |
+| `bench_stack` says it needs the bench stage's text arms | Run `bench` with `MIMIC_CXR_REPORTS_PATH` and `MIMIC_IV_ED_PATH` set: the combiner needs `ctx_indication` |
+| A `bench_ft_smoke_*` step fails on the GPU | Don't start the long runs: report the error line. Under 40 GB of GPU memory use `FT_BATCH=8 FT_ACCUM=4` or `GRAD_CKPT=1` |
 | The M5 probe runs fewer parallel fits than `--jobs` | Each fit copies the training features (2.6 GB at M5's size); the probe caps the workers to fit in memory and logs it |
 | G4b `WITHHELD` | `h0` scored more than 0.02 below the M1 probe on val, or the check couldn't run. Don't read G4b: look at the per-seed histories in `predictions/*_attn_h0.json` (aggregate) first |
 | `token 0 differs from ... npz` in attend | The tokens and the M1 embeddings came from different images, preprocessing or transformers versions. Re-run `v2.embed --tokens` in the pinned venv |

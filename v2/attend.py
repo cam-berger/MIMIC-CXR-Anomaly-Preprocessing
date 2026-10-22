@@ -539,8 +539,9 @@ def main(argv: Optional[list[str]] = None) -> dict:
     shift = np.mean(shifts, axis=0) if shifts else None
     path, gate = write_report(out_dir, prefix, runs, infos, shift, recipe, alignment, args.n_boot, time.time() - t0)
     logger.info("Head validity check: %s", gate["check"])
-    logger.info("G4b (h2 - h1, test_clean): %s -> %s",
-                fmt_ci(gate["cmp"]["diff"], gate["cmp"]["diff_ci"]) if gate["cmp"] else "-", gate["verdict"])
+    if split_scheme(out_dir) != "official":  # M5 drops h2: G4b is defined on the v2 cohort only
+        logger.info("G4b (h2 - h1, test_clean): %s -> %s",
+                    fmt_ci(gate["cmp"]["diff"], gate["cmp"]["diff_ci"]) if gate["cmp"] else "-", gate["verdict"])
     if shift is not None:
         logger.info("Mean attention shift from text (h2, test_clean): %.3f", float(shift.mean()))
     logger.info("Report: %s", path)

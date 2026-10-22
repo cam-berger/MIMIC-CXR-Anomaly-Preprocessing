@@ -622,7 +622,7 @@ v2/
   embed.py          # M1: embeddings -> .npz (resumable)
   probe.py          # M1: per-class logistic regression -> predictions
   zero_shot.py      # M2
-  finetune.py       # M3: plain PyTorch loop, bf16, checkpoint every epoch, --resume
+  finetune.py       # M3: plain PyTorch loop, bf16, checkpoint every epoch, --resume; M5b: --head attention
   context.py        # M4 inputs: indication, ED chief complaint, prior report, vitals (+ leak guards, audit)
   fuse.py           # M4 arms: text features fit on train, late fusion with the probe, red flags, gate G4
   attend.py         # M4b part 1: attention heads over cached patch tokens, gate G4b

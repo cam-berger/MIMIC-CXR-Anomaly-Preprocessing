@@ -6,7 +6,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from v2 import attend, context, embed, evaluate, fuse, lineup, prepare_data, probe
+from v2 import attend, context, embed, evaluate, fuse, lineup, prepare_data, probe, stack
 from v2.common import LABELS, TEST, TRAIN, VAL, load_manifest, targets_and_mask
 
 
@@ -33,6 +33,12 @@ def bench(synth, tmp_path_factory):
     attend.main(["--tokens", str(out / "embeddings" / "test-pixels_48_tokens12.npy"), "--out", str(out),
                  "--arms", "h0,h1", "--seeds", "0", "--max-epochs", "6", "--batch-size", "16", "--lr", "3e-3",
                  "--n-boot", "20", "--device", "cpu"])
+    # M5b amendment, as run.sh bench_stack does: prior labels in the all-text arms, then the val combiner.
+    fuse.main(["--embeddings", str(emb), "--out", str(out), "--arms", "text_prior_labels,image_text_prior_labels",
+               "--n-boot", "20", "--jobs", "1"])
+    pairs = [arg for img in ("probe", "attn_h0") for text in ("indication", "text_prior_labels")
+             for arg in ("--pair", f"test-pixels_48_{img}", f"test-pixels_48_ctx_{text}")]
+    stack.main([*pairs, "--out", str(out), "--n-boot", "20"])
     return out
 
 
@@ -79,11 +85,37 @@ def test_lineup_report(bench):
     assert ("test-pixels_48_ctx_indication", "BERT") in pairs
     assert ("test-pixels_48_attn_h0", "ResNet-50") in pairs                       # M5 amendment
     assert not any(run == "test-pixels_48_attn_h1" for run, _ in pairs)           # reported, not like for like
+    assert ("test-pixels_48_attn_h0_stack_indication", "MMBT") in pairs           # M5b amendment: val combiner
+    assert not any(run.endswith("_stack_text_prior_labels") for run, _ in pairs)  # all text: not like for like
     attn = (bench / "reports" / "m4b_attention_test-pixels_48.md").read_text()
     assert attn.startswith("# M5: attention heads on the benchmark") and "**G4b**" not in attn
     assert all(c["published"] not in ("CheXclusion DenseNet-121", "CaMCheX") for c in res["compared"])  # other protocols
     summary = evaluate.summarize(bench, n_boot=20)
     assert "M5's benchmark" in summary and "**G1**" not in summary and "| M5 |" in summary
+
+
+def test_benchmark_reports_have_no_v2_gates(bench):
+    fused = (bench / "reports" / "m4_test-pixels_48.md").read_text()
+    assert fused.startswith("# M5:") and "**G4**" not in fused and "No gate here" in fused
+    assert "largest score difference" in fused                                    # the probe check stays
+    prior = (bench / "reports" / "m4b_test-pixels_48.md").read_text()
+    assert prior.startswith("# M5:") and "test_v1" not in prior and "positive vs rest" in prior
+    stacked = (bench / "reports" / "m5_stack.md").read_text()
+    assert stacked.startswith("# M5: combiners fit on val") and "test_v1" not in stacked
+    for text in ("indication", "text_prior_labels"):  # the check, against the matching concatenation
+        assert f"`test-pixels_48_probe_stack_{text}` minus `test-pixels_48_ctx_image_{text}`" in stacked
+    meta = json.loads((bench / "predictions" / "test-pixels_48_attn_h0_stack_indication.json").read_text())
+    assert (meta["image_kind"], meta["image_arm"], meta["text_arm"]) == ("attend", "h0", "indication")
+
+
+def test_roles_follow_the_inputs():
+    role = lineup.role
+    assert role({"kind": "finetune", "head": "attention"}) == "image"
+    assert role({"kind": "fuse", "arm": "image_indication", "image_features": "frozen"}) == "image + indication"
+    assert role({"kind": "fuse", "arm": "image_indication", "image_features": "fine-tuned"}) is None  # exploratory
+    assert role({"kind": "stack", "image_kind": "finetune", "text_arm": "indication"}) == "image + indication"
+    assert role({"kind": "stack", "image_kind": "attend", "image_arm": "h1", "text_arm": "indication"}) is None
+    assert role({"kind": "stack", "image_kind": "probe", "text_arm": "text_prior_labels"}) is None
 
 
 def test_lineup_refuses_the_v2_cohort(prepared):

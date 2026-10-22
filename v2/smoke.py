@@ -124,7 +124,12 @@ def run_checks(work: Path, patients: int = 400) -> list[tuple[str, bool, str]]:
         assert (out / "embeddings" / f"{run}.npz").exists(), "fine-tuned embeddings missing"
         auc = evaluate._get(evaluate.evaluate_run(out, run, n_boot=50), "test_clean", "v2")["macro_auroc"]
         assert auc >= 0.7, f"fine-tuning did not learn the planted signal: test_clean macro AUROC {auc:.3f}"
-        return f"6 epochs with a resume; test_clean macro AUROC {auc:.3f}"
+        # M5b amendment: the same fine-tune with M4b's attention head on the tokens.
+        attn = finetune.main([*args[:3], "6", *(a for a in args[4:] if a != "--save-embeddings"), "--head",
+                              "attention"])
+        auc_attn = evaluate._get(evaluate.evaluate_run(out, attn, n_boot=50), "test_clean", "v2")["macro_auroc"]
+        assert auc_attn >= 0.7, f"the attention-head fine-tune did not learn: test_clean macro AUROC {auc_attn:.3f}"
+        return f"6 epochs with a resume; test_clean macro AUROC {auc:.3f} (attention head {auc_attn:.3f})"
 
     stage("M3 fine-tune + resume (learns)", m3)
 
@@ -220,8 +225,11 @@ def run_checks(work: Path, patients: int = 400) -> list[tuple[str, bool, str]]:
         attend.main(["--tokens", str(bench / "embeddings" / "test-pixels_48_tokens12.npy"), "--arms", "h0",
                      "--seeds", "0", "--max-epochs", "20", "--patience", "20", "--batch-size", "16", "--lr", "3e-3",
                      "--n-boot", "50", "--device", "cpu", *out_b])
+        stack.main(["--pair", "test-pixels_48_attn_h0", "test-pixels_48_ctx_indication", "--n-boot", "50", *out_b])
         res = lineup.main(["--n-boot", "50", *out_b])
         assert any(c["run"] == "test-pixels_48_attn_h0" for c in res["compared"]), "the attention head is not lined up"
+        assert any((c["run"], c["published"]) == ("test-pixels_48_attn_h0_stack_indication", "MMBT")
+                   for c in res["compared"]), "the val combiner's image + indication run is not lined up with MMBT"
         row = next(c for c in res["compared"] if c["run"] == "test-pixels_48_probe")
         assert row["ours"] >= 0.9, f"the planted signal didn't reach the lineup: {row['ours']:.3f}"
         return (f"{len(m)} studies, {int(m['in_test_clean'].sum())} in the official test split; probe "
