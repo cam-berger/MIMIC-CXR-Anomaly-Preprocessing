@@ -1,6 +1,6 @@
 # v2 Plan: Modern Foundation Models for CheXpert Classification
 
-**Status:** v2.0 done (M0-M3). **G2 PASS:** the fine-tuned RAD-DINO is the image-only v2 baseline, 0.787 [0.769, 0.803] on `test_clean`. **M4 done, G4 PASS:** text written before the X-ray adds +0.016 [0.009, 0.024] to frozen image features (§9). Exploratory follow-ups: +0.009 [0.003, 0.014] on the fine-tuned image; refitting the probe on the fine-tuned features adds +0.006 [0.001, 0.012]; best system by val so far: fine-tuned features + refit probe + text, 0.802 [0.784, 0.819]. **M4b done, G4b FAIL:** text steers an attention head's focus but adds nothing detectable over late fusion (+0.004 [-0.003, 0.011]), which argues against a joint image-text fine-tune. The same head on frozen patch tokens matches the fine-tune (0.789), and fit on val, text adds +0.016 to the fine-tuned image (§9). Next: M5 (§6, pre-registered 2026-10-21): line up with published results on the standard benchmark (all frontal studies, official split), M5a on the Mac first · how to run: [`v2/README.md`](../v2/README.md) · **Branch:** `v2` (from `main`) · **Started:** 2026-10-18
+**Status:** v2.0 done (M0-M3). **G2 PASS:** the fine-tuned RAD-DINO is the image-only v2 baseline, 0.787 [0.769, 0.803] on `test_clean`. **M4 done, G4 PASS:** text written before the X-ray adds +0.016 [0.009, 0.024] to frozen image features (§9). Exploratory follow-ups: +0.009 [0.003, 0.014] on the fine-tuned image; refitting the probe on the fine-tuned features adds +0.006 [0.001, 0.012]; best system by val so far: fine-tuned features + refit probe + text, 0.802 [0.784, 0.819]. **M4b done, G4b FAIL:** text steers an attention head's focus but adds nothing detectable over late fusion (+0.004 [-0.003, 0.011]), which argues against a joint image-text fine-tune. The same head on frozen patch tokens matches the fine-tune (0.789), and fit on val, text adds +0.016 to the fine-tuned image (§9). **M5a done** (official MIMIC-CXR split, positive vs rest, like for like): every image-only run beats the published ResNet-50 (0.781-0.797 against 0.725), image + indication ties MMBT (0.798 against 0.794), and the indication alone trails BERT (0.675 against 0.704). Best run: the attention head with all pre-imaging text, 0.818 [0.803, 0.832], not like for like (§9). Next: M5b on a GPU, fine-tunes with the mean-pool and the attention head, text added by the val combiner (§6 M5b amendment) · how to run: [`v2/README.md`](../v2/README.md) · **Branch:** `v2` (from `main`) · **Started:** 2026-10-18
 
 ## 1. Goal
 
@@ -519,6 +519,53 @@ now stops when more than 0.5% of images fail to read, so a drive that drops
 mid-run can't silently shrink the benchmark. Everything else in M5 is
 unchanged.
 
+**Amendment (2026-10-22, after M5a, before any M5b run):** like for like, M5a's
+image-only runs beat ResNet-50, image + indication ties MMBT, and the
+indication alone trails BERT (§9). The attention head beat the probe by
++0.016 again, and against v2.0's fine-tune it is +0.003 [-0.007, 0.013]. Three
+changes:
+
+1. **Text on the stronger image models goes through M4b's val combiner**
+   (`v2.stack`), since a probe fit on training studies understated text on
+   fine-tuned features by about half (M4b). Each image run is stacked with two
+   text-only runs: `rad-dino_518_ctx_indication` (image + indication, like for
+   like with MMBT and Attentive) and `rad-dino_518_ctx_text_prior_labels` (all
+   pre-imaging text, item 3; reported, not like for like). The image runs are
+   `rad-dino_518_attn_h0` (frozen, on the Mac before the GPU session),
+   `rad-dino_518_ft_s0` and `rad-dino_518_ft_attn_s0` (item 2). The check, on
+   frozen features: `rad-dino_518_probe` stacked with each text run against the
+   matching concatenation (`ctx_image_indication`, `ctx_image_text_prior_labels`);
+   more than 0.005 below means the combiner loses information and its
+   estimates are lower bounds. The lineup compares a stack whose text run is
+   `indication` as image + indication.
+2. **A second fine-tune, with the attention head** (`rad-dino_518_ft_attn_s0`):
+   M5b's recipe and seed, with the mean-pool linear head replaced by `h0`'s
+   head (CLS plus the last layer's patch tokens averaged to 12 x 12; width 256,
+   4 heads, dropout 0.1, learned positions; head lr 1e-3 like M3's head). The
+   head starts at random, with its bias at the logit of each label's training
+   prevalence; its token normalization is the frozen backbone's per-dimension
+   mean and SD over 512 training studies, then fixed. It does not start from
+   M5a's trained `h0` (LP-FT, backlog 8): that would carry weights from the
+   Mac to the GPU, and the warm-up epoch (about 6,700 optimizer steps) lets the
+   head settle while the encoder's learning rate is still small. The question:
+   does attention pooling add to fine-tuning, when each alone gained about the
+   same over the probe (+0.012 and +0.015 on `test_clean`)? Reported, paired, on
+   the official test under both policies: `ft_attn_s0` minus `ft_s0`, and
+   `ft_attn_s0` minus `attn_h0`. Not a gate. It is lined up as image with
+   ResNet-50. The image model carried into later work is whichever of
+   `attn_h0`, `ft_s0` and `ft_attn_s0` scores highest on val.
+3. **Prior-study labels join the all-text recipe**, because M4b's rule fired
+   (+0.002 [0.000, 0.003] on val). A text-only arm, `text_prior_labels`, is
+   added; from M5b on, the all-text arms are `text_prior_labels` and
+   `image_text_prior_labels`. The indication arms don't change, and M5a's runs
+   are not redone.
+
+The rest of M5b stands: `ft_s0` saves its embeddings for the refit probe and
+M4's late fusion (exploratory), with `image_text_prior_labels` as the all-text
+arm. Seed 1 of both fine-tunes only if the budget allows. Compute: about 1.7
+A100-hours per fine-tune, so about 3.5 h (roughly $5-7) for seed 0 of both,
+plus uploading about 16 GB of images.
+
 **Published references** (AUROC, transcribed from the papers):
 
 | Model | Inputs | Mean over our 12 classes | Paper's macro | Protocol |
@@ -552,10 +599,10 @@ CheXpert file, where MMBT ran the CheXpert labeler on full reports itself; one
 frontal image per study; RAD-DINO pretrained on the official train images
 without labels, which is standard for this benchmark.
 
-**Compute:** preparing ~220k images takes 1 to 3 h (the drive's speed decides)
-and ~15 GB; RAD-DINO embeddings and tokens ~6 h on an Apple-silicon Mac (one
-pass, ~49 GB of tokens); probes and fusion arms 1 to 2 h; the attention heads
-1 to 2 h. M5b: about 1.7 h of an A100 per seed (~$2-3), plus
+**Compute:** preparing ~220k images takes 1 to 3 h from a fast disk (9 h from
+a USB hard drive in M5a, where reads were the limit) and ~16 GB; RAD-DINO
+embeddings and tokens ~6 h on an Apple-silicon Mac (one pass, ~49 GB of
+tokens); probes and fusion arms under 30 min; the attention heads about 2.5 h. M5b: about 1.7 h of an A100 per seed (~$2-3), plus
 uploading the images.
 
 **Done when:** `reports/lineup.md` exists for M5a (then M5b), and its rows are
@@ -730,6 +777,16 @@ Add one row per run. Don't edit old rows; add new ones.
 | 2026-10-21 | M4b | 9e62548 | rad-dino_518_ft_s1_stack_text | `test_v1`, v1 metric | 0.826 [0.810, 0.841] | 8 | |
 | 2026-10-21 | M4b | 9e62548 | rad-dino_518_probe_stack_text | `test_clean` | 0.793 [0.776, 0.810] | 9 | The check: minus `rad-dino_518_ctx_image_text` +0.002 [-0.002, 0.007], so the two-score combiner loses little. Minus `rad-dino_518_probe`: +0.019 [0.011, 0.027]. Standardized weights: image 1.12, text 0.48 |
 | 2026-10-21 | M4b | 9e62548 | rad-dino_518_probe_stack_text | `test_v1`, v1 metric | 0.811 [0.795, 0.826] | 8 | The whole M4b stage took 71 min on the Mac. The external drive dropped off the bus twice while idle; the doctor caught the stale mount before the run, which then used `caffeinate -ims` |
+| 2026-10-22 | M4b, follow-up | 46afb0a | compare | `val` | difference +0.002 [0.000, 0.003] | 12 | `rad-dino_518_ctx_image_text_prior_labels` minus `rad-dino_518_ctx_image_text`. The pre-registered rule (§6 M4b part 2) fires: the prior-label encoding joins the text recipe for later work (§6 M5b amendment). The gain is negligible |
+| 2026-10-22 | M4b, follow-up | 46afb0a | compare | `test_clean` | difference +0.003 [-0.007, 0.013] | 9 | `rad-dino_518_attn_h0` minus `rad-dino_518_ft_s1`; on val +0.002 [-0.003, 0.007]. The attention head on frozen tokens is within 0.007 below and 0.013 above the fine-tune: the match is now measured |
+| 2026-10-22 | M5 | 46afb0a | audit (benchmark) | official test 3,041 studies / 289 patients; val 1,733 / 487; train 213,357 / 63,169 | n/a | 12 (v2 and positive vs rest) | **G0 PASS** on the official split. 9,696 studies dropped (no frontal image), 0 unreadable. RAD-DINO overlap with val and test: 0. 96.1% of test studies have an indication, about MMBT's 2,920. Prepare took 9 h 10 min, bound by the USB hard drive (about 6.6 images/s); embeddings and tokens 6.1 h on MPS; 62 GB |
+| 2026-10-22 | M5 | 46afb0a | rad-dino_518_probe | official test, positive vs rest | 0.781 [0.763, 0.796] | 12 | ResNet-50 (0.725) is below ours. v2 policy 0.788 [0.770, 0.803]; val 0.815. Best C at the grid's edge for Consolidation and Pneumonia (1e-4) and Fracture (10) |
+| 2026-10-22 | M5 | 46afb0a | rad-dino_518_attn_h0 | official test, positive vs rest | 0.797 [0.781, 0.811] | 12 | ResNet-50 below ours. Minus the probe +0.016 [0.010, 0.022] (v2 policy), the same as in M4b with 9x the training studies. Head check passed (val 0.825 against 0.815). v2 policy 0.804 [0.788, 0.818]. 10 heads in 139 min on MPS |
+| 2026-10-22 | M5 | 46afb0a | rad-dino_518_ctx_image_indication | official test, positive vs rest | 0.798 [0.783, 0.812] | 12 | MMBT's inputs: **MMBT (0.794) level**, Attentive (0.751) below ours; the same on the studies with an indication. Minus `image` +0.018 [0.013, 0.024] (v2 policy). Val 0.849. Lower than MMBT on Cardiomegaly (0.795 against 0.826) and Pneumonia; higher on Lung Lesion, Fracture and Pneumothorax |
+| 2026-10-22 | M5 | 46afb0a | rad-dino_518_ctx_indication | official test, positive vs rest | 0.675 [0.659, 0.688] | 12 | **BERT (0.704) above ours**, our one like-for-like loss: TF-IDF + SVD against a fine-tuned BERT. No red flags. Post hoc, not tested: MMBT ran the labeler on full reports, which contain the indication, so some of its labels can be read off its own text input; ours come from the impression |
+| 2026-10-22 | M5 | 46afb0a | rad-dino_518_ctx_image_text | official test, positive vs rest | 0.806 [0.791, 0.819] | 12 | All three text sources, so not like for like. Minus `image` +0.026 [0.020, 0.032] (v2 policy). A prior report exists for 89% of test studies against 68% of train |
+| 2026-10-22 | M5 | 46afb0a | rad-dino_518_ctx_text | official test, positive vs rest | 0.732 [0.716, 0.746] | 12 | Text only, all sources. No red flags |
+| 2026-10-22 | M5 | 46afb0a | rad-dino_518_attn_h1 | official test, positive vs rest | 0.818 [0.803, 0.832] | 12 | Best M5a run (val 0.857); not like for like. Minus `h0` +0.023 [0.016, 0.030] (v2 policy). v2 policy 0.827 [0.812, 0.840]. The whole M5a run took about 18 h of compute, 9 of them reading the drive |
 
 ## 10. Backlog (after v2.0, one at a time)
 
@@ -758,6 +815,15 @@ Ordered by expected value per unit of cost:
 8. **LP-FT:** start the fine-tune's head from the frozen probe instead of from
    scratch. It tends to distort pretrained features less and to transfer
    better under distribution shift. Compare it paired against the v2 baseline.
+9. **A stronger indication encoder:** fine-tune a BERT-family model on the
+   indication with our labels, then add it with the val combiner. On the
+   benchmark the indication alone trails MMBT's BERT (0.675 against 0.704); this
+   tells whether the gap is our TF-IDF features or MMBT's labels (next item).
+10. **Relabel from full reports:** MMBT ran the CheXpert labeler on full
+   reports, indication included, and the labeler marks a finding positive if
+   any sentence asserts it. Labeling the official test split both ways, on the
+   Mac, would measure how much of a published text gain comes from labels the
+   indication itself produces.
 
 ## 11. Prerequisites
 
