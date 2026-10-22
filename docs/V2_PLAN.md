@@ -1,6 +1,6 @@
 # v2 Plan: Modern Foundation Models for CheXpert Classification
 
-**Status:** v2.0 done (M0-M3). **G2 PASS:** the fine-tuned RAD-DINO is the image-only v2 baseline, 0.787 [0.769, 0.803] on `test_clean`. **M4 done, G4 PASS:** text written before the X-ray adds +0.016 [0.009, 0.024] to frozen image features (§9). Exploratory follow-ups: +0.009 [0.003, 0.014] on the fine-tuned image; refitting the probe on the fine-tuned features adds +0.006 [0.001, 0.012]; best system by val so far: fine-tuned features + refit probe + text, 0.802 [0.784, 0.819]. **M4b done, G4b FAIL:** text steers an attention head's focus but adds nothing detectable over late fusion (+0.004 [-0.003, 0.011]), which argues against a joint image-text fine-tune. The same head on frozen patch tokens matches the fine-tune (0.789), and fit on val, text adds +0.016 to the fine-tuned image (§9). **M5a done** (official MIMIC-CXR split, positive vs rest, like for like): every image-only run beats the published ResNet-50 (0.781-0.797 against 0.725), image + indication ties MMBT (0.798 against 0.794), and the indication alone trails BERT (0.675 against 0.704). Best run: the attention head with all pre-imaging text, 0.818 [0.803, 0.832], not like for like (§9). **M5 done:** like for like on the official split, a fine-tuned RAD-DINO plus the indication beats MMBT, 0.815 [0.801, 0.829] against 0.794 (val combiner, a lower bound; one seed). Fine-tuning on 213k studies adds +0.010 over the frozen attention head, and after fine-tuning the attention head no longer beats mean pooling (+0.002 [-0.002, 0.006]). Best number so far: 0.825 with all pre-imaging text (exploratory). Next: to be decided (§10) · how to run: [`v2/README.md`](../v2/README.md) · **Branch:** `v2` (from `main`) · **Started:** 2026-10-18
+**Status:** v2.0 done (M0-M3). **G2 PASS:** the fine-tuned RAD-DINO is the image-only v2 baseline, 0.787 [0.769, 0.803] on `test_clean`. **M4 done, G4 PASS:** text written before the X-ray adds +0.016 [0.009, 0.024] to frozen image features (§9). Exploratory follow-ups: +0.009 [0.003, 0.014] on the fine-tuned image; refitting the probe on the fine-tuned features adds +0.006 [0.001, 0.012]; best system by val so far: fine-tuned features + refit probe + text, 0.802 [0.784, 0.819]. **M4b done, G4b FAIL:** text steers an attention head's focus but adds nothing detectable over late fusion (+0.004 [-0.003, 0.011]), which argues against a joint image-text fine-tune. The same head on frozen patch tokens matches the fine-tune (0.789), and fit on val, text adds +0.016 to the fine-tuned image (§9). **M5a done** (official MIMIC-CXR split, positive vs rest, like for like): every image-only run beats the published ResNet-50 (0.781-0.797 against 0.725), image + indication ties MMBT (0.798 against 0.794), and the indication alone trails BERT (0.675 against 0.704). Best run: the attention head with all pre-imaging text, 0.818 [0.803, 0.832], not like for like (§9). **M5 done:** like for like on the official split, a fine-tuned RAD-DINO plus the indication beats MMBT, 0.815 [0.801, 0.829] against 0.794 (val combiner, a lower bound; one seed). Fine-tuning on 213k studies adds +0.010 over the frozen attention head, and after fine-tuning the attention head no longer beats mean pooling (+0.002 [-0.002, 0.006]). Best number so far: 0.825 with all pre-imaging text (exploratory). Next: M6 (§6, pre-registered 2026-10-22): BERT-family encoders for the pre-imaging text, general against medical (gate G6), then the CheXpert test set · how to run: [`v2/README.md`](../v2/README.md) · **Branch:** `v2` (from `main`) · **Started:** 2026-10-18
 
 ## 1. Goal
 
@@ -607,6 +607,78 @@ uploading the images.
 
 **Done when:** `reports/lineup.md` exists for M5a (then M5b), and its rows are
 logged in §9.
+
+### M6: A language model for the pre-imaging text (written 2026-10-22, before any M6 run)
+
+**Question:** on the benchmark (M5), does a BERT-family encoder of the text
+written before the X-ray beat M4's TF-IDF features, alone and with the image?
+And does pretraining on medical text ("medical context") beat a general BERT?
+M5 left one like-for-like loss: our TF-IDF indication model scores 0.675
+against MMBT's fine-tuned BERT at 0.704.
+
+**Encoders** (Hugging Face, revisions pinned):
+
+| Name | Repository @ revision | Pretrained on |
+|---|---|---|
+| `bert` | google-bert/bert-base-uncased @ 86b5e09 | Wikipedia and books; MMBT's backbone |
+| `biomedbert` | microsoft/BiomedNLP-BiomedBERT-base-uncased-abstract-fulltext @ e1354b7 | PubMed abstracts and full-text articles |
+| `clinicalbert` | emilyalsentzer/Bio_ClinicalBERT @ d5892b3 | BioBERT, then MIMIC-III clinical notes |
+
+Caveat, fixed now: MIMIC-III's notes come from the same hospital and overlap
+MIMIC-CXR's years (2011-2012), so `clinicalbert` may have read some of these
+patients' reports as unlabeled text in pretraining, as RAD-DINO saw the
+training images. Its results carry that flag, and a large lead for it alone is
+read with suspicion.
+
+**Two ways to use each encoder:**
+- **Frozen:** for each text source, the mean of the last layer's token
+  embeddings (indication and chief complaint cut at 128 tokens, the prior
+  report at 512), standardized on train, plus a presence indicator. It
+  replaces that source's TF-IDF block in M4's probe (C chosen on val). Arms:
+  `indication`, `text_prior_labels`, `image_indication`,
+  `image_text_prior_labels`, and `image_indication` with both blocks (image +
+  TF-IDF + BERT).
+- **Fine-tuned:** the encoder and a linear head on its [CLS] token, trained on
+  the indication alone to predict the 12 findings. Masked BCE (v2 policy),
+  AdamW (lr 2e-5, weight decay 0.01), batch 32, 64 tokens, 3 epochs (10%
+  warm-up, then cosine), best epoch on val, seed 0. This is MMBT's BERT
+  baseline, retrained on our labels.
+
+**Into the image:** every text-only run, frozen or fine-tuned, is added to the
+best image model, `rad-dino_518_ft_attn_s0`, through M5b's val combiner, and to
+the frozen probe for the combiner's check. Image + indication stacks are lined
+up with MMBT; fine-tuned indication runs with MMBT's BERT.
+
+**Gate G6 (medical context):** on the indication alone, the fine-tuned medical
+encoder with the higher val score (`biomedbert` or `clinicalbert`) minus the
+fine-tuned `bert`, macro AUROC on the official test under the v2 policy,
+paired. PASS if the 95% interval is above 0.
+
+**Reported comparisons** (paired, official test, both policies; not gates):
+1. Fine-tuned `bert` minus TF-IDF, on the indication: is our text gap the
+   encoder?
+2. The fused image + indication run with the best val score minus
+   `rad-dino_518_ft_attn_s0` + TF-IDF indication (0.815): does a better text
+   model move the like-for-like result?
+3. Frozen image + TF-IDF + BERT indication minus frozen image + TF-IDF
+   indication: does BERT add on top of TF-IDF?
+4. Per class, our fine-tuned `bert` against MMBT's BERT, Cardiomegaly first:
+   if MMBT's labels draw on the indication, its BERT should lead most on the
+   findings that indications name.
+
+**Adoption rule:** the text representation for later work is the one whose
+image + indication stack on `ft_attn_s0` scores highest on val; test numbers
+don't decide it.
+
+**Red flags:** M4's rule applies to every language-model text-only run: at or
+above the image, or a class above 0.90, means stop and inspect.
+
+**Compute (Mac, no GPU):** frozen embeddings about 20-30 min per encoder,
+probes about 20 min, fine-tuning about 45-60 min; combiners and the lineup take
+minutes. About 4-5 h in all.
+
+**Done when:** `reports/m6_text.md` (G6 and the comparisons) and the updated
+`reports/lineup.md` exist, and their rows are logged in §9.
 
 ## 7. Code
 
