@@ -1,5 +1,5 @@
 """
-Real pretrained encoders (downloads ~1.5 GB). Off by default:
+Real pretrained encoders (downloads ~3 GB with the M6 text encoders). Off by default:
 
     V2_TEST_NETWORK=1 pytest tests/v2/test_real_models.py
     V2_TEST_NETWORK=1 V2_TEST_MEDSIGLIP=1 pytest ...   # needs accepted MedSigLIP terms + huggingface-cli login
@@ -84,3 +84,21 @@ def test_medsiglip_loads():
         txt = enc.encode_text(["pleural effusion", "no pleural effusion"])
     assert img.shape == (1, enc.dim) and txt.shape == (2, enc.dim)
     assert torch.isfinite(img).all() and torch.isfinite(txt).all()
+
+
+@pytest.mark.parametrize("name", ["bert", "biomedbert", "clinicalbert"])
+def test_text_encoders_load_at_their_pinned_revisions(name):
+    """M6: each encoder loads, puts [CLS] first, pads with 0 and gives 768-wide embeddings, in input order."""
+    from v2.textenc import embed_texts, load_text_encoder
+    from v2.textft import TextClassifier
+
+    enc = load_text_encoder(name)
+    texts = ["Shortness of breath, evaluate for pneumonia.", "Fall.", " ".join(["pleural effusion"] * 400)]
+    batch = enc.tokenize(texts, 64)
+    assert batch["input_ids"].shape == (3, 64)                                      # the long one is cut at 64
+    assert (batch["input_ids"][:, 0] == enc.tokenizer.cls_token_id).all() and enc.tokenizer.pad_token_id == 0
+    assert enc.token_counts(texts)[2] > 512
+    emb = embed_texts(enc, texts, 512, 2, torch.device("cpu"))
+    assert emb.shape == (3, 768) and np.isfinite(emb).all()
+    assert np.allclose(embed_texts(enc, texts[1:2], 512, 1, torch.device("cpu"))[0], emb[1], atol=1e-4)
+    assert TextClassifier(enc)(batch["input_ids"], batch["attention_mask"]).shape == (3, 12)

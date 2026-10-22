@@ -61,5 +61,34 @@ def bigger(tmp_path_factory) -> Path:
     return out
 
 
+@pytest.fixture(scope="session")
+def bench(synth, tmp_path_factory) -> Path:
+    """M5's benchmark directory on the synthetic tree, built as run.sh bench and bench_stack do (pixel encoder)."""
+    from v2 import attend, context, embed, fuse, probe, stack
+
+    out = tmp_path_factory.mktemp("v2bench")
+    prepare_data.main(["--mimic-cxr-jpg", str(synth.mimic_root), "--out", str(out), "--population", "all",
+                       "--split-scheme", "official", "--image-format", "jpg", "--image-size", "48", "--workers", "0",
+                       "--min-count", "3", "--rad-dino-list", str(synth.rad_dino_list)])
+    # One pass for the embeddings and the tokens, as run.sh bench does (§6 M5 amendment).
+    embed.main(["--model", "test-pixels", "--tokens", "12", "--with-pooled", "--out", str(out), "--workers", "0"])
+    emb = out / "embeddings" / "test-pixels_48.npz"
+    probe.main(["--embeddings", str(emb), "--out", str(out), "--jobs", "1"])
+    context.main(["--out", str(out), "--reports", str(synth.reports), "--mimic-iv-ed", str(synth.mimic_iv_ed),
+                  "--mimic-iv", str(synth.mimic_iv), "--mimic-cxr-jpg", str(synth.mimic_root)])
+    fuse.main(["--embeddings", str(emb), "--out", str(out), "--arms", "image,image_indication,image_text,indication,text",
+               "--n-boot", "20", "--jobs", "1"])
+    attend.main(["--tokens", str(out / "embeddings" / "test-pixels_48_tokens12.npy"), "--out", str(out),
+                 "--arms", "h0,h1", "--seeds", "0", "--max-epochs", "6", "--batch-size", "16", "--lr", "3e-3",
+                 "--n-boot", "20", "--device", "cpu"])
+    # M5b amendment, as run.sh bench_stack does: prior labels in the all-text arms, then the val combiner.
+    fuse.main(["--embeddings", str(emb), "--out", str(out), "--arms", "text_prior_labels,image_text_prior_labels",
+               "--n-boot", "20", "--jobs", "1"])
+    pairs = [arg for img in ("probe", "attn_h0") for text in ("indication", "text_prior_labels")
+             for arg in ("--pair", f"test-pixels_48_{img}", f"test-pixels_48_ctx_{text}")]
+    stack.main([*pairs, "--out", str(out), "--n-boot", "20"])
+    return out
+
+
 def network_enabled() -> bool:
     return os.environ.get("V2_TEST_NETWORK") == "1"

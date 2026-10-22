@@ -7,8 +7,8 @@ Wiring check: the whole v2 pipeline on synthetic data, in about a minute on CPU.
 Builds a synthetic MIMIC-CXR-JPG tree with a planted signal (v2.synth), then
 runs prepare_data -> embed -> probe -> zero_shot -> finetune (+ resume) ->
 context + fuse -> M4b (tokens, attend, prior labels, stack) -> M5 (the
-benchmark directory and its lineup) -> evaluate with test-size encoders,
-through the same
+benchmark directory and its lineup) -> M6 (a language model's text features,
+frozen and fine-tuned) -> evaluate with test-size encoders, through the same
 command-line entry points you will use on real data. It passes only if every
 stage runs AND the planted signal is recovered end to end: with the
 "test-pixels" encoder, test_clean macro AUROC must be >= 0.9, and must fall
@@ -20,8 +20,9 @@ the planted signal from cached tokens, and the prior-label arm fed each study's
 own labels instead of its prior study's must score > 0.95, while the honest arm
 stays near chance (synthetic studies are independent). For M5, the benchmark
 directory must hold the official split and refuse to replace the v2 manifest,
-and the planted signal must reach the lineup. No downloads, no MIMIC data
-needed.
+and the planted signal must reach the lineup. For M6, the text fine-tune fed
+whole reports must score > 0.9 (proof that it can learn from text at all). No
+downloads, no MIMIC data needed.
 """
 
 from __future__ import annotations
@@ -39,7 +40,8 @@ from typing import Callable, Optional
 import numpy as np
 import pandas as pd
 
-from . import attend, context, embed, evaluate, finetune, fuse, lineup, prepare_data, probe, stack, zero_shot
+from . import attend, context, embed, evaluate, finetune, fuse, lineup, prepare_data, probe, stack, textenc, textft
+from . import zero_shot
 from .common import CHEXPERT_COLUMNS, load_manifest, mimic_csv, setup_logging
 from .synth import make_dataset
 
@@ -236,6 +238,37 @@ def run_checks(work: Path, patients: int = 400) -> list[tuple[str, bool, str]]:
                 f"{row['ours']:.3f} vs ResNet-50's {row['published_mean']:.3f} ({row['verdict'].strip('*')})")
 
     stage("M5 benchmark + lineup", m5)
+
+    def m6() -> str:
+        bench = work / "v2_bench"
+        out_b = ["--out", str(bench)]
+        textenc.main(["--encoder", "tiny-bert", "--device", "cpu", *out_b])
+        fuse.main(["--embeddings", str(bench / "embeddings" / "test-pixels_48.npz"), "--text-encoder", "tiny-bert",
+                   "--arms", "indication,image_indication", "--n-boot", "50", "--jobs", "2", *out_b])
+        # A few hundred training studies need a far higher learning rate than the real recipe's.
+        ft = ["--encoder", "tiny-bert", "--epochs", "15", "--lr", "3e-3", "--batch-size", "8", "--device", "cpu", *out_b]
+        run = textft.main(ft)
+        honest = evaluate._get(evaluate.evaluate_run(bench, run, n_boot=50), "test_clean", "v2")["macro_auroc"]
+        # Negative control: the same fine-tune fed whole reports, findings included, must look far too good.
+        ctx = pd.read_parquet(bench / "context.parquet")
+        reports = context.Reports(paths.reports)
+        whole = [reports.get(subject, study) or "" for subject, study in zip(ctx["subject_id"], ctx["study_id"])]
+        reports.close()
+        leaky = bench / "context_leaky.parquet"
+        ctx.assign(indication=whole).to_parquet(leaky, index=False)
+        textft.main([*ft, "--context", str(leaky), "--run", "leaky_ft"])
+        leaked = evaluate._get(evaluate.evaluate_run(bench, "leaky_ft", n_boot=50), "test_clean", "v2")["macro_auroc"]
+        for path in [*(bench / "predictions").glob("leaky_ft.*"), leaky]:
+            path.unlink(missing_ok=True)
+        assert leaked > 0.9, f"whole reports scored only {leaked:.3f}: the text fine-tune can't learn from text"
+        stack.main(["--pair", "test-pixels_48_attn_h0", run, "--n-boot", "50", *out_b])
+        report = textft.write_report(bench, "test-pixels_48", "test-pixels_48_attn_h0", n_boot=50)
+        assert "Gate G6" in report["path"].read_text()
+        res = lineup.main(["--n-boot", "50", *out_b])
+        assert any((c["run"], c["published"]) == (run, "BERT") for c in res["compared"]), "the fine-tune is not lined up"
+        return f"fine-tuned on indications {honest:.3f}, on whole reports {leaked:.3f}; G6 {report['gate']['verdict']}"
+
+    stage("M6 text encoder + fine-tune (leak trap)", m6)
 
     def reports() -> str:
         text = evaluate.summarize(out, n_boot=100)

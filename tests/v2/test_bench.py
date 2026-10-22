@@ -6,7 +6,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from v2 import attend, context, embed, evaluate, fuse, lineup, prepare_data, probe, stack
+from v2 import evaluate, lineup, prepare_data, probe
 from v2.common import LABELS, TEST, TRAIN, VAL, load_manifest, targets_and_mask
 
 
@@ -14,32 +14,6 @@ def test_u0_counts_everything_but_positives_as_negative():
     raw = np.array([[1.0], [0.0], [-1.0], [np.nan]])
     y, m = targets_and_mask(raw, "u0")
     assert y[:, 0].tolist() == [1.0, 0.0, 0.0, 0.0] and m.all()
-
-
-@pytest.fixture(scope="module")
-def bench(synth, tmp_path_factory):
-    out = tmp_path_factory.mktemp("v2bench")
-    prepare_data.main(["--mimic-cxr-jpg", str(synth.mimic_root), "--out", str(out), "--population", "all",
-                       "--split-scheme", "official", "--image-format", "jpg", "--image-size", "48", "--workers", "0",
-                       "--min-count", "3", "--rad-dino-list", str(synth.rad_dino_list)])
-    # One pass for the embeddings and the tokens, as run.sh bench does (§6 M5 amendment).
-    embed.main(["--model", "test-pixels", "--tokens", "12", "--with-pooled", "--out", str(out), "--workers", "0"])
-    emb = out / "embeddings" / "test-pixels_48.npz"
-    probe.main(["--embeddings", str(emb), "--out", str(out), "--jobs", "1"])
-    context.main(["--out", str(out), "--reports", str(synth.reports), "--mimic-iv-ed", str(synth.mimic_iv_ed),
-                  "--mimic-iv", str(synth.mimic_iv), "--mimic-cxr-jpg", str(synth.mimic_root)])
-    fuse.main(["--embeddings", str(emb), "--out", str(out), "--arms", "image,image_indication,image_text,indication,text",
-               "--n-boot", "20", "--jobs", "1"])
-    attend.main(["--tokens", str(out / "embeddings" / "test-pixels_48_tokens12.npy"), "--out", str(out),
-                 "--arms", "h0,h1", "--seeds", "0", "--max-epochs", "6", "--batch-size", "16", "--lr", "3e-3",
-                 "--n-boot", "20", "--device", "cpu"])
-    # M5b amendment, as run.sh bench_stack does: prior labels in the all-text arms, then the val combiner.
-    fuse.main(["--embeddings", str(emb), "--out", str(out), "--arms", "text_prior_labels,image_text_prior_labels",
-               "--n-boot", "20", "--jobs", "1"])
-    pairs = [arg for img in ("probe", "attn_h0") for text in ("indication", "text_prior_labels")
-             for arg in ("--pair", f"test-pixels_48_{img}", f"test-pixels_48_ctx_{text}")]
-    stack.main([*pairs, "--out", str(out), "--n-boot", "20"])
-    return out
 
 
 def test_official_scheme_follows_the_official_split(bench, synth):

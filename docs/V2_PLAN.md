@@ -677,6 +677,14 @@ above the image, or a class above 0.90, means stop and inspect.
 probes about 20 min, fine-tuning about 45-60 min; combiners and the lineup take
 minutes. About 4-5 h in all.
 
+*Correction (2026-10-22, before any M6 run; compute only, the analysis is
+unchanged):* the probes were underestimated. Each frozen source is 768
+features against TF-IDF's 128, and at 3,150 features a probe took 3.8x as long
+as at 1,200 (measured on synthetic data). Scaled from M5a's 27 min, the frozen
+arms take about 1-2 h per encoder, and the fine-tunes 45-90 min each. About
+8-12 h in all: run with `TOTAL_HOURS=16`. `run.sh bench_text` runs the three
+fine-tunes first, so a time cut can drop frozen arms but never G6's inputs.
+
 **Done when:** `reports/m6_text.md` (G6 and the comparisons) and the updated
 `reports/lineup.md` exist, and their rows are logged in §9.
 
@@ -700,6 +708,8 @@ v2/
   attend.py         # M4b part 1: attention heads over cached patch tokens, gate G4b
   stack.py          # M4b part 3: per-class combiner of two runs' scores, fit on val
   lineup.py         # M5: our runs next to published MIMIC-CXR results, scored the same way
+  textenc.py        # M6: BERT-family encoders (pinned), frozen text embeddings per source
+  textft.py         # M6: fine-tune an encoder on one text source; reports/m6_text.md and gate G6
   evaluate.py       # metrics, bootstrap CIs, paired comparisons, reports, gates
   doctor.py         # setup check for any machine
   synth.py          # synthetic MIMIC-CXR-JPG tree with a planted signal (tests)
@@ -717,7 +727,7 @@ Conventions:
   place metrics are computed, so every model is scored identically.
 - `embed` and `finetune` have `--smoke`: a handful of real studies, minutes on
   CPU, to test a machine. `python -m v2.smoke` runs every stage on synthetic
-  data in about 30 s.
+  data in about 2 min.
 - Paths come from the existing `.env` (`MIMIC_CXR_JPG_PATH`, `OUTPUT_PATH`, plus `COHORT_DIR`).
 - transformers is pinned in `v2/requirements.txt`: DINOv2's position-embedding
   interpolation (any size other than 518 px) differs between 4.x and 5.x, so

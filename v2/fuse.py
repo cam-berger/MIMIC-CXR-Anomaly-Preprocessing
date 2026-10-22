@@ -21,7 +21,10 @@ CheXpert labels (one-hot, 57 features), alone and with the image:
     text_prior_labels                       all text with them, text only (§6 M5b amendment)
 
 Text features per source: TF-IDF over word 1-2-grams and a truncated SVD, both
-fit on train only, plus a presence indicator. Then it checks the leakage red
+fit on train only, plus a presence indicator. With --text-encoder ENCODER (M6) a
+language model's frozen embeddings from v2.textenc take TF-IDF's place, and
+--text-encoder tfidf,ENCODER uses both; run names then end in _ENCODER or
+_tfidf-ENCODER. Then it checks the leakage red
 flags, runs gate G4 and writes reports/m4_{prefix}.md (m4b_{prefix}.md when M4b arms
 are among the arms). In M5's benchmark directory the report has no gate: the
 comparisons with published results are in reports/lineup.md. Only aggregates are
@@ -48,6 +51,7 @@ from .context import PRIOR_LABEL_COLUMNS, TEXT_SOURCES
 from .embed import load_npz
 from .evaluate import _get, compare_runs, evaluate_run, fmt, fmt_ci, split_scheme
 from .probe import DEFAULT_CS, fit_probe, split_xy
+from .textenc import TEXT_ENCODERS, lm_block
 
 logger = logging.getLogger("v2.fuse")
 
@@ -158,19 +162,23 @@ def prior_label_block(ctx: pd.DataFrame) -> np.ndarray:
     return np.stack(cols + [found], axis=1).astype(np.float64)
 
 
-def red_flags(clean: dict) -> list[str]:
-    """Leakage red flags (§6 M4): a text-only arm at or above the image, or a measurable class above 0.90."""
+def text_flags(name: str, res: Optional[dict], ref: Optional[dict]) -> list[str]:
+    """M4's red flags for one text-only run: at or above the image run `ref`, or a measurable class above 0.90."""
+    if res is None:
+        return []
     flags = []
-    ref = clean.get(REFERENCE)
-    for arm, res in clean.items():
-        if ARMS[arm].image or res is None:
-            continue
-        if ref is not None and np.isfinite(res["macro_auroc"]) and res["macro_auroc"] >= ref["macro_auroc"]:
-            flags.append(f"text-only `{arm}` ({fmt(res['macro_auroc'])}) is not below `image` ({fmt(ref['macro_auroc'])})")
-        for c in res["per_class"]:
-            if c["measurable"] and np.isfinite(c["auroc"]) and c["auroc"] > RED_FLAG_CLASS_AUROC:
-                flags.append(f"text-only `{arm}`: {c['label']} AUROC {c['auroc']:.3f} > {RED_FLAG_CLASS_AUROC}")
+    if ref is not None and np.isfinite(res["macro_auroc"]) and res["macro_auroc"] >= ref["macro_auroc"]:
+        flags.append(f"text-only `{name}` ({fmt(res['macro_auroc'])}) is not below `image` ({fmt(ref['macro_auroc'])})")
+    for c in res["per_class"]:
+        if c["measurable"] and np.isfinite(c["auroc"]) and c["auroc"] > RED_FLAG_CLASS_AUROC:
+            flags.append(f"text-only `{name}`: {c['label']} AUROC {c['auroc']:.3f} > {RED_FLAG_CLASS_AUROC}")
     return flags
+
+
+def red_flags(clean: dict) -> list[str]:
+    """Leakage red flags (§6 M4) on every text-only arm, against the `image` arm."""
+    ref = clean.get(REFERENCE)
+    return [flag for arm, res in clean.items() if not ARMS[arm].image for flag in text_flags(arm, res, ref)]
 
 
 def reproduces_probe(out_dir: Path, image_run: str, probe_run: str) -> Optional[float]:
@@ -187,19 +195,21 @@ def reproduces_probe(out_dir: Path, image_run: str, probe_run: str) -> Optional[
     return float(np.max(np.abs(both[cols].to_numpy() - both[[f"{c}_m1" for c in cols]].to_numpy())))
 
 
-def gate_report(out_dir: Path, prefix: str, runs: dict, n_boot: int, features: str = "frozen") -> dict:
+def gate_report(out_dir: Path, prefix: str, runs: dict, n_boot: int, features: str = "frozen",
+                suffix: str = "") -> dict:
     """
     Red flags, paired comparisons against `image` on test_clean and gate G4; writes reports/m4_{prefix}.md.
     G4 is defined on frozen image features. On fine-tuned ones the same comparison is exploratory.
     With M4b's prior-label arms it writes reports/m4b_{prefix}.md instead: no G4, and the M4 arms its
-    comparisons need are read from M4's predictions when this call didn't fit them.
+    comparisons need are read from M4's predictions when this call didn't fit them. `suffix` names the text
+    encoder of the runs (M6): their report gets it too, and the `image` arm they're compared with is the TF-IDF one.
     """
     m4b = any(arm in M4B_ARMS for arm in runs)
     bench = split_scheme(out_dir) == "official"  # M5: test_clean is the official test split, test_v1 is empty
     borrowed = {}
-    if m4b:
+    if m4b or suffix:
         for arm in (REFERENCE, *(b for _, b in PRIOR_LABEL_CMPS)):
-            run = f"{prefix}_ctx_{arm}"
+            run = f"{prefix}_ctx_{arm}" + ("" if arm == REFERENCE else suffix)
             if arm not in runs and (Path(out_dir) / "predictions" / f"{run}.parquet").exists():
                 borrowed[arm] = run
         runs = {**borrowed, **runs}
@@ -233,9 +243,9 @@ def gate_report(out_dir: Path, prefix: str, runs: dict, n_boot: int, features: s
     drift = reproduces_probe(out_dir, runs[REFERENCE], f"{prefix}_probe") if REFERENCE in runs else None
 
     gate = "G4" if features == "frozen" else "Text gain on fine-tuned features (exploratory, not G4)"
-    title = f"# M4b: prior-study labels ({prefix})" if m4b else f"# M4: pre-imaging text + image ({prefix})"
+    title = f"# M4b: prior-study labels ({prefix}{suffix})" if m4b else f"# M4: pre-imaging text + image ({prefix}{suffix})"
     if bench:
-        title = f"# M5: text arms on the benchmark ({prefix})"
+        title = f"# M5: text arms on the benchmark ({prefix}{suffix})"
     lines = [title, "", f"Macro AUROC on {'the official test split' if bench else 'test_clean'}; paired differences "
              "against `image` (docs/V2_PLAN.md §6 " + ("M4b part 2)." if m4b else "M4)."), ""]
     if features != "frozen":
@@ -276,7 +286,7 @@ def gate_report(out_dir: Path, prefix: str, runs: dict, n_boot: int, features: s
                   "than the patient."]
     rep_dir = Path(out_dir) / "reports"
     rep_dir.mkdir(parents=True, exist_ok=True)
-    path = rep_dir / f"{'m4b' if m4b else 'm4'}_{prefix}.md"
+    path = rep_dir / f"{'m4b' if m4b else 'm4'}_{prefix}{suffix}.md"
     path.write_text("\n".join(lines) + "\n")
     if bench:
         verdict = "not a gate here: G4 is defined on the v2 cohort"
@@ -294,6 +304,9 @@ def main(argv: Optional[list[str]] = None) -> None:
     parser.add_argument("--run", help="Run-name prefix (default: {embeddings stem})")
     parser.add_argument("--arms", help=f"Comma-separated subset of: {', '.join(ARMS)} "
                                        f"(default: all but the M4b arms {', '.join(M4B_ARMS)})")
+    parser.add_argument("--text-encoder", default="tfidf",
+                        help="tfidf (M4), a v2.textenc encoder whose frozen embeddings replace TF-IDF (M6), or "
+                             "tfidf,ENCODER for both")
     parser.add_argument("--jobs", type=int, default=min(12, os.cpu_count() or 1))
     parser.add_argument("--n-boot", type=int, default=1000)
     parser.add_argument("-v", "--verbose", action="store_true")
@@ -307,6 +320,17 @@ def main(argv: Optional[list[str]] = None) -> None:
     unknown = [a for a in arms if a not in ARMS]
     if unknown:
         raise SystemExit(f"Unknown arms {unknown}; choose from {list(ARMS)}")
+    encoders = [e.strip() for e in args.text_encoder.split(",")]
+    if any(e != "tfidf" and e not in TEXT_ENCODERS for e in encoders):
+        raise SystemExit(f"Unknown text encoder in {args.text_encoder!r}: tfidf or one of {sorted(TEXT_ENCODERS)}")
+    suffix = "" if encoders == ["tfidf"] else "_" + "-".join(encoders)
+    if suffix:  # arms without text are the same with any encoder: they're the TF-IDF runs
+        textless = [a for a in arms if not ARMS[a].sources]
+        if textless:
+            logger.info("Arms %s use no text, so --text-encoder doesn't change them: skipped", ", ".join(textless))
+        arms = [a for a in arms if ARMS[a].sources]
+        if not arms:
+            raise SystemExit("--text-encoder changes only arms with text, and none was asked for")
 
     manifest = load_manifest(out_dir)
     ids, emb, meta = load_npz(Path(args.embeddings))
@@ -317,12 +341,17 @@ def main(argv: Optional[list[str]] = None) -> None:
     ctx = ctx.reindex(ids).rename_axis("study_id").reset_index()
     train = (manifest.set_index("study_id")["split"].reindex(ids) == TRAIN).to_numpy()
 
+    needed = {src for arm in arms for src in ARMS[arm].sources}  # features only for the sources the arms use
     blocks, available = {}, {}
     for src in TEXT_SOURCES:
         available[src] = bool(ctx[src].fillna("").str.strip().ne("").any())
-        if available[src]:
-            blocks[src] = text_block(ctx[src], train)
-            logger.info("Text features for %s: %s", src, blocks[src][1])
+        if not (available[src] and src in needed):
+            continue
+        parts = {e: text_block(ctx[src], train) if e == "tfidf" else lm_block(out_dir, e, src, ids, train)
+                 for e in encoders}
+        blocks[src] = parts["tfidf"] if not suffix else \
+            (np.concatenate([b for b, _ in parts.values()], axis=1), {e: s for e, (_, s) in parts.items()})
+        logger.info("Text features for %s: %s", src, blocks[src][1])
     structured = structured_block(ctx, train)
     prior_block = None
     if any(ARMS[arm].prior_labels for arm in arms):
@@ -352,17 +381,18 @@ def main(argv: Optional[list[str]] = None) -> None:
         (tr_rows, X_tr), (va_rows, X_va), (te_rows, X_te) = parts[TRAIN], parts[VAL], parts[TEST]
         probe = fit_probe(X_tr, label_matrix(tr_rows), X_va, label_matrix(va_rows), DEFAULT_CS, args.jobs)
         rows = pd.concat([va_rows, te_rows], ignore_index=True)
-        run = f"{prefix}_ctx_{arm}"
+        run = f"{prefix}_ctx_{arm}{suffix}"
+        milestone = "M6" if suffix else "M4b" if arm in M4B_ARMS else "M4"
         write_predictions(out_dir, run, rows["study_id"], rows["split"], probe.predict(np.concatenate([X_va, X_te])), {
-            "kind": "fuse", "milestone": "M4b" if arm in M4B_ARMS else "M4", "arm": arm, "image": use_image,
-            "sources": list(sources), "structured": use_struct, "prior_labels": use_prior,
+            "kind": "fuse", "milestone": milestone, "arm": arm, "image": use_image, "text_encoder": args.text_encoder,
+            "stack_tag": f"{arm}{suffix}", "sources": list(sources), "structured": use_struct, "prior_labels": use_prior,
             "embeddings": str(args.embeddings), "context": str(ctx_path),
             **(image_meta if use_image else {"encoder": None}),
             "text_features": {s: blocks[s][1] for s in sources}, "per_label": probe.summary(),
         })
         runs[arm] = run
 
-    report = gate_report(out_dir, prefix, runs, args.n_boot, features)
+    report = gate_report(out_dir, prefix, runs, args.n_boot, features, suffix)
     for flag in report["flags"]:
         logger.warning("RED FLAG: %s", flag)
     g4 = report["g4"]

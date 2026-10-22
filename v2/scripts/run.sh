@@ -21,6 +21,9 @@
 #          and the attention head (BENCH_HEADS), seeds BENCH_SEEDS (default 0); a smoke run of each first
 #   bench_stack  M5b on the Mac: text on every image run through the val combiner (h0 now, the fine-tunes once
 #          copied back), prior-label text arms, M4 fusion on the mean fine-tune's features, lineup and summary
+#   bench_text  M6 on the Mac: BERT-family encoders for the pre-imaging text (TEXT_ENCODERS, default bert
+#          biomedbert clinicalbert): a fine-tune on the indication, frozen embeddings and probes, the val
+#          combiner with the best image model, reports/m6_text.md (gate G6) and the lineup; 8-12 h (TOTAL_HOURS=16)
 #   eval   reports for every run + reports/summary.md with gates G1, G2, G4 and G4b
 #   gpu    smoke m1 m2 m3 eval
 #
@@ -48,7 +51,7 @@ for arg in "$@"; do
 done
 for stage in "${stages[@]}"; do
   case "$stage" in
-    m0|smoke|m1|m2|m3|m4|m4b|bench|bench_ft|bench_stack|eval) ;;
+    m0|smoke|m1|m2|m3|m4|m4b|bench|bench_ft|bench_stack|bench_text|eval) ;;
     *) echo "Unknown stage: $stage (see the header of $0)" >&2; exit 2 ;;
   esac
 done
@@ -271,6 +274,43 @@ stage_bench_stack() {  # docs/V2_PLAN.md §6 M5b amendment, on the Mac: text on 
   run bench_lineup "$PY" -m v2.lineup --out "$BENCH_OUT"
   run bench_eval "$PY" -m v2.evaluate --all --out "$BENCH_OUT"
   echo "Lineup: $BENCH_OUT/reports/lineup.md; combiners: $BENCH_OUT/reports/m5_stack.md"
+}
+
+stage_bench_text() {  # docs/V2_PLAN.md §6 M6, on the Mac, after bench_stack
+  bench_dir_ok
+  local p=rad-dino_518 pred="$BENCH_OUT/predictions" emb="$BENCH_OUT/embeddings/rad-dino_518.npz" enc img pairs=()
+  local encoders=${TEXT_ENCODERS:-bert biomedbert clinicalbert}
+  [ -f "$pred/${p}_ctx_indication.parquet" ] || {
+    echo "!!! bench_text needs the bench stage's text arms (run bench with the M4 sources set)" >&2; exit 1; }
+  # The fine-tunes first: gate G6 needs them, so a TOTAL_HOURS cut can only lose frozen arms. A finished one is kept.
+  for enc in $encoders; do
+    [ -f "$pred/${enc}_ft_indication_s0.parquet" ] || \
+      run --hours 4 "text_ft_$enc" "$PY" -m v2.textft --encoder "$enc" --out "$BENCH_OUT"
+  done
+  for enc in $encoders; do
+    run --hours 3 "text_embed_$enc" "$PY" -m v2.textenc --encoder "$enc" --out "$BENCH_OUT"
+    run --hours 5 "text_fuse_$enc" "$PY" -m v2.fuse --embeddings "$emb" --out "$BENCH_OUT" --text-encoder "$enc" \
+      --arms indication,image_indication,text_prior_labels,image_text_prior_labels
+    run --hours 2 "text_fuse_tfidf_$enc" "$PY" -m v2.fuse --embeddings "$emb" --out "$BENCH_OUT" \
+      --text-encoder "tfidf,$enc" --arms image_indication
+  done
+  # M5b's pairs again, so reports/m5_stack.md stays complete, then each encoder's text runs.
+  for img in probe attn_h0 ft_s0 ft_attn_s0; do
+    [ -f "$pred/${p}_$img.parquet" ] || continue
+    pairs+=(--pair "${p}_$img" "${p}_ctx_indication" --pair "${p}_$img" "${p}_ctx_text_prior_labels")
+    [ "$img" = probe ] || [ "$img" = ft_attn_s0 ] || continue
+    for enc in $encoders; do
+      for text in "${p}_ctx_indication_$enc" "${p}_ctx_text_prior_labels_$enc" "${enc}_ft_indication_s0"; do
+        [ "$img" = ft_attn_s0 ] || [ "$text" != "${enc}_ft_indication_s0" ] || continue
+        if [ -f "$pred/$text.parquet" ]; then pairs+=(--pair "${p}_$img" "$text"); fi  # absent: TOTAL_HOURS hit
+      done
+    done
+  done
+  run bench_text_stack "$PY" -m v2.stack "${pairs[@]}" --out "$BENCH_OUT"
+  run bench_text_report "$PY" -m v2.textft --report --out "$BENCH_OUT"
+  run bench_lineup "$PY" -m v2.lineup --out "$BENCH_OUT"
+  run bench_eval "$PY" -m v2.evaluate --all --out "$BENCH_OUT"
+  echo "M6: $BENCH_OUT/reports/m6_text.md (gate G6); lineup: $BENCH_OUT/reports/lineup.md"
 }
 
 stage_eval() {

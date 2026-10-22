@@ -46,6 +46,35 @@ def test_bench_stack_needs_the_bench_stage_first(tmp_path):
     assert "bench stages: RAD-DINO at 518 px" in res.stdout
 
 
+def test_bench_text_pairs_each_encoder_with_the_image_runs(tmp_path):
+    env_file = ROOT / ".env"
+    if env_file.exists() and "BENCH_OUT" in env_file.read_text():
+        pytest.skip("a local .env sets BENCH_OUT")
+    pred, p = tmp_path / "bench" / "predictions", "rad-dino_518"
+    pred.mkdir(parents=True)
+    done = [f"{p}_ctx_indication", f"{p}_probe", f"{p}_ft_attn_s0", "bert_ft_indication_s0",
+            *(f"{p}_ctx_{arm}_{enc}" for arm in ("indication", "text_prior_labels") for enc in ("bert", "biomedbert"))]
+    for run in done:
+        (pred / f"{run}.parquet").touch()
+    # A stand-in python that records the v2 commands instead of running them.
+    calls, fake = tmp_path / "calls.txt", tmp_path / "python"
+    fake.write_text(f'#!/usr/bin/env bash\nif [ "$1" = -c ]; then exec "{sys.executable}" "$@"; fi\necho "$*" >> "{calls}"\n')
+    fake.chmod(0o755)
+    res = _run(["bench_text"], tmp_path, BENCH_OUT=str(tmp_path / "bench"), PYTHON=str(fake),
+               TEXT_ENCODERS="bert biomedbert")
+    assert res.returncode == 0, res.stderr
+    lines = calls.read_text().splitlines()
+    assert [line.split()[3] for line in lines if line.startswith("-m v2.textenc")] == ["bert", "biomedbert"]
+    assert [line.split()[3] for line in lines if line.startswith("-m v2.textft --encoder")] == ["biomedbert"]  # bert's kept
+    words = next(line for line in lines if line.startswith("-m v2.stack")).split()
+    pairs = {(words[i + 1], words[i + 2]) for i, w in enumerate(words) if w == "--pair"}
+    m6 = {(f"{p}_{img}", f"{p}_ctx_{arm}_{enc}") for img in ("probe", "ft_attn_s0")
+          for arm in ("indication", "text_prior_labels") for enc in ("bert", "biomedbert")}
+    m5b = {(f"{p}_{img}", f"{p}_ctx_{arm}") for img in ("probe", "ft_attn_s0") for arm in ("indication", "text_prior_labels")}
+    assert pairs == m5b | m6 | {(f"{p}_ft_attn_s0", "bert_ft_indication_s0")}  # biomedbert's fine-tune never ran
+    assert lines[-3:] == [f"-m v2.textft --report --out {tmp_path / 'bench'}", f"-m v2.lineup --out {tmp_path / 'bench'}",
+                          f"-m v2.evaluate --all --out {tmp_path / 'bench'}"]
+
 def test_m0_requires_the_data_path(tmp_path):
     env_file = ROOT / ".env"
     if env_file.exists() and "MIMIC_CXR_JPG_PATH" in env_file.read_text():

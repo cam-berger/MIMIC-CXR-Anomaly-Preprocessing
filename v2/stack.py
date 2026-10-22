@@ -106,16 +106,19 @@ def stack_pair(out_dir: Path, image_run: str, text_run: str, folds: int = FOLDS)
     if kept:
         logger.warning("%s: %d classes keep the image score (one label value in val or a fold): %s", image_run,
                        len(kept), ", ".join(kept))
-    run = f"{image_run}_stack_{meta_b.get('arm') or text_run}"
+    tag = meta_b.get("stack_tag") or meta_b.get("arm") or text_run  # M6 runs add their text encoder
+    run = f"{image_run}_stack_{tag}"
     write_predictions(out_dir, run, both["study_id"], both["split"], scores, {
         "kind": "stack", "image_run": image_run, "text_run": text_run, "folds": folds, "C": C,
         "image_kind": meta_a.get("kind"), "image_arm": meta_a.get("arm"), "image_head": meta_a.get("head"),
-        "text_arm": meta_b.get("arm"), "encoder": meta_a.get("encoder"), "size": meta_a.get("size"),
+        "text_arm": meta_b.get("arm"), "text_tag": tag, "text_encoder": meta_b.get("text_encoder"),
+        "milestone": meta_b.get("milestone") if meta_b.get("milestone") == "M6" else None,
+        "encoder": meta_a.get("encoder"), "size": meta_a.get("size"),
         "image_features": "fine-tuned" if meta_a.get("kind") == "finetune" else meta_a.get("image_features", "frozen"),
         "n_val": int(is_val.sum()), "per_label": info,
     })
     return run, {"image_run": image_run, "text_run": text_run, "image_kind": meta_a.get("kind"),
-                 "text_arm": meta_b.get("arm"), "info": info, "kept": kept}
+                 "text_arm": meta_b.get("arm"), "text_tag": tag, "info": info, "kept": kept}
 
 
 def write_report(out_dir: Path, stacks: dict, n_boot: int) -> Path:
@@ -147,7 +150,7 @@ def write_report(out_dir: Path, stacks: dict, n_boot: int) -> Path:
                 diffs.append("-")
         auc = fmt_ci(clean["macro_auroc"], clean["macro_auroc_ci"]) if clean else "-"
         lines.append(f"| `{run}` | `{s['image_run']}` | `{s['text_run']}` | {auc} | " + " | ".join(diffs) + " |")
-        concat = f"{s['image_run'][: -len('_probe')]}_ctx_image_{s['text_arm']}" \
+        concat = f"{s['image_run'][: -len('_probe')]}_ctx_image_{s['text_tag']}" \
             if s["image_run"].endswith("_probe") and s["text_arm"] else None
         if s["image_kind"] == "probe" and concat and (Path(out_dir) / "predictions" / f"{concat}.parquet").exists():
             checks.append((run, concat, compare_runs(out_dir, run, concat, "test_clean", "v2", n_boot)))

@@ -46,7 +46,8 @@ G1_THRESHOLD = 0.77
 # (test set, label policy) pairs every run is evaluated on, headline first. A pair whose measurable classes were
 # not frozen at M0 is skipped: u0 (M5's "positive vs rest") exists only for manifests prepared since M5.
 EVAL_SETS = (("test_clean", "v2"), ("test_clean", "u0"), ("test_v1", "v2"), ("test_v1", "v1"), ("val", "v2"))
-MILESTONE = {"probe": "M1", "zero_shot": "M2", "finetune": "M3", "fuse": "M4", "attend": "M4b", "stack": "M4b"}
+MILESTONE = {"probe": "M1", "zero_shot": "M2", "finetune": "M3", "fuse": "M4", "attend": "M4b", "stack": "M4b",
+             "text_finetune": "M6"}
 # §6 M4b: the attention head's image-only arm (h0) may trail the M1 probe on val by at most this much.
 G4B_HEAD_MARGIN = 0.02
 # Encoders whose test_v1 numbers are not reportable (§4): they may have trained on those images
@@ -534,7 +535,8 @@ def summarize(out_dir: Path, n_boot: int = N_BOOT, runs: Optional[list[str]] = N
             if res:
                 label = ("official test" if benchmark else f"`{test_set}`") + \
                     {"v1": ", v1 metric", "u0": ", positive vs rest", "v2": ""}[metric]
-                milestone = "M5" if benchmark else meta.get("milestone") or MILESTONE.get(meta.get("kind"), "?")
+                own = meta.get("milestone") or MILESTONE.get(meta.get("kind"), "?")
+                milestone = ("M6" if own == "M6" else "M5") if benchmark else own
                 lines.append(f"| {day} | {milestone} | {meta.get('commit', '?')} | "
                              f"{run} | {label} | {fmt_ci(res['macro_auroc'], res['macro_auroc_ci'])} | "
                              f"{len(res['classes'])} | |")

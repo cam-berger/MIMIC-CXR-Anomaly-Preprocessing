@@ -26,7 +26,7 @@ import pandas as pd
 
 from .common import LABELS, default_out_dir, load_manifest, load_measurable, read_predictions, setup_logging
 from .evaluate import _get, evaluate_run, evaluate_set, fmt, fmt_ci, split_scheme
-from .fuse import ARMS, red_flags
+from .fuse import ARMS, text_flags
 
 logger = logging.getLogger("v2.lineup")
 
@@ -90,6 +90,8 @@ def role(meta: dict) -> Optional[str]:
         return None if meta.get("image_features") == "fine-tuned" else ROLE_BY_ARM.get(meta.get("arm"))
     if meta.get("kind") == "attend" and meta.get("arm") == "h0":
         return "image"
+    if meta.get("kind") == "text_finetune":  # M6: a language model fine-tuned on one text source
+        return ROLE_BY_ARM.get(meta.get("arm"))
     if meta.get("kind") == "stack" and meta.get("text_arm") and \
             role({"kind": meta.get("image_kind"), "arm": meta.get("image_arm")}) == "image":
         return ROLE_BY_ARM.get(f"image_{meta['text_arm']}")
@@ -148,12 +150,16 @@ def lineup(out_dir: Path, n_boot: int = 1000, runs: Optional[list] = None) -> di
             row["subset"] = evaluate_set(pred, sub, frozen, "test_clean", "u0", n_boot)
         rows[run] = row
 
-    # M4's red flags on the text-only arms come first: a flagged lineup isn't read (§6 M5).
+    # M4's red flags on every text-only run come first: a flagged lineup isn't read (§6 M5, M6).
     flags = []
-    for prefix in sorted({r[: -len("_ctx_image")] for r in rows if r.endswith("_ctx_image")}):
-        clean = {arm: rows[f"{prefix}_ctx_{arm}"]["v2"] for arm in ARMS
-                 if (arm == "image" or not ARMS[arm].image) and f"{prefix}_ctx_{arm}" in rows}
-        flags += red_flags(clean)
+    images = {r[: -len("_ctx_image")]: rows[r]["v2"] for r in rows if r.endswith("_ctx_image") and rows[r]["v2"]}
+    # A fine-tuned text run belongs to no embeddings: it is held to the weakest `image` arm, the strictest test.
+    weakest = min(images.values(), key=lambda res: res["macro_auroc"], default=None)
+    for run, row in rows.items():
+        kind, meta = row["meta"].get("kind"), row["meta"]
+        if (kind == "fuse" and not meta.get("image") and meta.get("arm") in ARMS) or kind == "text_finetune":
+            ref = images.get(run.split("_ctx_")[0]) if "_ctx_" in run else weakest
+            flags += text_flags(run, row["v2"], ref)
 
     audit = json.loads((Path(out_dir) / "audit.json").read_text())
     test = audit["sizes"]["test_clean"]

@@ -62,6 +62,7 @@ them with v1's `python build_cohort.py --anomalous-only`.
 | M5a: line up with published results | `TOTAL_HOURS=20 bash v2/scripts/run.sh bench`; read `$OUTPUT_PATH/v2_bench/reports/lineup.md` (red flags, then the like-for-like table) | laptop with an Apple GPU and the data drive, ~65 GB free | measured: prepare 9 h from a USB hard drive (1-3 h from a fast disk), embeddings and tokens 6.1 h, probe and fusion 27 min, attention heads 2.3 h |
 | M5b, on the Mac: text through the val combiner | `bash v2/scripts/run.sh bench_stack`; read `reports/m5_stack.md` (the check first), then `lineup.md` | laptop | about 30 min; run it again after the GPU part |
 | M5b, on a GPU: two fine-tunes on the benchmark | `bash v2/scripts/run.sh bench_ft` (§3, M5b) | rented GPU | about 3.5 h of an A100 for seed 0 of both heads, plus uploading ~16 GB |
+| M6: BERT-family encoders for the pre-imaging text | `TOTAL_HOURS=16 bash v2/scripts/run.sh bench_text`; read `reports/m6_text.md` (red flags, then **G6**), then `lineup.md` | laptop with an Apple GPU, ~8 GB free (text embeddings ~6 GB); downloads three public models (~2 GB) | estimated 8-12 h (not yet measured): three fine-tunes first, then frozen embeddings and probes per encoder |
 
 `run.sh` writes a log per step to `output/v2/logs/` and stops at the first
 failure. Its settings (`SIZE`, `MAX_TRAIN`, `FT_BATCH`/`FT_ACCUM`,
@@ -168,6 +169,8 @@ reports/m4b_attention_{model}_{size}.md   M4b: head validity check, gate G4b, co
 reports/m4b_{embeddings}.md               M4b: prior-study label arms against M4's arms
 reports/m4b_stack.md                      M4b: the combiner fit on val, and its check against concatenation
 reports/m5_stack.md                       M5b (BENCH_OUT): the combiners on the benchmark, and their checks
+embeddings/text_{encoder}_{source}.npz    M6 (BENCH_OUT): a language model's mean-pooled text embedding per study and source (record-level)
+reports/m6_text.md                        M6 (BENCH_OUT): red flags, gate G6, the encoders compared, image + text through the combiner
 ```
 
 M5's benchmark (§6 M5) lives in its own directory, `BENCH_OUT` (default
@@ -183,8 +186,10 @@ split scheme, so v2.0's directory can't be overwritten by mistake.
 Runs are named `{model}_{size}_probe`, `{model}_{size}_zeroshot`,
 `{model}_{size}_ft_s{seed}` (`_ft_attn_s{seed}` with the attention head, M5b), `{embeddings}_ctx_{arm}`
 (M4 and M4b's prior-label arms; arms in `v2/fuse.py`), `{model}_{size}_attn_{h0,h1,h2}` (M4b) and
-`{image run}_stack_{text arm}` (M4b, M5b). Runs ending in `_smoke` only check the setup and are left out of
-the summary.
+`{image run}_stack_{text arm}` (M4b, M5b). M6 adds `{embeddings}_ctx_{arm}_{encoder}` (frozen language-model
+features in place of TF-IDF; `_tfidf-{encoder}` with both), `{encoder}_ft_{source}_s{seed}` (a fine-tuned
+language model) and `{image run}_stack_{arm}_{encoder}` or `_stack_{encoder}_ft_{source}`. Runs ending in
+`_smoke` only check the setup and are left out of the summary.
 
 ## 5. Reading the results
 
@@ -200,6 +205,8 @@ the summary.
   - **G2:** the fine-tune beats the best probe on `test_clean`, with a paired CI above 0.
   - **G4** (M4): image + pre-imaging text beats the image alone on `test_clean` (frozen features).
   - **G4b** (M4b): `h2` minus `h1` on `test_clean`, read only after the head validity check passes.
+  - **G6** (M6, benchmark): on the indication alone, the fine-tuned medical encoder with the better val
+    score (`biomedbert` or `clinicalbert`) minus the fine-tuned `bert`, on the official test split.
 - **M5 lineup:** published results use "positive vs rest" (uncertain and
   unmentioned count as negative), so `lineup.md` scores the official test
   split that way (`--metric u0` in `evaluate`). A published number reads as
@@ -232,6 +239,10 @@ python -m v2.stack --pair rad-dino_518_ft_s1 rad-dino_518_ctx_text [--pair IMAGE
 python -m v2.prepare_data --population all --split-scheme official --image-format jpg --out output/v2_bench   # M5
 python -m v2.stack --pair rad-dino_518_attn_h0 rad-dino_518_ctx_indication --out output/v2_bench   # M5b
 python -m v2.lineup --out output/v2_bench                       # M5: reports/lineup.md
+python -m v2.textft --encoder biomedbert --out output/v2_bench  # M6: fine-tune on the indication
+python -m v2.textenc --encoder biomedbert --out output/v2_bench # M6: frozen text embeddings per source
+python -m v2.fuse --embeddings output/v2_bench/embeddings/rad-dino_518.npz --text-encoder biomedbert --out output/v2_bench
+python -m v2.textft --report --out output/v2_bench              # M6: reports/m6_text.md, gate G6
 python -m v2.evaluate --all | --run RUN... | --compare RUN_A RUN_B
 python -m v2.doctor [--load-models]
 python -m v2.smoke                # the synthetic end-to-end wiring check
@@ -251,9 +262,9 @@ Useful `prepare_data` options:
 ## 7. Tests
 
 ```bash
-pytest tests/v2 -q                                   # ~30 s, synthetic data and tiny random models
-python -m v2.smoke                                   # end-to-end wiring check, ~30 s
-V2_TEST_NETWORK=1 pytest tests/v2/test_real_models.py  # downloads RAD-DINO, DINOv2, SigLIP (~1.5 GB)
+pytest tests/v2 -q                                   # a few minutes, synthetic data and tiny random models
+python -m v2.smoke                                   # end-to-end wiring check, ~2 min
+V2_TEST_NETWORK=1 pytest tests/v2/test_real_models.py  # downloads RAD-DINO, DINOv2, SigLIP and the M6 text encoders (~3 GB)
 ```
 
 The wiring check builds a fake MIMIC-CXR-JPG tree with a planted signal and
@@ -285,6 +296,12 @@ Verified, on a CPU-only Linux container:
 - M5b on synthetic data only: the attention-head fine-tune (learns the planted
   signal in the wiring check) and the val combiner on the benchmark. The
   published per-class tables are checked against the papers' own macros.
+- M6 on synthetic data, with a random two-layer BERT: frozen embeddings, the
+  probes, the fine-tune (it learns a planted word, and in the wiring check,
+  fed whole reports, it scores > 0.9: proof that it can learn from text) and
+  the report. The three real encoders load at their pinned revisions with
+  transformers 5.20.1 and give 768-wide embeddings (checked on a made-up
+  sentence); not yet run on real data or on MPS.
 
 Verified on the real data (October 2026; results in `docs/V2_PLAN.md` §9):
 - M0-M2 on an Apple-silicon Mac (MPS), including MedSigLIP's gated weights.
@@ -350,6 +367,8 @@ content out of the conversation:
 | `prepare_data` says a directory "holds a manifest for population ..." | You pointed M5's benchmark (or another population) at an existing output dir. Use its own `--out` (`BENCH_OUT`) |
 | `prepare_data` stops with "is the drive still mounted?" | More than 0.5% of JPGs failed to read, which usually means the drive dropped off the bus or the mount went stale. Remount it (read-only is fine), check with `python -m v2.doctor`, keep the Mac awake (`caffeinate -ims`), and rerun: written images are kept |
 | `bench_stack` says it needs the bench stage's text arms | Run `bench` with `MIMIC_CXR_REPORTS_PATH` and `MIMIC_IV_ED_PATH` set: the combiner needs `ctx_indication` |
+| `bench_text` stopped by `TOTAL_HOURS` | Run it again with the same settings: finished fine-tunes are kept, and `textenc` skips sources already embedded. The fuse arms are refit |
+| `RED FLAG` in `m6_text.md` | A language model's text-only run reaches the image, or a class scores above 0.90. Don't read G6: inspect locally, without sharing the text |
 | A `bench_ft_smoke_*` step fails on the GPU | Don't start the long runs: report the error line. Under 40 GB of GPU memory use `FT_BATCH=8 FT_ACCUM=4` or `GRAD_CKPT=1` |
 | The M5 probe runs fewer parallel fits than `--jobs` | Each fit copies the training features (2.6 GB at M5's size); the probe caps the workers to fit in memory and logs it |
 | G4b `WITHHELD` | `h0` scored more than 0.02 below the M1 probe on val, or the check couldn't run. Don't read G4b: look at the per-seed histories in `predictions/*_attn_h0.json` (aggregate) first |
