@@ -132,3 +132,14 @@ def test_attention_head_finetune_writes_its_own_run(prepared, tmp_path):
 def test_the_attention_head_has_no_embeddings_to_save():
     with pytest.raises(SystemExit):
         finetune.build_args(["--head", "attention", "--save-embeddings"])
+
+
+def test_float64_only_after_moving_to_the_cpu():
+    """Apple's MPS has no float64, and most test machines have no MPS to catch it: .double() follows .cpu()."""
+    import re
+    from pathlib import Path
+
+    bad = [f"{path.name}:{i}" for path in sorted((Path(finetune.__file__).parent).glob("*.py"))
+           for i, line in enumerate(path.read_text().splitlines(), 1)
+           if re.search(r"(?<!\.cpu\(\))\.double\(\)|torch\.float64|torch\.double\b", line)]
+    assert not bad, f"float64 on a device tensor breaks MPS: {bad}"

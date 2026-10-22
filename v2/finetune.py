@@ -123,7 +123,7 @@ def token_stats(encoder: Encoder, loader: DataLoader, device, dtype, grid: int) 
     for batch in loader:
         with autocast:
             toks = encoder.tokens(batch[0].to(device, non_blocking=True), grid)
-        x = toks.float().reshape(-1, toks.shape[-1]).double().cpu()
+        x = toks.float().reshape(-1, toks.shape[-1]).cpu().double()  # MPS has no float64: move first
         total, sq, n = total + x.sum(0), sq + (x * x).sum(0), n + len(x)
     mean = total / n
     std = torch.sqrt(torch.clamp(sq / n - mean ** 2, min=0.0))
