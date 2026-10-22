@@ -294,6 +294,8 @@ Verified on the real data (October 2026; results in `docs/V2_PLAN.md` §9):
 - M4b and M5a on an Apple M5 Pro (MPS, 64 GB): patch tokens, attention heads,
   prior labels and the val combiner; the whole benchmark (218k studies) with
   its 49 GB token cache.
+- M5b on a Lambda GH200 (aarch64, CUDA 12.8, the provider's torch 2.7.0): both
+  benchmark fine-tunes in 102 min at about 220 img/s, with no non-finite steps.
 
 Not verified: other providers' machine images. Start every new machine with
 `bash v2/scripts/run.sh smoke`.
@@ -318,6 +320,14 @@ content out of the conversation:
 - Share `audit.md` and `reports/*.md`. They hold aggregate counts and metrics,
   the kind of tables a paper publishes.
 - Never commit or upload `output/`; it is gitignored.
+- Never commit anything derived from a single study either: X-ray images
+  (originals, crops or reconstructions, even as figures in the docs),
+  tensors, per-study feature files. A public repository redistributes them,
+  and the agreement forbids that.
+- File names hold study IDs (`images/`, rsync's temporary files, run
+  outputs). Check disk use and counts with commands that print totals only,
+  and silence their per-file errors: `du -sh DIR 2>/dev/null`,
+  `find DIR -type f | wc -l`.
 
 ## 10. Troubleshooting
 
