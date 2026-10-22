@@ -124,10 +124,15 @@ fine-tuning is too slow (about 1.5 images/s on 4 cores); use a GPU.
    If you ran `gpu`, bring home `predictions`, `embeddings` and `reports` too.
 
 **M5b (§6 M5b amendment)** follows the same steps with the benchmark directory.
-Upload about 16 GB (`rsync -a output/v2_bench/manifest.parquet
-output/v2_bench/measurable_classes.json output/v2_bench/audit.json
-output/v2_bench/images <gpu>:MIMIC-CXR-Anomaly-Preprocessing/output/v2_bench/`),
-then run `bash v2/scripts/run.sh bench_ft` in `tmux`. It runs a smoke
+Upload about 16 GB while `setup.sh` runs. The images are 218k small files, so
+send them as one tar stream (it prints nothing per file):
+```bash
+ssh <gpu> 'mkdir -p MIMIC-CXR-Anomaly-Preprocessing/output/v2_bench'
+rsync -a output/v2_bench/manifest.parquet output/v2_bench/measurable_classes.json output/v2_bench/audit.json \
+    <gpu>:MIMIC-CXR-Anomaly-Preprocessing/output/v2_bench/
+tar -cf - -C output/v2_bench images | ssh <gpu> 'tar -xf - -C MIMIC-CXR-Anomaly-Preprocessing/output/v2_bench'
+```
+Then run `TOTAL_HOURS=8 bash v2/scripts/run.sh bench_ft` in `tmux`. It runs a smoke
 fine-tune of each head on a few real studies, then the mean-pool and the
 attention-head fine-tunes (3 epochs each, at most `BENCH_FT_HOURS`, default 3).
 Bring the results home and run the Mac part:
