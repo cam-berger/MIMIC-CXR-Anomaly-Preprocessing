@@ -91,7 +91,27 @@ def test_chexpert_prepare(m7, chexpert, synth, tmp_path):
     assert audit["image_size"] == 48 and all((out / p).exists() for p in m["image"])
     assert audit["rad_dino"]["chexpert_images"] == 5 and audit["rad_dino"]["test_images_in_list"] == 0
     assert set(load_measurable(out)) >= {"test_clean:v2", "test_clean:u0"}
-    assert "must be 0" in (out / "audit.md").read_text()
+    assert audit["label_files"] == {"studies_in_both": 150, "only_in_groundtruth": 0, "only_in_other": 0,
+                                    "differing_labels": 0, "agree": True}  # test_labels.csv, one row per image
+    text = (out / "audit.md").read_text()
+    assert "must be 0" in text and "agrees with groundtruth.csv" in text
+
+
+def test_read_chexpert_labels_takes_one_row_per_study_or_per_image(chexpert, tmp_path):
+    gt = external.read_chexpert_labels(chexpert / "groundtruth.csv")
+    per_image = pd.read_csv(chexpert / "CheXpert-v1.0" / "test_labels.csv")
+    assert "Study" not in per_image and len(per_image) > len(gt)            # frontal and lateral rows
+    pd.testing.assert_frame_equal(external.read_chexpert_labels(chexpert / "CheXpert-v1.0" / "test_labels.csv"), gt)
+    study = per_image["Path"].str.rsplit("/", n=1).str[0]
+    k = study[study.duplicated()].index[0]                                  # the second image of some study
+    per_image.loc[k, "Edema"] = 1 - per_image.loc[k, "Edema"]
+    bad = tmp_path / "test_labels.csv"
+    per_image.to_csv(bad, index=False)
+    with pytest.raises(SystemExit, match="the images of one study carry different labels"):
+        external.read_chexpert_labels(bad)
+    per_image.drop(columns="Path").to_csv(bad, index=False)
+    with pytest.raises(SystemExit, match=r"no column\(s\) \['Study or Path'\]"):
+        external.read_chexpert_labels(bad)
 
 
 def test_chexpert_prepare_stops_on_rad_dino_overlap(m7, chexpert, synth, tmp_path):
@@ -106,9 +126,14 @@ def test_chexpert_prepare_stops_on_rad_dino_overlap(m7, chexpert, synth, tmp_pat
 def test_chexpert_prepare_stops_when_the_label_files_disagree_or_images_are_missing(m7, chexpert, synth, tmp_path):
     root = tmp_path / "chexpert"
     shutil.copytree(chexpert, root)
-    gt = pd.read_csv(root / "groundtruth.csv")
-    gt.loc[0, "Edema"] = 1 - gt.loc[0, "Edema"]
-    gt.to_csv(root / "test_labels.csv", index=False)
+    shutil.copy(root / "CheXpert-v1.0" / "test_labels.csv", root)
+    with pytest.raises(SystemExit, match="2 files named test_labels.csv"):
+        external.prepare_chexpert(root, tmp_path / "ext", m7, str(synth.rad_dino_list), workers=0)
+    (root / "test_labels.csv").unlink()
+    per_image = pd.read_csv(root / "CheXpert-v1.0" / "test_labels.csv")
+    first = per_image["Path"].str.contains(f"patient{external.STUDY_RE.search(per_image['Path'][0])[1]}/")
+    per_image.loc[first, "Edema"] = 1 - per_image.loc[first, "Edema"]      # every image of one study
+    per_image.to_csv(root / "CheXpert-v1.0" / "test_labels.csv", index=False)
     with pytest.raises(SystemExit, match="disagree"):
         external.prepare_chexpert(root, tmp_path / "ext", m7, str(synth.rad_dino_list), workers=0)
     labels_only = tmp_path / "labels_only"

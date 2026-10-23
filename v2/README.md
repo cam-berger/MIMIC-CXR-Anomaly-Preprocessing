@@ -63,7 +63,7 @@ them with v1's `python build_cohort.py --anomalous-only`.
 | M5b, on the Mac: text through the val combiner | `bash v2/scripts/run.sh bench_stack`; read `reports/m5_stack.md` (the check first), then `lineup.md` | laptop | about 30 min; run it again after the GPU part |
 | M5b, on a GPU: two fine-tunes on the benchmark | `bash v2/scripts/run.sh bench_ft` (§3, M5b) | rented GPU | about 3.5 h of an A100 for seed 0 of both heads, plus uploading ~16 GB |
 | M7a: a radiologist's labels on the official test split | `bash v2/scripts/run.sh m7a`; read `reports/m7a_radiologist.md` in `BENCH_OUT` | laptop (needs `mimic-cxr-2.1.0-test-set-labeled.csv` in `MIMIC_CXR_JPG_PATH`) | minutes |
-| M7b: the CheXpert test set | `bash v2/scripts/run.sh m7b`; read `reports/m7b_chexpert.md` in `EXT_OUT` (red flags, then **G7**) | laptop with an Apple GPU; `CHEXPERT_TEST_PATH` holds the test images and `groundtruth.csv` | under 30 min |
+| M7b: the CheXpert test set | `bash v2/scripts/run.sh m7b`; read `reports/m7b_chexpert.md` in `EXT_OUT` (red flags, then **G7**) | laptop with an Apple GPU; `CHEXPERT_TEST_PATH` holds the test images and `groundtruth.csv` (CheXlocalize's `test_labels.csv`, if there, is checked against it) | about 6 min |
 | M6: BERT-family encoders for the pre-imaging text | `TOTAL_HOURS=16 bash v2/scripts/run.sh bench_text`; read `reports/m6_text.md` (red flags, then **G6**), then `lineup.md` | laptop with an Apple GPU, ~8 GB free (text embeddings ~6 GB); downloads three public models (~2 GB) | estimated 8-12 h (not yet measured): three fine-tunes first, then frozen embeddings and probes per encoder |
 
 `run.sh` writes a log per step to `output/v2/logs/` and stops at the first
@@ -335,6 +335,9 @@ Verified on the real data (October 2026; results in `docs/V2_PLAN.md` §9):
   benchmark fine-tunes in 102 min at about 220 img/s, with no non-finite steps.
 - M6 and M7a on the M5 Pro: the three text encoders' fine-tunes, embeddings and
   probes in 9 h 25 min; the radiologist-label comparison in 88 s.
+- M7b on the M5 Pro: the CheXpert test set (668 images from the AIMI Azure
+  release, via azcopy) prepared, scored by three benchmark models and reported
+  in 375 s.
 
 Not verified: other providers' machine images. Start every new machine with
 `bash v2/scripts/run.sh smoke`.
@@ -390,7 +393,7 @@ content out of the conversation:
 | `prepare_data` stops with "is the drive still mounted?" | More than 0.5% of JPGs failed to read, which usually means the drive dropped off the bus or the mount went stale. Remount it (read-only is fine), check with `python -m v2.doctor`, keep the Mac awake (`caffeinate -ims`), and rerun: written images are kept |
 | `bench_stack` says it needs the bench stage's text arms | Run `bench` with `MIMIC_CXR_REPORTS_PATH` and `MIMIC_IV_ED_PATH` set: the combiner needs `ctx_indication` |
 | `bench_text` stopped by `TOTAL_HOURS` | Run it again with the same settings: finished fine-tunes are kept, and `textenc` skips sources already embedded. The fuse arms are refit |
-| `m7b` says there are no CheXpert test images | The CheXlocalize copy on Redivis has only annotations. The images are in the original CheXlocalize release on Stanford AIMI's Azure portal; put them (any layout with `patient#/study#/view#_frontal.jpg`) and `groundtruth.csv` under `CHEXPERT_TEST_PATH` |
+| `m7b` says there are no CheXpert test images | The CheXlocalize copy on Redivis has only annotations. The images are in the original CheXlocalize release on Stanford AIMI's Azure portal (download with azcopy and the link on your dataset page; treat the link as a password and keep it out of files); put them (any layout with `patient#/study#/view#_frontal.jpg`) and `groundtruth.csv` under `CHEXPERT_TEST_PATH` |
 | `RED FLAG` in `m7b` about RAD-DINO's training list, the probe refit or a reloaded fine-tune | Stop and report the line: the external test isn't clean, or a model isn't the one the benchmark scored |
 | `RED FLAG` in `m6_text.md` | A language model's text-only run reaches the image, or a class scores above 0.90. Don't read G6: inspect locally, without sharing the text |
 | A `bench_ft_smoke_*` step fails on the GPU | Don't start the long runs: report the error line. Under 40 GB of GPU memory use `FT_BATCH=8 FT_ACCUM=4` or `GRAD_CKPT=1` |

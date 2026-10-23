@@ -286,12 +286,12 @@ def read_chexpert_labels(path: Path) -> pd.DataFrame:
     """
     df = pd.read_csv(path, dtype={"Study": str, "Path": str})
     key = "Study" if "Study" in df.columns else ("Path" if "Path" in df.columns else None)
-    missing = ([] if key else ["Study"]) + [c for c in LABELS if c not in df.columns]
+    missing = ([] if key else ["Study or Path"]) + [c for c in LABELS if c not in df.columns]
     if missing:
         raise SystemExit(f"{Path(path).name} has no column(s) {missing}; its columns are {list(df.columns)}")
     keys = df[key].str.extract(STUDY_RE)
     if keys.isna().any(axis=None):
-        raise SystemExit(f"{Path(path).name}: {int(keys.isna().any(axis=1).sum())} Study values name no patient and study")
+        raise SystemExit(f"{Path(path).name}: {int(keys.isna().any(axis=1).sum())} {key} values name no patient and study")
     values = df[list(LABELS)].apply(pd.to_numeric, errors="coerce")
     if values.isna().any(axis=None) or not set(np.unique(values.to_numpy())) <= {0.0, 1.0}:
         raise SystemExit(f"{Path(path).name}: the test labels must all be 0 or 1")

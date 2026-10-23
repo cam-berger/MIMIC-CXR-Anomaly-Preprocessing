@@ -292,12 +292,13 @@ def make_chexpert_test(root: Path, n_patients: int = 120, seed: int = 0, image_s
     """
     A CheXpert-style test set (M7b): CheXpert-v1.0/test/patient*/study1/view*_{frontal,lateral}.jpg with
     groundtruth.csv (binary labels, Study = CheXpert-v1.0/test/patient#/study1), the same planted signal as the
-    MIMIC tree. One study's frontal view is view 2, one study has no frontal view, and two validation-set images
-    lie alongside, which M7b must ignore.
+    MIMIC tree. CheXpert-v1.0/test_labels.csv has the same labels as CheXlocalize's copy does: one row per image,
+    keyed by Path. One study's frontal view is view 2, one study has no frontal view, and two validation-set
+    images lie alongside, which M7b must ignore.
     """
     rng = np.random.default_rng(seed)
     root = Path(root)
-    rows = []
+    rows, images = [], []
     for i in range(n_patients):
         patient = first_patient + i
         raw, _ = _study_labels(rng)
@@ -313,6 +314,7 @@ def make_chexpert_test(root: Path, n_patients: int = 120, seed: int = 0, image_s
             h, w = image_size if kind == "frontal" else image_size[::-1]
             Image.fromarray(_render(rng, truth, "PA" if kind == "frontal" else "LATERAL", (h, w))).save(
                 study / f"view{v}_{kind}.jpg", quality=95)
+            images.append((i, f"test/patient{patient}/study1/view{v}_{kind}.jpg"))
         row = {"Study": f"CheXpert-v1.0/test/patient{patient}/study1", "No Finding": float(not truth.any()),
                "Support Devices": float(rng.random() < 0.2)}
         row.update({label: truth[k] for k, label in enumerate(LABELS)})
@@ -324,6 +326,9 @@ def make_chexpert_test(root: Path, n_patients: int = 120, seed: int = 0, image_s
     labels = pd.DataFrame(rows, columns=["Study", *CHEXPERT_TEST_COLUMNS])
     labels[list(CHEXPERT_TEST_COLUMNS)] = labels[list(CHEXPERT_TEST_COLUMNS)].astype(int)
     labels.to_csv(root / "groundtruth.csv", index=False)
+    per_image = labels.iloc[[i for i, _ in images]].drop(columns="Study")
+    per_image.insert(0, "Path", [path for _, path in images])
+    per_image.to_csv(root / "CheXpert-v1.0" / "test_labels.csv", index=False)
     return root
 
 
