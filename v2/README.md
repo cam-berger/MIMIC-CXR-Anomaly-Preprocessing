@@ -64,8 +64,8 @@ them with v1's `python build_cohort.py --anomalous-only`.
 | M5b, on a GPU: two fine-tunes on the benchmark | `bash v2/scripts/run.sh bench_ft` (§3, M5b) | rented GPU | about 3.5 h of an A100 for seed 0 of both heads, plus uploading ~16 GB |
 | M7a: a radiologist's labels on the official test split | `bash v2/scripts/run.sh m7a`; read `reports/m7a_radiologist.md` in `BENCH_OUT` | laptop (needs `mimic-cxr-2.1.0-test-set-labeled.csv` in `MIMIC_CXR_JPG_PATH`) | minutes |
 | M7b: the CheXpert test set | `bash v2/scripts/run.sh m7b`; read `reports/m7b_chexpert.md` in `EXT_OUT` (red flags, then **G7**) | laptop with an Apple GPU; `CHEXPERT_TEST_PATH` holds the test images and `groundtruth.csv` (CheXlocalize's `test_labels.csv`, if there, is checked against it) | about 6 min |
-| M8, on a GPU: a second seed, and a 6-epoch fine-tune | `TOTAL_HOURS=8 bash v2/scripts/run.sh m8_gpu` (§3, M8) | rented GPU | about 3.5 h of a GH200 for three fine-tunes, plus uploading ~16 GB |
-| M8, on the Mac: each headline verdict with both seeds | `bash v2/scripts/run.sh m8`; read `reports/m8_replication.md` in `BENCH_OUT` (red flags, then the verdicts) | laptop with an Apple GPU, after m7b | under an hour |
+| M8, on a GPU: a second seed, and a 6-epoch fine-tune | `TOTAL_HOURS=8 bash v2/scripts/run.sh m8_gpu` (§3, M8) | rented GPU | measured: 201 min of a GH200 for three fine-tunes, plus 7 min of upload |
+| M8, on the Mac: each headline verdict with both seeds | `bash v2/scripts/run.sh m8`; read `reports/m8_replication.md` in `BENCH_OUT` (red flags, then the verdicts) | laptop with an Apple GPU, after m7b; the MIMIC drive (M7a's labels) | measured: 17 min |
 | M6: BERT-family encoders for the pre-imaging text | `TOTAL_HOURS=16 bash v2/scripts/run.sh bench_text`; read `reports/m6_text.md` (red flags, then **G6**), then `lineup.md` | laptop with an Apple GPU, ~8 GB free (text embeddings ~6 GB); downloads three public models (~2 GB) | estimated 8-12 h (not yet measured): three fine-tunes first, then frozen embeddings and probes per encoder |
 
 `run.sh` writes a log per step to `output/v2/logs/` and stops at the first
@@ -359,6 +359,9 @@ Verified on the real data (October 2026; results in `docs/V2_PLAN.md` §9):
 - M7b on the M5 Pro: the CheXpert test set (668 images from the AIMI Azure
   release, via azcopy) prepared, scored by three benchmark models and reported
   in 375 s.
+- M8 on a Lambda GH200 (aarch64, the provider's torch 2.7.0): three benchmark
+  fine-tunes in 201 min at 216-224 img/s, using 11.5 of 98 GB of GPU memory;
+  the Mac part in 17 min.
 
 Not verified: other providers' machine images. Start every new machine with
 `bash v2/scripts/run.sh smoke`.
