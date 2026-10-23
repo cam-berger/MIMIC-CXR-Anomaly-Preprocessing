@@ -598,7 +598,8 @@ def summarize(out_dir: Path, n_boot: int = N_BOOT, runs: Optional[list[str]] = N
                 where = "official test" if benchmark else external_name(out_dir) if external else f"`{test_set}`"
                 label = where + {"v1": ", v1 metric", "u0": ", positive vs rest", "v2": ""}[metric]
                 own = meta.get("milestone") or MILESTONE.get(meta.get("kind"), "?")
-                milestone = ("M6" if own == "M6" else "M5") if benchmark else "M7" if external else own
+                milestone = (own if own in ("M6", "M8") else "M5") if benchmark else \
+                    (own if own == "M8" else "M7") if external else own
                 lines.append(f"| {day} | {milestone} | {meta.get('commit', '?')} | "
                              f"{run} | {label} | {fmt_ci(res['macro_auroc'], res['macro_auroc_ci'])} | "
                              f"{len(res['classes'])} | |")

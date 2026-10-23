@@ -64,6 +64,8 @@ them with v1's `python build_cohort.py --anomalous-only`.
 | M5b, on a GPU: two fine-tunes on the benchmark | `bash v2/scripts/run.sh bench_ft` (§3, M5b) | rented GPU | about 3.5 h of an A100 for seed 0 of both heads, plus uploading ~16 GB |
 | M7a: a radiologist's labels on the official test split | `bash v2/scripts/run.sh m7a`; read `reports/m7a_radiologist.md` in `BENCH_OUT` | laptop (needs `mimic-cxr-2.1.0-test-set-labeled.csv` in `MIMIC_CXR_JPG_PATH`) | minutes |
 | M7b: the CheXpert test set | `bash v2/scripts/run.sh m7b`; read `reports/m7b_chexpert.md` in `EXT_OUT` (red flags, then **G7**) | laptop with an Apple GPU; `CHEXPERT_TEST_PATH` holds the test images and `groundtruth.csv` (CheXlocalize's `test_labels.csv`, if there, is checked against it) | about 6 min |
+| M8, on a GPU: a second seed, and a 6-epoch fine-tune | `TOTAL_HOURS=8 bash v2/scripts/run.sh m8_gpu` (§3, M8) | rented GPU | about 3.5 h of a GH200 for three fine-tunes, plus uploading ~16 GB |
+| M8, on the Mac: each headline verdict with both seeds | `bash v2/scripts/run.sh m8`; read `reports/m8_replication.md` in `BENCH_OUT` (red flags, then the verdicts) | laptop with an Apple GPU, after m7b | under an hour |
 | M6: BERT-family encoders for the pre-imaging text | `TOTAL_HOURS=16 bash v2/scripts/run.sh bench_text`; read `reports/m6_text.md` (red flags, then **G6**), then `lineup.md` | laptop with an Apple GPU, ~8 GB free (text embeddings ~6 GB); downloads three public models (~2 GB) | estimated 8-12 h (not yet measured): three fine-tunes first, then frozen embeddings and probes per encoder |
 
 `run.sh` writes a log per step to `output/v2/logs/` and stops at the first
@@ -147,6 +149,22 @@ ssh <gpu> 'rm -rf MIMIC-CXR-Anomaly-Preprocessing/output'
 bash v2/scripts/run.sh bench_stack
 ```
 
+**M8 (§6 M8)** uses the same upload, then `TOTAL_HOURS=8 bash v2/scripts/run.sh
+m8_gpu` in `tmux`: a smoke fine-tune of each head, seed 1 of both heads (3
+epochs each), then the attention head for 6 epochs with seed 0. Leave
+`FT_BATCH` and `FT_ACCUM` unset unless memory forces it: M8's report flags any
+recipe that differs from seed 0's. Bring home only the three new runs, so
+nothing of M5b's is overwritten, then run the Mac part:
+```bash
+ssh <gpu> 'cd MIMIC-CXR-Anomaly-Preprocessing/output && tar -czf m8.tgz v2_bench/predictions/*_ft_*s1.* \
+    v2_bench/predictions/*_ft_attn_e6_s0.* v2_bench/runs/*_ft_*s1/best.pt v2_bench/runs/*_ft_*s1/*.json \
+    v2_bench/runs/*_ft_attn_e6_s0/best.pt v2_bench/runs/*_ft_attn_e6_s0/*.json v2_bench/embeddings/*_ft_s1.npz v2/logs'
+scp <gpu>:MIMIC-CXR-Anomaly-Preprocessing/output/m8.tgz output/
+tar -xzf output/m8.tgz -C output && rm output/m8.tgz
+ssh <gpu> 'rm -rf MIMIC-CXR-Anomaly-Preprocessing/output'
+bash v2/scripts/run.sh m8
+```
+
 The MIMIC data stays under your PhysioNet credential. Use a provider you
 trust, and keep the data on the machine only for the run.
 
@@ -198,8 +216,10 @@ Runs are named `{model}_{size}_probe`, `{model}_{size}_zeroshot`,
 (M4 and M4b's prior-label arms; arms in `v2/fuse.py`), `{model}_{size}_attn_{h0,h1,h2}` (M4b) and
 `{image run}_stack_{text arm}` (M4b, M5b). M6 adds `{embeddings}_ctx_{arm}_{encoder}` (frozen language-model
 features in place of TF-IDF; `_tfidf-{encoder}` with both), `{encoder}_ft_{source}_s{seed}` (a fine-tuned
-language model) and `{image run}_stack_{arm}_{encoder}` or `_stack_{encoder}_ft_{source}`. Runs ending in
-`_smoke` only check the setup and are left out of the summary.
+language model) and `{image run}_stack_{arm}_{encoder}` or `_stack_{encoder}_ft_{source}`. M8 adds seed 1 of
+the fine-tunes and `{model}_{size}_ft_attn_e6_s0` (6 epochs); its stacks are reported in `reports/m8_stack.md`
+and its verdicts in `reports/m8_replication.md`. Runs ending in `_smoke` only check the setup and are left out
+of the summary.
 
 ## 5. Reading the results
 
@@ -258,6 +278,7 @@ python -m v2.fuse --embeddings output/v2_bench/embeddings/rad-dino_518.npz --tex
 python -m v2.textft --report --out output/v2_bench              # M6: reports/m6_text.md, gate G6
 python -m v2.external radiologist --bench output/v2_bench       # M7a: reports/m7a_radiologist.md
 python -m v2.external chexpert --chexpert DIR --bench output/v2_bench --out output/v2_chexpert [--steps prepare,apply,report]
+python -m v2.replicate --bench output/v2_bench --ext output/v2_chexpert   # M8: reports/m8_replication.md
 python -m v2.evaluate --all | --run RUN... | --compare RUN_A RUN_B
 python -m v2.doctor [--load-models]
 python -m v2.smoke                # the synthetic end-to-end wiring check
@@ -395,6 +416,8 @@ content out of the conversation:
 | `bench_text` stopped by `TOTAL_HOURS` | Run it again with the same settings: finished fine-tunes are kept, and `textenc` skips sources already embedded. The fuse arms are refit |
 | `m7b` says there are no CheXpert test images | The CheXlocalize copy on Redivis has only annotations. The images are in the original CheXlocalize release on Stanford AIMI's Azure portal (download with azcopy and the link on your dataset page; treat the link as a password and keep it out of files); put them (any layout with `patient#/study#/view#_frontal.jpg`) and `groundtruth.csv` under `CHEXPERT_TEST_PATH` |
 | `RED FLAG` in `m7b` about RAD-DINO's training list, the probe refit or a reloaded fine-tune | Stop and report the line: the external test isn't clean, or a model isn't the one the benchmark scored |
+| `RED FLAG` in `m8`: a recipe differs from its twin's | Don't read the verdicts: the second seed didn't repeat seed 0's training (often `FT_BATCH`/`FT_ACCUM`). Report the line; the run needs redoing with seed 0's settings |
+| `RED FLAG` in `m8`: a run stopped on its time limit | It trained fewer epochs than pre-registered. On the GPU, run `m8_gpu` again with a larger `BENCH_FT_HOURS`: `--resume` continues it |
 | `RED FLAG` in `m6_text.md` | A language model's text-only run reaches the image, or a class scores above 0.90. Don't read G6: inspect locally, without sharing the text |
 | A `bench_ft_smoke_*` step fails on the GPU | Don't start the long runs: report the error line. Under 40 GB of GPU memory use `FT_BATCH=8 FT_ACCUM=4` or `GRAD_CKPT=1` |
 | The M5 probe runs fewer parallel fits than `--jobs` | Each fit copies the training features (2.6 GB at M5's size); the probe caps the workers to fit in memory and logs it |

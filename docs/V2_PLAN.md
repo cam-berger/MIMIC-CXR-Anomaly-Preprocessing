@@ -909,6 +909,7 @@ v2/
   textenc.py        # M6: BERT-family encoders (pinned), frozen text embeddings per source
   textft.py         # M6: fine-tune an encoder on one text source; reports/m6_text.md and gate G6
   external.py       # M7: a radiologist's labels on the official test split; the CheXpert test set, gate G7
+  replicate.py      # M8: each headline verdict with a second seed; 6 epochs against 3
   evaluate.py       # metrics, bootstrap CIs, paired comparisons, reports, gates
   doctor.py         # setup check for any machine
   synth.py          # synthetic MIMIC-CXR-JPG tree with a planted signal (tests)

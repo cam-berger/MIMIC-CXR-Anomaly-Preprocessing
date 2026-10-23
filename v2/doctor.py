@@ -276,6 +276,25 @@ def check_m7(r: Report, mimic_root: Optional[Path]) -> None:
                                                                           f"missing in {bench}: M7b applies it"))
 
 
+def check_m8(r: Report) -> None:
+    """M8 inputs on the Mac (docs/V2_PLAN.md §6 M8): seed 0's runs and the text to stack with, then M8's own runs."""
+    r.section("M8 (a second seed; a longer fine-tune)")
+    from .external import PREFIX, _env_dir
+
+    bench, ext = _env_dir("BENCH_OUT", "v2_bench"), _env_dir("EXT_OUT", "v2_chexpert")
+    for short in ("ft_attn_s0", "ft_s0", "ctx_indication", "ctx_text_prior_labels", "ctx_indication_bert"):
+        found = (bench / "predictions" / f"{PREFIX}_{short}.parquet").exists()
+        (r.ok if found else r.warn)(f"{PREFIX}_{short} " + ("found" if found else
+                                                            f"missing in {bench}: M8 compares or stacks with it"))
+    found = (ext / "manifest.parquet").exists()
+    (r.ok if found else r.warn)(f"CheXpert test set in {ext} " + ("found" if found else
+                                                                 "missing: m7b makes it; without it m8 skips G7"))
+    new = [f"{PREFIX}_{s}" for s in ("ft_attn_s1", "ft_s1", "ft_attn_e6_s0")]
+    home = sum((bench / "predictions" / f"{run}.parquet").exists() and (bench / "runs" / run / "best.pt").exists()
+               for run in new)
+    r.ok(f"M8's runs at home: {home} of {len(new)}" + ("" if home else " (m8_gpu makes them on a GPU)"))
+
+
 def check_output(r: Report, out_dir: Path) -> None:
     r.section("Output directory")
     try:
@@ -372,6 +391,7 @@ def main(argv: Optional[list[str]] = None) -> None:
     check_context_sources(r, out_dir)
     check_m4b(r, out_dir, Path(root).expanduser() if root else None)
     check_m7(r, Path(root).expanduser() if root else None)
+    check_m8(r)
     check_hub(r, args.load_models, args.device)
     print(f"\n{r.failures} failed, {r.warnings} warnings")
     sys.exit(1 if r.failures else 0)

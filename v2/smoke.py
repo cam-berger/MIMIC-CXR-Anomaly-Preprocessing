@@ -9,7 +9,8 @@ runs prepare_data -> embed -> probe -> zero_shot -> finetune (+ resume) ->
 context + fuse -> M4b (tokens, attend, prior labels, stack) -> M5 (the
 benchmark directory and its lineup) -> M6 (a language model's text features,
 frozen and fine-tuned) -> M7 (a radiologist's labels; a CheXpert-style external
-test set) -> evaluate with test-size encoders, through the same
+test set) -> M8 (a second seed and a longer fine-tune, each verdict with both
+seeds) -> evaluate with test-size encoders, through the same
 command-line entry points you will use on real data. It passes only if every
 stage runs AND the planted signal is recovered end to end: with the
 "test-pixels" encoder, test_clean macro AUROC must be >= 0.9, and must fall
@@ -24,8 +25,9 @@ directory must hold the official split and refuse to replace the v2 manifest,
 and the planted signal must reach the lineup. For M6, the text fine-tune fed
 whole reports must score > 0.9 (proof that it can learn from text at all). For
 M7, the planted signal must carry over to the external set, and a RAD-DINO
-training list holding a test patient must stop the run. No downloads, no MIMIC
-data needed.
+training list holding a test patient must stop the run. For M8, every twin must
+share its recipe, while the recipe check must catch two runs with different
+heads. No downloads, no MIMIC data needed.
 """
 
 from __future__ import annotations
@@ -43,9 +45,10 @@ from typing import Callable, Optional
 import numpy as np
 import pandas as pd
 
-from . import attend, context, embed, evaluate, external, finetune, fuse, lineup, prepare_data, probe, stack, textenc
-from . import textft, zero_shot
-from .common import CHEXPERT_COLUMNS, load_manifest, mimic_csv, setup_logging
+from . import attend, context, embed, evaluate, external, finetune, fuse, lineup, prepare_data, probe, replicate, stack
+from . import textenc, textft, zero_shot
+from .common import (CHEXPERT_COLUMNS, LABELS, load_manifest, mimic_csv, read_predictions, setup_logging,
+                     write_predictions)
 from .synth import make_chexpert_test, make_dataset
 
 
@@ -306,6 +309,41 @@ def run_checks(work: Path, patients: int = 400) -> list[tuple[str, bool, str]]:
                 f"G7 {res['report']['gate']['verdict'].split(':')[0]}; the exposure trap stopped the run")
 
     stage("M7 radiologist labels + external test set (exposure trap)", m7)
+
+    def m8() -> str:
+        bench, ext, t, p = work / "v2_bench", work / "v2_chexpert", "tiny-dinov2_32", "test-pixels_48"
+        # M7's recipe for the tiny ViT (its mean head is M7's run): the attention head, then M8's runs.
+        args = ["--model", "tiny-dinov2", "--epochs", "2", "--batch-size", "16", "--accum", "1", "--encoder-lr", "1e-3",
+                "--head-lr", "1e-2", "--llrd", "1.0", "--steps-per-epoch", "10", "--workers", "0", "--out", str(bench)]
+        finetune.main([*args, "--head", "attention"])
+        for head in ("attention", "mean"):
+            finetune.main([*args, "--head", head, "--seed", "1", "--milestone", "M8"])
+        finetune.main([*args[:2], "--epochs", "4", *args[4:], "--head", "attention", "--run", f"{t}_ft_attn_e6_s0",
+                       "--milestone", "M8"])
+        # M6's adopted text model (frozen BERT on the indication), stood in for by the TF-IDF run under BERT's tag.
+        pred, meta = read_predictions(bench / "predictions" / f"{p}_ctx_indication.parquet")
+        write_predictions(bench, f"{p}_ctx_indication_bert", pred["study_id"], pred["split"],
+                          pred[list(LABELS)].to_numpy(), {**meta, "stack_tag": "indication_bert", "milestone": "M6"})
+        images = [f"{t}_{r}" for r in ("ft_attn_s0", "ft_s0", "ft_attn_s1", "ft_s1", "ft_attn_e6_s0")]
+        pairs = [a for img in images for text in ("indication_bert", "indication")
+                 if not (text == "indication_bert" and "_ft_s" in img) for a in ("--pair", img, f"{p}_ctx_{text}")]
+        stack.main([*pairs, "--out", str(bench), "--n-boot", "50", "--report", "m8_stack.md"])
+        external.main(["chexpert", "--steps", "apply", "--bench", str(bench), "--out", str(ext), "--candidates",
+                       ",".join(r for r in images if r != f"{t}_ft_s0"), "--workers", "0", "--device", "cpu"])
+        res = replicate.main(["--bench", str(bench), "--ext", str(ext), "--labels",
+                              str(paths.mimic_root / external.RADIOLOGIST_FILE), "--prefix", t, "--n-boot", "50",
+                              "--min-count", "5"])
+        assert not res["flags"], res["flags"]
+        undecided = [c["claim"] for c in res["claims"] if c["verdict"].startswith("not decided")]
+        assert not undecided, f"not recomputed with both seeds: {undecided}"
+        # Negative control: two runs with different heads must not pass for twins.
+        trap = replicate.recipe_check(bench, f"{t}_ft_attn_s0", f"{t}_ft_s0")
+        assert "head" in trap["differs"], "the recipe check missed a different head"
+        return (f"verdicts {', '.join(c['verdict'].split(' ')[0].rstrip(':') for c in res['claims'])}; 6 epochs "
+                f"{'adopted' if res['length']['adopted'] else 'not adopted'}; the recipe trap caught: "
+                + ", ".join(trap["differs"]))
+
+    stage("M8 second seed + longer fine-tune (recipe trap)", m8)
 
     def reports() -> str:
         text = evaluate.summarize(out, n_boot=100)

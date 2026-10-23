@@ -463,7 +463,8 @@ def external_audit_md(audit: dict) -> str:
     return "\n".join(lines) + "\n"
 
 
-def apply_probe(bench: Path, out_dir: Path, run: str, workers: int, device: str, n_jobs: int) -> dict:
+def apply_probe(bench: Path, out_dir: Path, run: str, workers: int, device: str, n_jobs: int,
+                milestone: str = "M7") -> dict:
     """Refit the benchmark probe at each label's chosen C, check it reproduces, then score the external images."""
     from .embed import embeddings_path, load_npz
     from .embed import main as embed_main
@@ -500,13 +501,13 @@ def apply_probe(bench: Path, out_dir: Path, run: str, workers: int, device: str,
         raise SystemExit(f"{int(pos.isna().sum())} external studies have no embedding: re-run")
     scores = probe.predict(ext_emb[pos.to_numpy(np.int64)])
     write_predictions(out_dir, run, ext["study_id"], ext["split"], scores, {
-        "kind": "probe", "milestone": "M7", "source_run": run, "source_dir": str(bench), "encoder": encoder,
+        "kind": "probe", "milestone": milestone, "source_run": run, "source_dir": str(bench), "encoder": encoder,
         "size": size, "reproduced_max_diff": diff, "per_label": probe.summary(), "commit": git_commit()})
     return {"run": run, "kind": "probe", "reproduced_max_diff": diff}
 
 
 def apply_finetune(bench: Path, out_dir: Path, run: str, workers: int, device_name: str, batch_size: int = 32,
-                   check_studies: int = 64) -> dict:
+                   check_studies: int = 64, milestone: str = "M7") -> dict:
     """A benchmark fine-tune from its best checkpoint: checked on benchmark test studies, then the external set."""
     import torch
     from torch.utils.data import DataLoader
@@ -550,7 +551,7 @@ def apply_finetune(bench: Path, out_dir: Path, run: str, workers: int, device_na
     ext = load_manifest(out_dir)
     logits = logits_for(Path(out_dir), ext)
     write_predictions(out_dir, run, ext["study_id"], ext["split"], logits, {
-        "kind": "finetune", "milestone": "M7", "head": cfg.get("head", "mean"), "source_run": run,
+        "kind": "finetune", "milestone": milestone, "head": cfg.get("head", "mean"), "source_run": run,
         "source_dir": str(bench), "best_epoch": ckpt.get("epoch"),
         "reload_check": {"studies": int(len(sample)), "correlation": corr,
                          "max_abs_diff": float(np.max(np.abs(got - want)))},
@@ -563,11 +564,12 @@ def apply_models(bench: Path, out_dir: Path, runs: list, workers: int, device: s
     for run in runs:
         if not _exists(bench, run):
             raise SystemExit(f"{run} has no predictions in {bench}: is --bench M5's benchmark directory?")
-        kind = read_predictions(Path(bench) / "predictions" / f"{run}.parquet")[1].get("kind")
+        meta = read_predictions(Path(bench) / "predictions" / f"{run}.parquet")[1]
+        kind, milestone = meta.get("kind"), "M8" if meta.get("milestone") == "M8" else "M7"  # M8's runs keep theirs
         if kind == "probe":
-            done.append(apply_probe(bench, out_dir, run, workers, device, n_jobs))
+            done.append(apply_probe(bench, out_dir, run, workers, device, n_jobs, milestone=milestone))
         elif kind == "finetune":
-            done.append(apply_finetune(bench, out_dir, run, workers, device))
+            done.append(apply_finetune(bench, out_dir, run, workers, device, milestone=milestone))
         else:
             raise SystemExit(f"{run} is a {kind} run: M7b applies probes and fine-tunes only")
     return done

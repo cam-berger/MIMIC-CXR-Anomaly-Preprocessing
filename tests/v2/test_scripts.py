@@ -94,6 +94,48 @@ def test_m7_stages_run_the_external_module(tmp_path):
     res = _run(["m7b"], tmp_path, PYTHON=str(fake), **{**paths, "EXT_OUT": str(bench)})
     assert res.returncode != 0 and "must differ" in res.stderr
 
+
+def test_m8_stages_run_seed_1_the_long_run_and_the_report(tmp_path):
+    env_file = ROOT / ".env"
+    if env_file.exists() and any(k in env_file.read_text() for k in ("BENCH_OUT", "EXT_OUT")):
+        pytest.skip("a local .env sets M8's directories")
+    calls, fake = tmp_path / "calls.txt", tmp_path / "python"
+    fake.write_text(f'#!/usr/bin/env bash\nif [ "$1" = -c ]; then exec "{sys.executable}" "$@"; fi\necho "$*" >> "{calls}"\n')
+    fake.chmod(0o755)
+    bench, ext, p = tmp_path / "bench", tmp_path / "ext", "rad-dino_518"
+    (bench / "predictions").mkdir(parents=True)
+    (bench / "manifest.parquet").touch()
+    paths = {"BENCH_OUT": str(bench), "EXT_OUT": str(ext), "PYTHON": str(fake)}
+    res = _run(["m8"], tmp_path, **paths)
+    assert res.returncode != 0 and "m8 needs m8_gpu's runs" in res.stderr
+    res = _run(["m8_gpu"], tmp_path, **paths)
+    assert res.returncode == 0, res.stderr
+    ft = calls.read_text().splitlines()
+    assert all(line.startswith("-m v2.finetune --model rad-dino --size 518 ") and "--milestone M8" in line for line in ft)
+    assert ["--smoke" in line for line in ft] == [True, True, False, False, False]
+    assert "--head attention --seed 1 --epochs 3 --max-hours 3 --resume" in ft[2] and "--save-embeddings" not in ft[2]
+    assert "--head mean --seed 1 --epochs 3 --max-hours 3 --resume --save-embeddings" in ft[3]
+    assert f"--head attention --seed 0 --epochs 6 --run {p}_ft_attn_e6_s0 --max-hours 6 --resume" in ft[4]
+
+    calls.unlink()  # the Mac part, once the runs are home
+    new = [f"{p}_ft_attn_s1", f"{p}_ft_s1", f"{p}_ft_attn_e6_s0"]
+    texts = [f"{p}_ctx_indication", f"{p}_ctx_text_prior_labels", f"{p}_ctx_indication_bert"]
+    for run in new + texts:
+        (bench / "predictions" / f"{run}.parquet").touch()
+    ext.mkdir()
+    (ext / "manifest.parquet").touch()
+    res = _run(["m8"], tmp_path, **paths)
+    assert res.returncode == 0, res.stderr
+    lines = calls.read_text().splitlines()
+    words = lines[0].split()
+    assert words[:2] == ["-m", "v2.stack"] and words[-2:] == ["--report", "m8_stack.md"]  # M5b's report stays whole
+    pairs = {(words[i + 1], words[i + 2]) for i, w in enumerate(words) if w == "--pair"}
+    assert pairs == {(img, text) for img in new for text in texts if (img, text) != (new[1], texts[2])}
+    assert lines[1].startswith(f"-m v2.external chexpert --steps apply --bench {bench} --out {ext} "
+                               f"--candidates {','.join(new)} --workers ")
+    assert lines[2:] == [f"-m v2.replicate --bench {bench} --ext {ext}", f"-m v2.evaluate --all --out {bench}",
+                         f"-m v2.evaluate --all --out {ext}"]
+
 def test_m0_requires_the_data_path(tmp_path):
     env_file = ROOT / ".env"
     if env_file.exists() and "MIMIC_CXR_JPG_PATH" in env_file.read_text():

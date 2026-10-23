@@ -28,6 +28,10 @@
 #          (mimic-cxr-2.1.0-test-set-labeled.csv in MIMIC_CXR_JPG_PATH) -> BENCH_OUT/reports/m7a_radiologist.md
 #   m7b    M7 on the Mac: the CheXpert test set (CHEXPERT_TEST_PATH: test images + groundtruth.csv) in EXT_OUT;
 #          the benchmark's probe and fine-tunes applied unchanged -> reports/m7b_chexpert.md (gate G7)
+#   m8_gpu M8 on a GPU, with BENCH_OUT's images: seed 1 of bench_ft's two fine-tunes, then the attention head
+#          for 6 epochs (seed 0); about 3.5 h of a GH200
+#   m8     M8 on the Mac, once m8_gpu's runs are home: their stacks, the CheXpert test set (EXT_OUT, from m7b),
+#          then BENCH_OUT/reports/m8_replication.md (each headline verdict with both seeds; 6 epochs or 3)
 #   eval   reports for every run + reports/summary.md with gates G1, G2, G4 and G4b
 #   gpu    smoke m1 m2 m3 eval
 #
@@ -57,7 +61,7 @@ for arg in "$@"; do
 done
 for stage in "${stages[@]}"; do
   case "$stage" in
-    m0|smoke|m1|m2|m3|m4|m4b|bench|bench_ft|bench_stack|bench_text|m7a|m7b|eval) ;;
+    m0|smoke|m1|m2|m3|m4|m4b|bench|bench_ft|bench_stack|bench_text|m7a|m7b|m8_gpu|m8|eval) ;;
     *) echo "Unknown stage: $stage (see the header of $0)" >&2; exit 2 ;;
   esac
 done
@@ -341,6 +345,56 @@ stage_m7b() {  # docs/V2_PLAN.md §6 M7b: under 30 min on the Mac, after the dow
     --out "$EXT_OUT" --workers "$WORKERS"
   run m7b_eval "$PY" -m v2.evaluate --all --out "$EXT_OUT"
   echo "M7b: $EXT_OUT/reports/m7b_chexpert.md (gate G7)"
+}
+
+stage_m8_gpu() {  # docs/V2_PLAN.md §6 M8, on a GPU, with BENCH_OUT's manifest and images (as bench_ft)
+  bench_dir_ok
+  [ -f "$BENCH_OUT/manifest.parquet" ] || { echo "!!! m8_gpu needs $BENCH_OUT's manifest and images" >&2; exit 1; }
+  local hours=${BENCH_FT_HOURS:-3} head name
+  # M5b's recipe: the same command line as bench_ft's runs, so each twin differs only in its seed or epochs.
+  local ft=(--model rad-dino --size 518 --out "$BENCH_OUT" --workers "$WORKERS" --batch-size "$FT_BATCH"
+            --accum "$FT_ACCUM" --milestone M8)
+  for head in mean attention; do  # a few real studies through each head before the long runs
+    run "m8_smoke_$head" "$PY" -m v2.finetune "${ft[@]}" --head "$head" --smoke
+  done
+  for head in attention mean; do  # seed 1; P's twin (the attention head) first
+    if [ "$head" = mean ]; then name=bench_ft_s1; else name=bench_ft_attn_s1; fi
+    run --hours "$(awk "BEGIN{print $hours + 0.5}")" "$name" "$PY" -m v2.finetune "${ft[@]}" --head "$head" \
+      --seed 1 --epochs 3 --max-hours "$hours" --resume $([ "$head" = mean ] && echo --save-embeddings)
+  done
+  # 6 epochs, seed 0: the same schedule stretched (1 epoch of warm-up, cosine over 5), twice the time limit.
+  run --hours "$(awk "BEGIN{print 2 * $hours + 0.5}")" bench_ft_attn_e6_s0 "$PY" -m v2.finetune "${ft[@]}" \
+    --head attention --seed 0 --epochs 6 --run rad-dino_518_ft_attn_e6_s0 --max-hours "$(awk "BEGIN{print 2 * $hours}")" \
+    --resume
+}
+
+stage_m8() {  # docs/V2_PLAN.md §6 M8, on the Mac, once m8_gpu's runs are home
+  bench_dir_ok
+  local p=rad-dino_518 pred="$BENCH_OUT/predictions" img text pairs=() applied=()
+  for img in ft_attn_s1 ft_s1 ft_attn_e6_s0; do
+    [ -f "$pred/${p}_$img.parquet" ] || continue
+    applied+=("${p}_$img")
+    for text in "${p}_ctx_indication" "${p}_ctx_text_prior_labels" "${p}_ctx_indication_bert"; do
+      if [ "$img" = ft_s1 ] && [ "$text" = "${p}_ctx_indication_bert" ]; then continue; fi  # M6's text: attention heads
+      if [ -f "$pred/$text.parquet" ]; then pairs+=(--pair "${p}_$img" "$text"); fi
+    done
+  done
+  if [ ${#applied[@]} -eq 0 ]; then
+    echo "!!! m8 needs m8_gpu's runs in $BENCH_OUT (v2/README.md §3, M8)" >&2; exit 1
+  fi
+  if [ ${#pairs[@]} -gt 0 ]; then  # its own report: M5b's m5_stack.md stays whole
+    run m8_stack "$PY" -m v2.stack "${pairs[@]}" --out "$BENCH_OUT" --report m8_stack.md
+  fi
+  if [ -f "$EXT_OUT/manifest.parquet" ]; then  # M7b's CheXpert test set: the new runs, applied as M7b's were
+    run m8_chexpert "$PY" -m v2.external chexpert --steps apply --bench "$BENCH_OUT" --out "$EXT_OUT" \
+      --candidates "$(IFS=,; echo "${applied[*]}")" --workers "$WORKERS"
+  else
+    echo "--- m8: no CheXpert test set in $EXT_OUT (m7b makes it); G7 won't be recomputed"
+  fi
+  run m8_report "$PY" -m v2.replicate --bench "$BENCH_OUT" --ext "$EXT_OUT"
+  run bench_eval "$PY" -m v2.evaluate --all --out "$BENCH_OUT"
+  if [ -f "$EXT_OUT/manifest.parquet" ]; then run m8_ext_eval "$PY" -m v2.evaluate --all --out "$EXT_OUT"; fi
+  echo "M8: $BENCH_OUT/reports/m8_replication.md (red flags first)"
 }
 
 stage_eval() {

@@ -2,7 +2,7 @@
 
 import shutil
 
-from v2.doctor import Report, check_cohort, check_m4b, check_m7, check_mimic, check_output
+from v2.doctor import Report, check_cohort, check_m4b, check_m7, check_m8, check_mimic, check_output
 from v2.synth import make_chexpert_test
 
 
@@ -53,4 +53,22 @@ def test_m7_check_counts_the_inputs(synth, tmp_path, monkeypatch):
     monkeypatch.setenv("CHEXPERT_TEST_PATH", str(labels_only))  # Redivis's copy: labels, no images
     r = Report()
     check_m7(r, synth.mimic_root)
+    assert r.failures == 0 and r.warnings == 1
+
+
+def test_check_m8_counts_its_inputs(tmp_path, monkeypatch):
+    bench, ext, p = tmp_path / "bench", tmp_path / "ext", "rad-dino_518"
+    (bench / "predictions").mkdir(parents=True)
+    for short in ("ft_attn_s0", "ft_s0", "ctx_indication", "ctx_text_prior_labels", "ctx_indication_bert"):
+        (bench / "predictions" / f"{p}_{short}.parquet").touch()
+    ext.mkdir()
+    (ext / "manifest.parquet").touch()
+    monkeypatch.setenv("BENCH_OUT", str(bench))
+    monkeypatch.setenv("EXT_OUT", str(ext))
+    r = Report()
+    check_m8(r)
+    assert r.failures == 0 and r.warnings == 0  # before the GPU session: none of M8's runs, and that's fine
+    (bench / "predictions" / f"{p}_ctx_indication_bert.parquet").unlink()  # M6's adopted text model
+    r = Report()
+    check_m8(r)
     assert r.failures == 0 and r.warnings == 1

@@ -277,6 +277,8 @@ def build_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     parser.add_argument("--save-embeddings", action="store_true",
                         help="Also save the fine-tuned encoder's features for every study (for v2.fuse)")
     parser.add_argument("--resume", action="store_true", help="Continue from runs/{run}/last.pt")
+    parser.add_argument("--milestone", help="Milestone tag for the run's metadata, e.g. M8 (default: none; "
+                                            "summaries then use the kind's)")
     parser.add_argument("--smoke", action="store_true", help="64 train / 32 val / 32 test studies, 2 epochs")
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args(argv)
@@ -472,7 +474,8 @@ def main(argv: Optional[list[str]] = None) -> str:
                     shuffle=False, **eval_kw)
     logits, _ = predict(model, dl, device, dtype)
     write_predictions(out_dir, run, rows["study_id"], rows["split"], logits, {
-        "kind": "finetune", "head": args.head, **enc.describe(), "best_epoch": best["epoch"],
+        "kind": "finetune", "milestone": args.milestone, "head": args.head, **enc.describe(),
+        "best_epoch": best["epoch"],
         "best_val_macro_auroc": best["val_macro_auroc"], "stopped_early": stopped_early,
         "history": state["history"], "config": config,
     })

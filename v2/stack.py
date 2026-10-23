@@ -112,7 +112,7 @@ def stack_pair(out_dir: Path, image_run: str, text_run: str, folds: int = FOLDS)
         "kind": "stack", "image_run": image_run, "text_run": text_run, "folds": folds, "C": C,
         "image_kind": meta_a.get("kind"), "image_arm": meta_a.get("arm"), "image_head": meta_a.get("head"),
         "text_arm": meta_b.get("arm"), "text_tag": tag, "text_encoder": meta_b.get("text_encoder"),
-        "milestone": meta_b.get("milestone") if meta_b.get("milestone") == "M6" else None,
+        "milestone": later_milestone(meta_a, meta_b),
         "encoder": meta_a.get("encoder"), "size": meta_a.get("size"),
         "image_features": "fine-tuned" if meta_a.get("kind") == "finetune" else meta_a.get("image_features", "frozen"),
         "n_val": int(is_val.sum()), "per_label": info,
@@ -121,7 +121,13 @@ def stack_pair(out_dir: Path, image_run: str, text_run: str, folds: int = FOLDS)
                  "text_arm": meta_b.get("arm"), "text_tag": tag, "info": info, "kept": kept}
 
 
-def write_report(out_dir: Path, stacks: dict, n_boot: int) -> Path:
+def later_milestone(meta_a: dict, meta_b: dict) -> Optional[str]:
+    """M6 (a language model's text run) or M8 (a second seed, a longer fine-tune), the later if both."""
+    tags = [m for m in (meta_a.get("milestone"), meta_b.get("milestone")) if m in ("M6", "M8")]
+    return max(tags) if tags else None
+
+
+def write_report(out_dir: Path, stacks: dict, n_boot: int, name: Optional[str] = None) -> Path:
     bench = split_scheme(out_dir) == "official"
     if bench:  # M5: test_clean is the official test split, and test_v1 is empty
         title, where = "# M5: combiners fit on val, on the benchmark", "§6 M5b amendment"
@@ -178,7 +184,7 @@ def write_report(out_dir: Path, stacks: dict, n_boot: int) -> Path:
     if not bench:
         lines[-1] += (" Under the v1 metric only findings the report mentions count, which biases text gains toward "
                       "zero (§6 M4b amendment): read the v2 columns first.")
-    path = Path(out_dir) / "reports" / ("m5_stack.md" if bench else "m4b_stack.md")
+    path = Path(out_dir) / "reports" / (name or ("m5_stack.md" if bench else "m4b_stack.md"))
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("\n".join(lines) + "\n")
     return path
@@ -191,16 +197,20 @@ def main(argv: Optional[list[str]] = None) -> dict:
     parser.add_argument("--out", default=None, help="v2 output dir (default: $OUTPUT_PATH/v2 or output/v2)")
     parser.add_argument("--folds", type=int, default=FOLDS)
     parser.add_argument("--n-boot", type=int, default=1000)
+    parser.add_argument("--report", help="Report file in reports/ (default: m5_stack.md on M5's benchmark, "
+                                         "else m4b_stack.md); M8 writes m8_stack.md, leaving M5b's whole")
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args(argv)
     setup_logging(args.verbose)
     out_dir = Path(args.out) if args.out else default_out_dir()
+    if args.report and Path(args.report).name != args.report:
+        raise SystemExit("--report takes a file name; the report goes in the output dir's reports/")
     for image_run, text_run in args.pair:
         for run in (image_run, text_run):
             if not (out_dir / "predictions" / f"{run}.parquet").exists():
                 raise SystemExit(f"predictions/{run}.parquet not found")
     stacks = dict(stack_pair(out_dir, image_run, text_run, args.folds) for image_run, text_run in args.pair)
-    path = write_report(out_dir, stacks, args.n_boot)
+    path = write_report(out_dir, stacks, args.n_boot, args.report)
     for run, s in stacks.items():
         c = compare_runs(out_dir, run, s["image_run"], "test_clean", "v2", args.n_boot)
         logger.info("%s - %s (test_clean): %s", run, s["image_run"], fmt_ci(c["diff"], c["diff_ci"]))
