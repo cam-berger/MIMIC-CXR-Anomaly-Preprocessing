@@ -1,6 +1,6 @@
 # v2 Plan: Modern Foundation Models for CheXpert Classification
 
-**Status:** v2.0 done (M0-M3). **G2 PASS:** the fine-tuned RAD-DINO is the image-only v2 baseline, 0.787 [0.769, 0.803] on `test_clean`. **M4 done, G4 PASS:** text written before the X-ray adds +0.016 [0.009, 0.024] to frozen image features (§9). Exploratory follow-ups: +0.009 [0.003, 0.014] on the fine-tuned image; refitting the probe on the fine-tuned features adds +0.006 [0.001, 0.012]; best system by val so far: fine-tuned features + refit probe + text, 0.802 [0.784, 0.819]. **M4b done, G4b FAIL:** text steers an attention head's focus but adds nothing detectable over late fusion (+0.004 [-0.003, 0.011]), which argues against a joint image-text fine-tune. The same head on frozen patch tokens matches the fine-tune (0.789), and fit on val, text adds +0.016 to the fine-tuned image (§9). **M5a done** (official MIMIC-CXR split, positive vs rest, like for like): every image-only run beats the published ResNet-50 (0.781-0.797 against 0.725), image + indication ties MMBT (0.798 against 0.794), and the indication alone trails BERT (0.675 against 0.704). Best run: the attention head with all pre-imaging text, 0.818 [0.803, 0.832], not like for like (§9). **M5 done:** like for like on the official split, a fine-tuned RAD-DINO plus the indication beats MMBT, 0.815 [0.801, 0.829] against 0.794 (val combiner, a lower bound; one seed). Fine-tuning on 213k studies adds +0.010 over the frozen attention head, and after fine-tuning the attention head no longer beats mean pooling (+0.002 [-0.002, 0.006]). Best number so far: 0.825 with all pre-imaging text (exploratory). **M6 done, G6 FAIL:** fine-tuning BERT on the indication closes the last like-for-like gap (0.707 against MMBT's BERT at 0.704; +0.033 over TF-IDF), but medical pretraining adds nothing detectable (+0.001 [-0.005, 0.006]). With the image, the text model barely matters: the seven image + indication stacks score 0.812-0.819, all above MMBT, and the val rule adopts frozen BERT (0.812 [0.797, 0.826]). **M7a done:** with a radiologist's labels on 596 official-test studies, the image model scores +0.029 [0.012, 0.046] higher than with the labeler's (Cardiomegaly +0.067, Pneumonia +0.116): the labeler's errors understate every model, and MMBT's Cardiomegaly lead looks like label noise. The text gain there, +0.003 [-0.008, 0.014], is too uncertain to read. **M7b done, G7 PASS:** on the CheXpert test set (500 Stanford studies, labeled by five radiologists' majority vote), the fine-tuned RAD-DINO scores 0.904 [0.886, 0.919] on the five standard findings without seeing a CheXpert label: level with CheXzero (0.889) and with DenseNet-121 trained on CheXpert's own labels (0.902), below DAM (0.931). Its lead over CheXzero is all Atelectasis. Caveat: RAD-DINO's encoder saw 223k unlabeled CheXpert images. Next: the v2 write-up, which G7's PASS allows (§6 M7) · how to run: [`v2/README.md`](../v2/README.md) · **Branch:** `v2` (from `main`) · **Started:** 2026-10-18
+**Status:** v2.0 done (M0-M3). **G2 PASS:** the fine-tuned RAD-DINO is the image-only v2 baseline, 0.787 [0.769, 0.803] on `test_clean`. **M4 done, G4 PASS:** text written before the X-ray adds +0.016 [0.009, 0.024] to frozen image features (§9). Exploratory follow-ups: +0.009 [0.003, 0.014] on the fine-tuned image; refitting the probe on the fine-tuned features adds +0.006 [0.001, 0.012]; best system by val so far: fine-tuned features + refit probe + text, 0.802 [0.784, 0.819]. **M4b done, G4b FAIL:** text steers an attention head's focus but adds nothing detectable over late fusion (+0.004 [-0.003, 0.011]), which argues against a joint image-text fine-tune. The same head on frozen patch tokens matches the fine-tune (0.789), and fit on val, text adds +0.016 to the fine-tuned image (§9). **M5a done** (official MIMIC-CXR split, positive vs rest, like for like): every image-only run beats the published ResNet-50 (0.781-0.797 against 0.725), image + indication ties MMBT (0.798 against 0.794), and the indication alone trails BERT (0.675 against 0.704). Best run: the attention head with all pre-imaging text, 0.818 [0.803, 0.832], not like for like (§9). **M5 done:** like for like on the official split, a fine-tuned RAD-DINO plus the indication beats MMBT, 0.815 [0.801, 0.829] against 0.794 (val combiner, a lower bound; one seed). Fine-tuning on 213k studies adds +0.010 over the frozen attention head, and after fine-tuning the attention head no longer beats mean pooling (+0.002 [-0.002, 0.006]). Best number so far: 0.825 with all pre-imaging text (exploratory). **M6 done, G6 FAIL:** fine-tuning BERT on the indication closes the last like-for-like gap (0.707 against MMBT's BERT at 0.704; +0.033 over TF-IDF), but medical pretraining adds nothing detectable (+0.001 [-0.005, 0.006]). With the image, the text model barely matters: the seven image + indication stacks score 0.812-0.819, all above MMBT, and the val rule adopts frozen BERT (0.812 [0.797, 0.826]). **M7a done:** with a radiologist's labels on 596 official-test studies, the image model scores +0.029 [0.012, 0.046] higher than with the labeler's (Cardiomegaly +0.067, Pneumonia +0.116): the labeler's errors understate every model, and MMBT's Cardiomegaly lead looks like label noise. The text gain there, +0.003 [-0.008, 0.014], is too uncertain to read. **M7b done, G7 PASS:** on the CheXpert test set (500 Stanford studies, labeled by five radiologists' majority vote), the fine-tuned RAD-DINO scores 0.904 [0.886, 0.919] on the five standard findings without seeing a CheXpert label: level with CheXzero (0.889) and with DenseNet-121 trained on CheXpert's own labels (0.902), below DAM (0.931). Its lead over CheXzero is all Atelectasis. Caveat: RAD-DINO's encoder saw 223k unlabeled CheXpert images. Next: M8 (§6), a second fine-tune seed and a 6-epoch run in one GPU session, then the v2 write-up, which G7's PASS allows · how to run: [`v2/README.md`](../v2/README.md) · **Branch:** `v2` (from `main`) · **Started:** 2026-10-18
 
 ## 1. Goal
 
@@ -824,6 +824,67 @@ Mac, nothing scored):*
 **Done when:** `reports/m7a_radiologist.md` (in `BENCH_OUT`) and
 `reports/m7b_chexpert.md` (in `EXT_OUT`) exist, G7 is decided, and their rows
 are logged in §9.
+
+### M8: A second seed, and a longer fine-tune (written 2026-10-23, before any M8 run)
+
+**Question:** do the headline verdicts survive a second training seed, and
+would the fine-tune gain from more epochs? Every headline number rests on
+one fine-tune seed (`s0`): image only 0.807 against ResNet-50's 0.725; image +
+indication 0.812 against MMBT's 0.794, with MMBT only 0.003 under our interval;
+M7a's +0.029; and G7 (0.904 against CheXzero's 0.889). Both benchmark
+fine-tunes also peaked at their last epoch of 3. A cosine schedule produces
+that anyway, so it doesn't show that longer training would help. Nothing
+logged is re-scored or replaced, and P stays `ft_attn_s0` for M7's records.
+
+**Runs** (one GPU session, about 4 h of a GH200 with the upload; images, code
+and settings as in M5b, except where stated):
+- `rad-dino_518_ft_s1` and `rad-dino_518_ft_attn_s1`: M5b's two fine-tunes with
+  seed 1 (3 epochs, 1 of warm-up; the mean head saves its features, as `s0`
+  did). The seed sets the head's initialization and the data order.
+- `rad-dino_518_ft_attn_e6_s0`: the attention-head fine-tune with seed 0 and 6
+  epochs (1 of warm-up, then the cosine schedule over the other 5). It sees
+  the same data order as `ft_attn_s0`; only the schedule's length differs.
+  Best epoch on val, as always.
+
+**Then, on the Mac** (under an hour):
+- Stacks, by the val combiner: each new run with the indication (TF-IDF) and
+  with all pre-imaging text, as in M5b; the two attention-head runs also with
+  M6's adopted text model (frozen BERT on the indication).
+- The three new runs on the CheXpert test set, as in M7b (reloaded from
+  `best.pt`, correlation at least 0.99).
+- M7a's comparison for `ft_attn_s1`: radiologist minus labeler, paired.
+
+**Replication rule.** Each headline verdict is recomputed with seed 1 of the
+same model (the attention head, P's twin, and its frozen-BERT stack):
+1. Image only against ResNet-50 (official test, positive vs rest; M5's rule).
+2. Image + indication against MMBT (the same).
+3. G7: the five-finding mean on CheXpert against CheXzero's 0.889.
+4. M7a: radiologist minus labeler (v2 policy), its 95% interval above 0.
+
+A verdict stands if both seeds give it. If they differ, the write-up states
+the weaker verdict that both support (for example "level with MMBT" instead of
+"ahead of MMBT") and calls the difference seed-dependent. Reported with them:
+seed 1 minus seed 0, paired, for each fine-tune and stack (the size of seed
+noise), and the two seeds' mean.
+
+**Training length** (M7's adoption rule): six epochs replace three for future
+fine-tunes only if `ft_attn_e6_s0` minus `ft_attn_s0` on val (v2 policy, paired,
+1,000 patient bootstraps) has a 95% interval above 0. Reported, not chosen on:
+the same difference on the official test and on CheXpert, next to seed 1 minus
+seed 0, so a gain can be read against seed noise.
+
+**Checks** (any failure is a red flag, read first):
+- Each new run's recipe must equal its twin's except the seed (or, for the
+  6-epoch run, the epochs and total steps): model and revision, image size,
+  head, grid, warm-up, learning rates, layer decay, weight decay, clipping,
+  precision, effective batch, steps per epoch, training and val counts.
+  Library versions are listed if they differ.
+- No new run may stop on its time limit (`stopped_early`).
+- The CheXpert reload checks, as in M7b.
+
+**Done when:** `reports/m8_replication.md` (in `BENCH_OUT`) exists, the four
+verdicts are recorded for both seeds, the training-length decision is made,
+and the rows are logged in §9.
 
 ## 7. Code
 
