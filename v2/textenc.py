@@ -109,7 +109,9 @@ class TextEncoder(nn.Module):
         """Tokens per text before truncation (to report how many were cut)."""
         if isinstance(self.tokenizer, HashWordTokenizer):
             return self.tokenizer.token_counts(texts)
-        return np.array([len(ids) for ids in self.tokenizer(texts, add_special_tokens=True)["input_ids"]])
+        # Counting means encoding without truncation: verbose=False keeps the tokenizer from warning about
+        # sequences longer than the model takes (tokenize() and embed_texts() always truncate).
+        return np.array([len(ids) for ids in self.tokenizer(texts, add_special_tokens=True, verbose=False)["input_ids"]])
 
     def forward(self, input_ids: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor:
         """Last-layer hidden states [B, T, width]."""

@@ -166,7 +166,9 @@ def write_report(out_dir: Path, stacks: dict, n_boot: int) -> Path:
                    "estimate is a lower bound" if c["diff"] < -CHECK_MARGIN else
                    f"within {CHECK_MARGIN} or above: the combiner loses little")
         on = "the official test" if bench else "test_clean"
-        lines.append(f"- `{run}` minus `{concat}` on {on}: {fmt_ci(c['diff'], c['diff_ci'])} -> {verdict}")
+        # Four decimals: the margin is 0.005, so three would print -0.0049 and -0.0051 alike under opposite verdicts.
+        lo, hi = c["diff_ci"]
+        lines.append(f"- `{run}` minus `{concat}` on {on}: {c['diff']:.4f} [{lo:.4f}, {hi:.4f}] -> {verdict}")
     lines += ["", "## Weights (fit on all of val, standardized inputs; mean over classes)", "",
               "| Stacked run | Image weight | Text weight | Classes kept at the image score |", "|---|---|---|---|"]
     for run, wi, wt, kept in weights:

@@ -1,6 +1,7 @@
 """M5: the standard benchmark (all studies, official split), positive-vs-rest scoring and the lineup report."""
 
 import json
+import re
 
 import numpy as np
 import pandas as pd
@@ -78,6 +79,7 @@ def test_benchmark_reports_have_no_v2_gates(bench):
     assert stacked.startswith("# M5: combiners fit on val") and "test_v1" not in stacked
     for text in ("indication", "text_prior_labels"):  # the check, against the matching concatenation
         assert f"`test-pixels_48_probe_stack_{text}` minus `test-pixels_48_ctx_image_{text}`" in stacked
+    assert re.search(r"on the official test: -?\d\.\d{4} \[-?\d\.\d{4}, -?\d\.\d{4}\] -> ", stacked)  # the margin's digits
     meta = json.loads((bench / "predictions" / "test-pixels_48_attn_h0_stack_indication.json").read_text())
     assert (meta["image_kind"], meta["image_arm"], meta["text_arm"]) == ("attend", "h0", "indication")
 
