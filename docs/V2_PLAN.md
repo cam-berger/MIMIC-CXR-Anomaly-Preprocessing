@@ -1,6 +1,6 @@
 # v2 Plan: Modern Foundation Models for CheXpert Classification
 
-**Status:** v2.0 done (M0-M3). **G2 PASS:** the fine-tuned RAD-DINO is the image-only v2 baseline, 0.787 [0.769, 0.803] on `test_clean`. **M4 done, G4 PASS:** text written before the X-ray adds +0.016 [0.009, 0.024] to frozen image features (§9). Exploratory follow-ups: +0.009 [0.003, 0.014] on the fine-tuned image; refitting the probe on the fine-tuned features adds +0.006 [0.001, 0.012]; best system by val so far: fine-tuned features + refit probe + text, 0.802 [0.784, 0.819]. **M4b done, G4b FAIL:** text steers an attention head's focus but adds nothing detectable over late fusion (+0.004 [-0.003, 0.011]), which argues against a joint image-text fine-tune. The same head on frozen patch tokens matches the fine-tune (0.789), and fit on val, text adds +0.016 to the fine-tuned image (§9). **M5a done** (official MIMIC-CXR split, positive vs rest, like for like): every image-only run beats the published ResNet-50 (0.781-0.797 against 0.725), image + indication ties MMBT (0.798 against 0.794), and the indication alone trails BERT (0.675 against 0.704). Best run: the attention head with all pre-imaging text, 0.818 [0.803, 0.832], not like for like (§9). **M5 done:** like for like on the official split, a fine-tuned RAD-DINO plus the indication beats MMBT, 0.815 [0.801, 0.829] against 0.794 (val combiner, a lower bound; one seed). Fine-tuning on 213k studies adds +0.010 over the frozen attention head, and after fine-tuning the attention head no longer beats mean pooling (+0.002 [-0.002, 0.006]). Best number so far: 0.825 with all pre-imaging text (exploratory). **M6 done, G6 FAIL:** fine-tuning BERT on the indication closes the last like-for-like gap (0.707 against MMBT's BERT at 0.704; +0.033 over TF-IDF), but medical pretraining adds nothing detectable (+0.001 [-0.005, 0.006]). With the image, the text model barely matters: the seven image + indication stacks score 0.812-0.819, all above MMBT, and the val rule adopts frozen BERT (0.812 [0.797, 0.826]). Next: external validation, to be pre-registered: radiologist labels on the official test split, then the CheXpert test set · how to run: [`v2/README.md`](../v2/README.md) · **Branch:** `v2` (from `main`) · **Started:** 2026-10-18
+**Status:** v2.0 done (M0-M3). **G2 PASS:** the fine-tuned RAD-DINO is the image-only v2 baseline, 0.787 [0.769, 0.803] on `test_clean`. **M4 done, G4 PASS:** text written before the X-ray adds +0.016 [0.009, 0.024] to frozen image features (§9). Exploratory follow-ups: +0.009 [0.003, 0.014] on the fine-tuned image; refitting the probe on the fine-tuned features adds +0.006 [0.001, 0.012]; best system by val so far: fine-tuned features + refit probe + text, 0.802 [0.784, 0.819]. **M4b done, G4b FAIL:** text steers an attention head's focus but adds nothing detectable over late fusion (+0.004 [-0.003, 0.011]), which argues against a joint image-text fine-tune. The same head on frozen patch tokens matches the fine-tune (0.789), and fit on val, text adds +0.016 to the fine-tuned image (§9). **M5a done** (official MIMIC-CXR split, positive vs rest, like for like): every image-only run beats the published ResNet-50 (0.781-0.797 against 0.725), image + indication ties MMBT (0.798 against 0.794), and the indication alone trails BERT (0.675 against 0.704). Best run: the attention head with all pre-imaging text, 0.818 [0.803, 0.832], not like for like (§9). **M5 done:** like for like on the official split, a fine-tuned RAD-DINO plus the indication beats MMBT, 0.815 [0.801, 0.829] against 0.794 (val combiner, a lower bound; one seed). Fine-tuning on 213k studies adds +0.010 over the frozen attention head, and after fine-tuning the attention head no longer beats mean pooling (+0.002 [-0.002, 0.006]). Best number so far: 0.825 with all pre-imaging text (exploratory). **M6 done, G6 FAIL:** fine-tuning BERT on the indication closes the last like-for-like gap (0.707 against MMBT's BERT at 0.704; +0.033 over TF-IDF), but medical pretraining adds nothing detectable (+0.001 [-0.005, 0.006]). With the image, the text model barely matters: the seven image + indication stacks score 0.812-0.819, all above MMBT, and the val rule adopts frozen BERT (0.812 [0.797, 0.826]). Next: M7 (§6, pre-registered 2026-10-23): external validation, a radiologist's labels on the official test split, then the CheXpert test set (gate G7, against CheXzero's 0.889) · how to run: [`v2/README.md`](../v2/README.md) · **Branch:** `v2` (from `main`) · **Started:** 2026-10-18
 
 ## 1. Goal
 
@@ -688,6 +688,125 @@ fine-tunes first, so a time cut can drop frozen arms but never G6's inputs.
 **Done when:** `reports/m6_text.md` (G6 and the comparisons) and the updated
 `reports/lineup.md` exist, and their rows are logged in §9.
 
+### M7: External validation (written 2026-10-23, before any M7 run)
+
+**Question:** do v2's results hold with labels the CheXpert labeler didn't
+produce, and at a hospital other than MIMIC's? Every number so far is scored
+against labels the labeler extracted from MIMIC's reports. M7 trains nothing:
+it re-scores existing predictions against a radiologist's labels (M7a), then
+applies the benchmark's image models to the CheXpert test set (M7b).
+
+**M7a: a radiologist's labels on the official test split** (no new data;
+minutes on the Mac)
+
+- **Labels:** `mimic-cxr-2.1.0-test-set-labeled.csv` from MIMIC-CXR-JPG 2.1.0:
+  one board-certified radiologist's reading of 687 reports, sampled to enrich
+  findings, in the labeler's 14 categories and values (1 / 0 / -1 / blank).
+  The labeler was validated against it. The official test split is every
+  study of the patients behind these reports, so all 687 are in it. The
+  radiologist read the same reports (the whole report or the impression isn't
+  documented), so M7a measures the labeler's errors, not disagreement between
+  report and image.
+- **Studies:** the benchmark's official test studies with a radiologist row
+  (at most 687).
+- **Scoring:** both policies (v2 and positive vs rest), over the classes
+  measurable (at least 30 positives and 30 negatives) under both the
+  radiologist's and the labeler's labels on these studies, frozen when the
+  labels are joined.
+- **Fixed runs:**
+  1. The primary image model, P: of the image-only benchmark runs M7b can
+     apply (`rad-dino_518_probe`, `rad-dino_518_ft_s0`,
+     `rad-dino_518_ft_attn_s0`), the one with the best val score (v2 policy).
+  2. The adopted image + indication system (§9, M6):
+     `rad-dino_518_ft_attn_s0_stack_indication_bert`.
+- **Reported** (paired over the same studies, 1,000 patient resamples; not
+  gates):
+  - For each fixed run, macro AUROC with the radiologist's labels minus with
+    the labeler's. Above 0: the labeler's noise hides some of the model's
+    skill. Below 0: the model learned some of the labeler's errors, and the
+    labeler's labels flatter it.
+  - The text gain, run 2 minus `rad-dino_518_ft_attn_s0`, with each set of
+    labels.
+  - Per class, Cardiomegaly first (MMBT's one clear lead in M5).
+  - Every benchmark run on these studies with the radiologist's labels (a
+    table, no inference).
+- **Power:** about 690 studies from fewer than 293 patients give intervals of
+  roughly ±0.02-0.03. M7a can show a large effect; it can't confirm a small
+  one such as the +0.009 text gain.
+
+**M7b: the CheXpert test set** (new data, image only; under 30 min on the Mac
+after the download)
+
+- **Data:** 500 studies from 500 Stanford patients (668 images). Ground truth
+  is the majority vote of 5 board-certified radiologists who read the studies,
+  binarized (present or uncertain-likely counts as positive), for 14
+  observations with the same names as ours. Labels: `groundtruth.csv` from
+  `github.com/rajpurkarlab/cheXpert-test-set-labels`. Images: the CheXlocalize
+  release on Stanford AIMI, under its terms. MIMIC's handling rules apply
+  here too: the assistant never reads records, only aggregate reports. Output
+  goes to its own directory (`EXT_OUT`, default `$OUTPUT_PATH/v2_chexpert`).
+- **Images:** one frontal image per study (the frontal view with the lowest
+  view number); a study with none is dropped and counted. Resized and stored
+  exactly as the benchmark's images. No lateral images.
+- **Exposure:** RAD-DINO's `training_images.csv` holds 223,648 CheXpert
+  images: every training image (223,414 from 64,540 patients), every
+  validation image (234 from 200 patients), and none from the test set's 500
+  patients (checked 2026-10-23). The pipeline repeats the check and stops on
+  any overlap. The validation set isn't used at all. Every M7b number carries
+  this caveat: RAD-DINO has seen 223k unlabeled images from this hospital, so
+  M7b tests how heads trained on MIMIC's labels transfer, with an encoder that
+  knows the domain. CheXzero's encoder didn't.
+- **Models** (no training on CheXpert; nothing is chosen on it):
+  - `rad-dino_518_probe`: refit on the benchmark's training embeddings as in
+    M5a (C chosen on the benchmark's val), then applied to the CheXpert
+    images' embeddings. The refit must reproduce the benchmark's predictions
+    (largest difference below 1e-6), or the run stops.
+  - `rad-dino_518_ft_s0` and `rad-dino_518_ft_attn_s0`: their saved best
+    checkpoints, unchanged.
+  - Not `attn_h0`: its heads aren't saved, and refitting five seeds on the
+    49 GB token cache isn't worth it for a reference model.
+- **Metric:** mean AUROC over the five findings the literature reports on
+  this set (Atelectasis, Cardiomegaly, Consolidation, Edema, Pleural
+  Effusion), with a 95% bootstrap interval over the 500 patients. Secondary:
+  macro AUROC over our 12 classes where measurable. The labels are binary, so
+  the v2 policy and positive vs rest coincide.
+- **Published, same test set and findings** (the means have no published
+  intervals):
+  - CheXzero, 0.889 (Tiu et al., Nat. Biomed. Eng. 2022): trained on
+    MIMIC-CXR's images and reports, without labels. It shares our training
+    hospital, so it is the like-for-like reference. Per class: Atelectasis
+    0.816, Cardiomegaly 0.906, Consolidation 0.892, Edema 0.897, Pleural
+    Effusion 0.932.
+  - DenseNet-121 0.902 and DAM 0.931 (the same paper's Table 2): trained on
+    CheXpert's own training labels, so in-domain; context only.
+- **Gate G7 (generalization):** P's five-finding mean against CheXzero's 0.889,
+  by M5's rule. PASS if 0.889 is inside P's 95% interval or below it; FAIL if
+  above it.
+  - PASS: a model supervised by MIMIC's labeler output transfers to another
+    hospital at least as well as the best published MIMIC-trained model. The
+    v2 write-up goes ahead.
+  - FAIL: transfer is the weak point. Next work targets it (report-supervised
+    fine-tuning, backlog 6, or training on more than one hospital) before any
+    write-up.
+- **Reported, not gated:** each model's per-class AUROCs next to CheXzero's;
+  the other two models' means; P's mean over the same five findings on
+  MIMIC's official test (both policies), as a transfer gap that is
+  descriptive only (different labels and patients).
+- **Red flags:** a CheXpert test patient in RAD-DINO's list; a probe refit
+  that doesn't reproduce; a five-finding mean above 0.95 (check how labels
+  and images are joined before reading on).
+
+**Adoption rules from M7 on (the lesson of M6):** M6's rule took the best of
+seven val scores that sat within 0.008 of each other, inside val's ±0.02
+intervals, and it picked the lowest of the seven on test. From now on, a more
+complex component replaces the incumbent only if its paired val gain has a
+95% interval above 0; otherwise the simpler one stays. M6's adoption stands as
+pre-registered.
+
+**Done when:** `reports/m7a_radiologist.md` (in `BENCH_OUT`) and
+`reports/m7b_chexpert.md` (in `EXT_OUT`) exist, G7 is decided, and their rows
+are logged in §9.
+
 ## 7. Code
 
 A standalone package, `v2/`, on this branch. It doesn't touch the v1 pipeline.
@@ -937,6 +1056,9 @@ Ordered by expected value per unit of cost:
 - [ ] A Hugging Face account, with the MedSigLIP terms accepted (for M2)
 - [ ] AI assistants never see record-level MIMIC data (`v2/README.md` §9)
 - [ ] A GPU provider account (for M3)
+- [ ] The CheXpert test set (M7b): images from the CheXlocalize release on
+      Stanford AIMI, under its terms; labels from
+      `github.com/rajpurkarlab/cheXpert-test-set-labels`
 - [ ] Agreement on the task definition (§3), the label policy (§3) and the
       gates G0-G2 (§6)
 
@@ -948,3 +1070,6 @@ Ordered by expected value per unit of cost:
 - MedSigLIP and MedGemma: <https://arxiv.org/abs/2507.05201>, <https://huggingface.co/google/medsiglip-448>
 - DINOv2: <https://arxiv.org/abs/2304.07193>
 - LP-FT (fine-tuning can distort pretrained features): <https://arxiv.org/abs/2202.10054>
+- CheXpert (test set, the five findings): <https://arxiv.org/abs/1901.07031>; test labels:
+  <https://github.com/rajpurkarlab/cheXpert-test-set-labels>; images: <https://aimi.stanford.edu/datasets/chexlocalize>
+- CheXzero (0.889 on the CheXpert test set): <https://doi.org/10.1038/s41551-022-00936-9>
