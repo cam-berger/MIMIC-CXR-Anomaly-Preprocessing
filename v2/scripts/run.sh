@@ -24,6 +24,10 @@
 #   bench_text  M6 on the Mac: BERT-family encoders for the pre-imaging text (TEXT_ENCODERS, default bert
 #          biomedbert clinicalbert): a fine-tune on the indication, frozen embeddings and probes, the val
 #          combiner with the best image model, reports/m6_text.md (gate G6) and the lineup; 8-12 h (TOTAL_HOURS=16)
+#   m7a    M7 on the Mac: the benchmark's runs scored against a radiologist's labels on the official test split
+#          (mimic-cxr-2.1.0-test-set-labeled.csv in MIMIC_CXR_JPG_PATH) -> BENCH_OUT/reports/m7a_radiologist.md
+#   m7b    M7 on the Mac: the CheXpert test set (CHEXPERT_TEST_PATH: test images + groundtruth.csv) in EXT_OUT;
+#          the benchmark's probe and fine-tunes applied unchanged -> reports/m7b_chexpert.md (gate G7)
 #   eval   reports for every run + reports/summary.md with gates G1, G2, G4 and G4b
 #   gpu    smoke m1 m2 m3 eval
 #
@@ -33,6 +37,8 @@
 #   MIMIC_CXR_REPORTS_PATH, MIMIC_IV_ED_PATH, MIMIC_IV_PATH (optional)   M4 sources (m4 only)
 #   V2_OUT              output dir (default: $OUTPUT_PATH/v2, or output/v2)
 #   BENCH_OUT           M5's benchmark output dir (default: $OUTPUT_PATH/v2_bench); never the same as V2_OUT
+#   CHEXPERT_TEST_PATH  M7b: the CheXpert test images and groundtruth.csv
+#   EXT_OUT             M7b's output dir (default: $OUTPUT_PATH/v2_chexpert); never V2_OUT or BENCH_OUT
 #   SIZE                encoder input size (default: 518 on CUDA, 224 on Apple MPS or CPU)
 #   MAX_TRAIN           embed and probe only N training studies (CPU pilots); default: all
 #   FT_BATCH, FT_ACCUM  fine-tune batch and accumulation (default 16 x 2; use 8 x 4 under 40 GB)
@@ -51,7 +57,7 @@ for arg in "$@"; do
 done
 for stage in "${stages[@]}"; do
   case "$stage" in
-    m0|smoke|m1|m2|m3|m4|m4b|bench|bench_ft|bench_stack|bench_text|eval) ;;
+    m0|smoke|m1|m2|m3|m4|m4b|bench|bench_ft|bench_stack|bench_text|m7a|m7b|eval) ;;
     *) echo "Unknown stage: $stage (see the header of $0)" >&2; exit 2 ;;
   esac
 done
@@ -68,6 +74,7 @@ else PY=${PYTHON:-$(command -v python || command -v python3)}; fi
 OUTPUT_PATH=${OUTPUT_PATH:-output}
 OUT=${V2_OUT:-$OUTPUT_PATH/v2}
 BENCH_OUT=${BENCH_OUT:-$OUTPUT_PATH/v2_bench}
+EXT_OUT=${EXT_OUT:-$OUTPUT_PATH/v2_chexpert}
 if [ -z "${COHORT_DIR:-}" ] && [ -f "$OUTPUT_PATH/cohorts/anomalous_train.parquet" ]; then
   COHORT_DIR=$OUTPUT_PATH/cohorts
 fi
@@ -311,6 +318,29 @@ stage_bench_text() {  # docs/V2_PLAN.md §6 M6, on the Mac, after bench_stack
   run bench_lineup "$PY" -m v2.lineup --out "$BENCH_OUT"
   run bench_eval "$PY" -m v2.evaluate --all --out "$BENCH_OUT"
   echo "M6: $BENCH_OUT/reports/m6_text.md (gate G6); lineup: $BENCH_OUT/reports/lineup.md"
+}
+
+stage_m7a() {  # docs/V2_PLAN.md §6 M7a: minutes, on the Mac
+  bench_dir_ok
+  : "${MIMIC_CXR_JPG_PATH:?m7a needs MIMIC_CXR_JPG_PATH, the MIMIC-CXR-JPG 2.1.0 root with the radiologist labels}"
+  run m7a "$PY" -m v2.external radiologist --bench "$BENCH_OUT"
+  echo "M7a: $BENCH_OUT/reports/m7a_radiologist.md"
+}
+
+stage_m7b() {  # docs/V2_PLAN.md §6 M7b: under 30 min on the Mac, after the download
+  bench_dir_ok
+  : "${CHEXPERT_TEST_PATH:?m7b needs CHEXPERT_TEST_PATH (the CheXpert test images and groundtruth.csv)}"
+  local d
+  for d in "$OUT" "$BENCH_OUT"; do
+    if [ "$(cd "$(dirname "$EXT_OUT")" 2>/dev/null && pwd)/$(basename "$EXT_OUT")" = \
+         "$(cd "$(dirname "$d")" 2>/dev/null && pwd)/$(basename "$d")" ]; then
+      echo "!!! EXT_OUT ($EXT_OUT) must differ from $d" >&2; exit 1
+    fi
+  done
+  run --hours 2 m7b "$PY" -m v2.external chexpert --chexpert "$CHEXPERT_TEST_PATH" --bench "$BENCH_OUT" \
+    --out "$EXT_OUT" --workers "$WORKERS"
+  run m7b_eval "$PY" -m v2.evaluate --all --out "$EXT_OUT"
+  echo "M7b: $EXT_OUT/reports/m7b_chexpert.md (gate G7)"
 }
 
 stage_eval() {

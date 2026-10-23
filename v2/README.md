@@ -62,6 +62,8 @@ them with v1's `python build_cohort.py --anomalous-only`.
 | M5a: line up with published results | `TOTAL_HOURS=20 bash v2/scripts/run.sh bench`; read `$OUTPUT_PATH/v2_bench/reports/lineup.md` (red flags, then the like-for-like table) | laptop with an Apple GPU and the data drive, ~65 GB free | measured: prepare 9 h from a USB hard drive (1-3 h from a fast disk), embeddings and tokens 6.1 h, probe and fusion 27 min, attention heads 2.3 h |
 | M5b, on the Mac: text through the val combiner | `bash v2/scripts/run.sh bench_stack`; read `reports/m5_stack.md` (the check first), then `lineup.md` | laptop | about 30 min; run it again after the GPU part |
 | M5b, on a GPU: two fine-tunes on the benchmark | `bash v2/scripts/run.sh bench_ft` (§3, M5b) | rented GPU | about 3.5 h of an A100 for seed 0 of both heads, plus uploading ~16 GB |
+| M7a: a radiologist's labels on the official test split | `bash v2/scripts/run.sh m7a`; read `reports/m7a_radiologist.md` in `BENCH_OUT` | laptop (needs `mimic-cxr-2.1.0-test-set-labeled.csv` in `MIMIC_CXR_JPG_PATH`) | minutes |
+| M7b: the CheXpert test set | `bash v2/scripts/run.sh m7b`; read `reports/m7b_chexpert.md` in `EXT_OUT` (red flags, then **G7**) | laptop with an Apple GPU; `CHEXPERT_TEST_PATH` holds the test images and `groundtruth.csv` | under 30 min |
 | M6: BERT-family encoders for the pre-imaging text | `TOTAL_HOURS=16 bash v2/scripts/run.sh bench_text`; read `reports/m6_text.md` (red flags, then **G6**), then `lineup.md` | laptop with an Apple GPU, ~8 GB free (text embeddings ~6 GB); downloads three public models (~2 GB) | estimated 8-12 h (not yet measured): three fine-tunes first, then frozen embeddings and probes per encoder |
 
 `run.sh` writes a log per step to `output/v2/logs/` and stops at the first
@@ -171,7 +173,15 @@ reports/m4b_stack.md                      M4b: the combiner fit on val, and its 
 reports/m5_stack.md                       M5b (BENCH_OUT): the combiners on the benchmark, and their checks
 embeddings/text_{encoder}_{source}.npz    M6 (BENCH_OUT): a language model's mean-pooled text embedding per study and source (record-level)
 reports/m6_text.md                        M6 (BENCH_OUT): red flags, gate G6, the encoders compared, image + text through the combiner
+reports/m7a_radiologist.md                M7a (BENCH_OUT): every run against a radiologist's labels, paired with the labeler's
 ```
+
+M7b's CheXpert test set lives in its own directory, `EXT_OUT` (default
+`$OUTPUT_PATH/v2_chexpert`), with the usual layout: `manifest.parquet` (500
+studies, all `test`), `images/`, `audit.md` (frontal picks, label counts,
+RAD-DINO's training list checked for test patients), the benchmark's models'
+`predictions/` and `reports/m7b_chexpert.md` (gate G7). Nothing is trained
+there.
 
 M5's benchmark (§6 M5) lives in its own directory, `BENCH_OUT` (default
 `$OUTPUT_PATH/v2_bench`), with the same layout: every frontal study, the
@@ -207,6 +217,9 @@ language model) and `{image run}_stack_{arm}_{encoder}` or `_stack_{encoder}_ft_
   - **G4b** (M4b): `h2` minus `h1` on `test_clean`, read only after the head validity check passes.
   - **G6** (M6, benchmark): on the indication alone, the fine-tuned medical encoder with the better val
     score (`biomedbert` or `clinicalbert`) minus the fine-tuned `bert`, on the official test split.
+  - **G7** (M7b): on the CheXpert test set, the benchmark image model with the best val score, mean AUROC
+    over the five usual findings, against CheXzero's 0.889 (also trained on MIMIC-CXR): PASS unless 0.889 is
+    above our 95% interval.
 - **M5 lineup:** published results use "positive vs rest" (uncertain and
   unmentioned count as negative), so `lineup.md` scores the official test
   split that way (`--metric u0` in `evaluate`). A published number reads as
@@ -243,6 +256,8 @@ python -m v2.textft --encoder biomedbert --out output/v2_bench  # M6: fine-tune 
 python -m v2.textenc --encoder biomedbert --out output/v2_bench # M6: frozen text embeddings per source
 python -m v2.fuse --embeddings output/v2_bench/embeddings/rad-dino_518.npz --text-encoder biomedbert --out output/v2_bench
 python -m v2.textft --report --out output/v2_bench              # M6: reports/m6_text.md, gate G6
+python -m v2.external radiologist --bench output/v2_bench       # M7a: reports/m7a_radiologist.md
+python -m v2.external chexpert --chexpert DIR --bench output/v2_bench --out output/v2_chexpert [--steps prepare,apply,report]
 python -m v2.evaluate --all | --run RUN... | --compare RUN_A RUN_B
 python -m v2.doctor [--load-models]
 python -m v2.smoke                # the synthetic end-to-end wiring check
@@ -296,6 +311,11 @@ Verified, on a CPU-only Linux container:
 - M5b on synthetic data only: the attention-head fine-tune (learns the planted
   signal in the wiring check) and the val combiner on the benchmark. The
   published per-class tables are checked against the papers' own macros.
+- M7 on synthetic data only: the radiologist-label comparison, and a
+  CheXpert-style test set (frontal picks, the label join, the RAD-DINO
+  exposure trap, the probe refit reproducing exactly, fine-tunes reloaded from
+  their checkpoints). The real CheXpert layout is checked only from
+  `groundtruth.csv` (`CheXpert-v1.0/test/patient#/study#`).
 - M6 on synthetic data, with a random two-layer BERT: frozen embeddings, the
   probes, the fine-tune (it learns a planted word, and in the wiring check,
   fed whole reports, it scores > 0.9: proof that it can learn from text) and
@@ -368,6 +388,8 @@ content out of the conversation:
 | `prepare_data` stops with "is the drive still mounted?" | More than 0.5% of JPGs failed to read, which usually means the drive dropped off the bus or the mount went stale. Remount it (read-only is fine), check with `python -m v2.doctor`, keep the Mac awake (`caffeinate -ims`), and rerun: written images are kept |
 | `bench_stack` says it needs the bench stage's text arms | Run `bench` with `MIMIC_CXR_REPORTS_PATH` and `MIMIC_IV_ED_PATH` set: the combiner needs `ctx_indication` |
 | `bench_text` stopped by `TOTAL_HOURS` | Run it again with the same settings: finished fine-tunes are kept, and `textenc` skips sources already embedded. The fuse arms are refit |
+| `m7b` says there are no CheXpert test images | The CheXlocalize copy on Redivis has only annotations. The images are in the original CheXlocalize release on Stanford AIMI's Azure portal; put them (any layout with `patient#/study#/view#_frontal.jpg`) and `groundtruth.csv` under `CHEXPERT_TEST_PATH` |
+| `RED FLAG` in `m7b` about RAD-DINO's training list, the probe refit or a reloaded fine-tune | Stop and report the line: the external test isn't clean, or a model isn't the one the benchmark scored |
 | `RED FLAG` in `m6_text.md` | A language model's text-only run reaches the image, or a class scores above 0.90. Don't read G6: inspect locally, without sharing the text |
 | A `bench_ft_smoke_*` step fails on the GPU | Don't start the long runs: report the error line. Under 40 GB of GPU memory use `FT_BATCH=8 FT_ACCUM=4` or `GRAD_CKPT=1` |
 | The M5 probe runs fewer parallel fits than `--jobs` | Each fit copies the training features (2.6 GB at M5's size); the probe caps the workers to fit in memory and logs it |

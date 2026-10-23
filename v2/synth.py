@@ -195,7 +195,9 @@ def make_dataset(
 
     # A RAD-DINO-style training list: every official-train MIMIC image, plus other datasets.
     train_dicoms = [r for r in split_rows if r["split"] == "train"]
-    rad_rows = [{"image_id": f"image-{k:08d}", "rel_image_path": f"Chexpert/image-{k:08d}.png"} for k in range(5)]
+    # CheXpert rows are named as in the real list: training patients only (M7 checks the test patients).
+    rad_rows = [{"image_id": f"image-{k:08d}", "rel_image_path": f"Chexpert/p{k + 1:05d}_s1_view1_frontal.png"}
+                for k in range(5)]
     for r in train_dicoms:
         sid = str(r["subject_id"])
         rad_rows.append({
@@ -208,6 +210,7 @@ def make_dataset(
     # Text for M4 comes from its own generator, so the images and labels above do not change.
     trng = np.random.default_rng(seed + 1000)
     reports = _write_reports(root / "mimic-cxr-reports.zip", studies, trng)
+    _write_radiologist(mimic, studies, official, np.random.default_rng(seed + 2000))
 
     cohort_dir, v1_val_subjects, ed_root, iv_root = None, set(), None, None
     if with_cohort:
@@ -252,6 +255,76 @@ def _report(rng: np.random.Generator, study_id: int, raw: np.ndarray) -> str:
     if style == "wet_read":
         text = f" WET READ: ___ ___ 10:12 PM\n   {leak}\n {'_' * 78}\n" + text
     return text
+
+
+def _write_radiologist(mimic: Path, studies: list, official: dict, rng: np.random.Generator) -> Path:
+    """
+    M7a: a radiologist's labels for most official-test studies, as in mimic-cxr-2.1.0-test-set-labeled.csv (which
+    names Lung Opacity "Airspace Opacity"). They disagree with the labeler now and then.
+    """
+    rows = []
+    for subject_id, study_id, raw in studies:
+        if official[subject_id] != "test" or rng.random() < 0.15:
+            continue
+        theirs = raw.copy()
+        flip = (theirs == 1.0) & (rng.random(len(LABELS)) < 0.1)
+        add = np.isnan(theirs) & (rng.random(len(LABELS)) < 0.03)
+        theirs[flip], theirs[add] = 0.0, 1.0
+        row = {"study_id": study_id, "No Finding": 1.0 if not (theirs == 1.0).any() else np.nan,
+               "Support Devices": np.nan}
+        row.update({label: theirs[k] for k, label in enumerate(LABELS)})
+        rows.append(row)
+    names = [("Airspace Opacity" if c == "Lung Opacity" else c) for c in CHEXPERT_COLUMNS]
+    df = pd.DataFrame(rows, columns=["study_id", *CHEXPERT_COLUMNS]).rename(columns={"Lung Opacity": "Airspace Opacity"})
+    path = mimic / "mimic-cxr-2.1.0-test-set-labeled.csv"
+    df[["study_id", *names]].to_csv(path, index=False)
+    return path
+
+
+# CheXpert's test labels, in groundtruth.csv's column order (M7b).
+CHEXPERT_TEST_COLUMNS = ("No Finding", "Enlarged Cardiomediastinum", "Cardiomegaly", "Lung Opacity", "Lung Lesion",
+                         "Edema", "Consolidation", "Pneumonia", "Atelectasis", "Pneumothorax", "Pleural Effusion",
+                         "Pleural Other", "Fracture", "Support Devices")
+
+
+def make_chexpert_test(root: Path, n_patients: int = 120, seed: int = 0, image_size: tuple[int, int] = (120, 100),
+                       first_patient: int = 64741) -> Path:
+    """
+    A CheXpert-style test set (M7b): CheXpert-v1.0/test/patient*/study1/view*_{frontal,lateral}.jpg with
+    groundtruth.csv (binary labels, Study = CheXpert-v1.0/test/patient#/study1), the same planted signal as the
+    MIMIC tree. One study's frontal view is view 2, one study has no frontal view, and two validation-set images
+    lie alongside, which M7b must ignore.
+    """
+    rng = np.random.default_rng(seed)
+    root = Path(root)
+    rows = []
+    for i in range(n_patients):
+        patient = first_patient + i
+        raw, _ = _study_labels(rng)
+        truth = (raw == 1.0).astype(np.float64)
+        views = ["frontal"] + (["lateral"] if rng.random() < 0.4 else [])
+        if i == 1:
+            views = ["lateral", "frontal"]  # the frontal image is view 2
+        if i == 2:
+            views = ["lateral"]  # no frontal image: dropped
+        study = root / "CheXpert-v1.0" / "test" / f"patient{patient}" / "study1"
+        study.mkdir(parents=True, exist_ok=True)
+        for v, kind in enumerate(views, start=1):
+            h, w = image_size if kind == "frontal" else image_size[::-1]
+            Image.fromarray(_render(rng, truth, "PA" if kind == "frontal" else "LATERAL", (h, w))).save(
+                study / f"view{v}_{kind}.jpg", quality=95)
+        row = {"Study": f"CheXpert-v1.0/test/patient{patient}/study1", "No Finding": float(not truth.any()),
+               "Support Devices": float(rng.random() < 0.2)}
+        row.update({label: truth[k] for k, label in enumerate(LABELS)})
+        rows.append(row)
+    for patient in (64541, 64542):  # validation-set images, not in groundtruth.csv
+        val = root / "CheXpert-v1.0" / "val" / f"patient{patient}" / "study1"
+        val.mkdir(parents=True, exist_ok=True)
+        Image.fromarray(_render(rng, np.zeros(len(LABELS)), "PA", image_size)).save(val / "view1_frontal.jpg")
+    labels = pd.DataFrame(rows, columns=["Study", *CHEXPERT_TEST_COLUMNS])
+    labels[list(CHEXPERT_TEST_COLUMNS)] = labels[list(CHEXPERT_TEST_COLUMNS)].astype(int)
+    labels.to_csv(root / "groundtruth.csv", index=False)
+    return root
 
 
 def _write_reports(path: Path, studies: list, rng: np.random.Generator) -> Path:

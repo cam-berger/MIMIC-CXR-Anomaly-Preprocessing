@@ -75,6 +75,25 @@ def test_bench_text_pairs_each_encoder_with_the_image_runs(tmp_path):
     assert lines[-3:] == [f"-m v2.textft --report --out {tmp_path / 'bench'}", f"-m v2.lineup --out {tmp_path / 'bench'}",
                           f"-m v2.evaluate --all --out {tmp_path / 'bench'}"]
 
+def test_m7_stages_run_the_external_module(tmp_path):
+    env_file = ROOT / ".env"
+    if env_file.exists() and any(k in env_file.read_text() for k in ("BENCH_OUT", "EXT_OUT", "CHEXPERT_TEST_PATH")):
+        pytest.skip("a local .env sets M7's directories")
+    calls, fake = tmp_path / "calls.txt", tmp_path / "python"
+    fake.write_text(f'#!/usr/bin/env bash\nif [ "$1" = -c ]; then exec "{sys.executable}" "$@"; fi\necho "$*" >> "{calls}"\n')
+    fake.chmod(0o755)
+    bench, ext, chex = tmp_path / "bench", tmp_path / "ext", tmp_path / "chexpert"
+    paths = {"BENCH_OUT": str(bench), "EXT_OUT": str(ext), "CHEXPERT_TEST_PATH": str(chex),
+             "MIMIC_CXR_JPG_PATH": str(tmp_path / "mimic")}
+    res = _run(["m7a", "m7b"], tmp_path, PYTHON=str(fake), **paths)
+    assert res.returncode == 0, res.stderr
+    lines = calls.read_text().splitlines()
+    assert lines[0] == f"-m v2.external radiologist --bench {bench}"
+    assert lines[1].startswith(f"-m v2.external chexpert --chexpert {chex} --bench {bench} --out {ext} --workers ")
+    assert lines[2:] == [f"-m v2.evaluate --all --out {ext}"]
+    res = _run(["m7b"], tmp_path, PYTHON=str(fake), **{**paths, "EXT_OUT": str(bench)})
+    assert res.returncode != 0 and "must differ" in res.stderr
+
 def test_m0_requires_the_data_path(tmp_path):
     env_file = ROOT / ".env"
     if env_file.exists() and "MIMIC_CXR_JPG_PATH" in env_file.read_text():

@@ -245,6 +245,37 @@ def check_m4b(r: Report, out_dir: Path, mimic_root: Optional[Path]) -> None:
         (r.ok if free >= 10 else r.warn)(f"no token cache yet; {free:.0f} GB free (RAD-DINO 518 px tokens need ~7 GB)")
 
 
+def check_m7(r: Report, mimic_root: Optional[Path]) -> None:
+    """M7 inputs (docs/V2_PLAN.md §6 M7), as counts: the radiologist's labels, the CheXpert test set, the fine-tunes."""
+    r.section("M7 (a radiologist's labels; the CheXpert test set)")
+    from .external import CANDIDATES, IMAGE_RE, PREFIX, RADIOLOGIST_FILE, _env_dir
+
+    if mimic_root is not None and mimic_root.exists():
+        rad = mimic_root / RADIOLOGIST_FILE
+        if rad.exists():
+            r.ok(f"{RADIOLOGIST_FILE}: {sum(1 for _ in rad.open()) - 1} studies")
+        else:
+            r.warn(f"{RADIOLOGIST_FILE} not in MIMIC_CXR_JPG_PATH: M7a can't run (it ships with MIMIC-CXR-JPG 2.1.0)")
+    value = os.environ.get("CHEXPERT_TEST_PATH")
+    if not value:
+        r.warn("No CHEXPERT_TEST_PATH: M7b has no CheXpert test set")
+    elif not Path(value).expanduser().is_dir():
+        r.fail(f"CHEXPERT_TEST_PATH: {value} is not a directory")
+    else:
+        root = Path(value).expanduser()
+        labels = sorted(root.rglob("groundtruth.csv"))
+        (r.ok if len(labels) == 1 else r.warn)(f"groundtruth.csv: {len(labels)} found (need 1)")
+        frontal = sum(1 for p in root.rglob("*") if (m := IMAGE_RE.search(p.as_posix())) and
+                      m.group(4).lower() == "frontal" and "/test/" in f"/{p.relative_to(root).as_posix()}")
+        (r.ok if frontal else r.warn)(f"{frontal} frontal test images" + ("" if frontal else
+                                      ": download them from the original CheXlocalize release (v2/README.md §10)"))
+    bench = _env_dir("BENCH_OUT", "v2_bench")
+    for run in (f"{PREFIX}_{c}" for c in CANDIDATES if c != "probe"):
+        ckpt = bench / "runs" / run / "best.pt"
+        (r.ok if ckpt.exists() else r.warn)(f"{run} best checkpoint " + ("found" if ckpt.exists() else
+                                                                          f"missing in {bench}: M7b applies it"))
+
+
 def check_output(r: Report, out_dir: Path) -> None:
     r.section("Output directory")
     try:
@@ -340,6 +371,7 @@ def main(argv: Optional[list[str]] = None) -> None:
     check_output(r, out_dir)
     check_context_sources(r, out_dir)
     check_m4b(r, out_dir, Path(root).expanduser() if root else None)
+    check_m7(r, Path(root).expanduser() if root else None)
     check_hub(r, args.load_models, args.device)
     print(f"\n{r.failures} failed, {r.warnings} warnings")
     sys.exit(1 if r.failures else 0)

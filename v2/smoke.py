@@ -8,7 +8,8 @@ Builds a synthetic MIMIC-CXR-JPG tree with a planted signal (v2.synth), then
 runs prepare_data -> embed -> probe -> zero_shot -> finetune (+ resume) ->
 context + fuse -> M4b (tokens, attend, prior labels, stack) -> M5 (the
 benchmark directory and its lineup) -> M6 (a language model's text features,
-frozen and fine-tuned) -> evaluate with test-size encoders, through the same
+frozen and fine-tuned) -> M7 (a radiologist's labels; a CheXpert-style external
+test set) -> evaluate with test-size encoders, through the same
 command-line entry points you will use on real data. It passes only if every
 stage runs AND the planted signal is recovered end to end: with the
 "test-pixels" encoder, test_clean macro AUROC must be >= 0.9, and must fall
@@ -21,8 +22,10 @@ own labels instead of its prior study's must score > 0.95, while the honest arm
 stays near chance (synthetic studies are independent). For M5, the benchmark
 directory must hold the official split and refuse to replace the v2 manifest,
 and the planted signal must reach the lineup. For M6, the text fine-tune fed
-whole reports must score > 0.9 (proof that it can learn from text at all). No
-downloads, no MIMIC data needed.
+whole reports must score > 0.9 (proof that it can learn from text at all). For
+M7, the planted signal must carry over to the external set, and a RAD-DINO
+training list holding a test patient must stop the run. No downloads, no MIMIC
+data needed.
 """
 
 from __future__ import annotations
@@ -40,10 +43,10 @@ from typing import Callable, Optional
 import numpy as np
 import pandas as pd
 
-from . import attend, context, embed, evaluate, finetune, fuse, lineup, prepare_data, probe, stack, textenc, textft
-from . import zero_shot
+from . import attend, context, embed, evaluate, external, finetune, fuse, lineup, prepare_data, probe, stack, textenc
+from . import textft, zero_shot
 from .common import CHEXPERT_COLUMNS, load_manifest, mimic_csv, setup_logging
-from .synth import make_dataset
+from .synth import make_chexpert_test, make_dataset
 
 
 def run_checks(work: Path, patients: int = 400) -> list[tuple[str, bool, str]]:
@@ -269,6 +272,40 @@ def run_checks(work: Path, patients: int = 400) -> list[tuple[str, bool, str]]:
         return f"fine-tuned on indications {honest:.3f}, on whole reports {leaked:.3f}; G6 {report['gate']['verdict']}"
 
     stage("M6 text encoder + fine-tune (leak trap)", m6)
+
+    def m7() -> str:
+        bench, ext = work / "v2_bench", work / "v2_chexpert"
+        # A benchmark fine-tune to apply, as M5b's GPU stage makes them (a tiny random ViT here).
+        ft = finetune.main(["--model", "tiny-dinov2", "--epochs", "2", "--batch-size", "16", "--accum", "1",
+                            "--encoder-lr", "1e-3", "--head-lr", "1e-2", "--llrd", "1.0", "--steps-per-epoch", "10",
+                            "--workers", "0", "--out", str(bench)])
+        p = "test-pixels_48"
+        rad = external.main(["radiologist", "--bench", str(bench), "--labels",
+                             str(paths.mimic_root / external.RADIOLOGIST_FILE), "--prefix", p, "--candidates",
+                             f"{p}_probe,{p}_attn_h0", "--stack", f"{p}_attn_h0_stack_indication", "--stack-image",
+                             f"{p}_attn_h0", "--n-boot", "50", "--min-count", "5"])
+        assert rad["label_effect"], "M7a compared no labels"
+        chex = make_chexpert_test(work / "chexpert", n_patients=150, seed=11)
+        common_b = ["--chexpert", str(chex), "--bench", str(bench), "--out", str(ext), "--workers", "0"]
+        # Negative control: a RAD-DINO training list that holds a test patient must stop M7b.
+        leaky = work / "leaky_training_images.csv"
+        listed = pd.read_csv(paths.rad_dino_list)
+        listed.loc[len(listed)] = ["image-leak", "Chexpert/p64745_s1_view1_frontal.png"]
+        listed.to_csv(leaky, index=False)
+        try:
+            external.main(["chexpert", *common_b, "--rad-dino-list", str(leaky), "--steps", "prepare"])
+            stopped = False
+        except SystemExit:
+            stopped = True
+        assert stopped, "a RAD-DINO list holding a CheXpert test patient didn't stop M7b"
+        res = external.main(["chexpert", *common_b, "--rad-dino-list", str(paths.rad_dino_list), "--candidates",
+                             f"{p}_probe,{ft}", "--device", "cpu", "--jobs", "2", "--n-boot", "50"])
+        five = res["report"]["results"][f"{p}_probe"]["five"]["macro_auroc"]
+        assert five >= 0.9, f"the planted signal didn't carry over to the external set: {five:.3f}"
+        return (f"M7a on {rad['info']['in_official_test']} studies; M7b probe five-finding mean {five:.3f}, "
+                f"G7 {res['report']['gate']['verdict'].split(':')[0]}; the exposure trap stopped the run")
+
+    stage("M7 radiologist labels + external test set (exposure trap)", m7)
 
     def reports() -> str:
         text = evaluate.summarize(out, n_boot=100)

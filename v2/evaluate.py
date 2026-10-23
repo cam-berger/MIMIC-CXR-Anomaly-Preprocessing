@@ -297,9 +297,15 @@ def compare_runs(
     n_boot: int = N_BOOT,
     seed: int = 0,
     write: bool = True,
+    manifest: Optional[pd.DataFrame] = None,
+    frozen: Optional[dict] = None,
 ) -> dict:
-    """Paired patient bootstrap of macro AUROC(A) - macro AUROC(B) on the same studies."""
-    manifest, frozen = load_manifest(out_dir), load_measurable(out_dir)
+    """
+    Paired patient bootstrap of macro AUROC(A) - macro AUROC(B) on the same studies. `manifest` and `frozen`
+    replace the directory's own (M7a scores the benchmark's runs against other labels).
+    """
+    manifest = load_manifest(out_dir) if manifest is None else manifest
+    frozen = load_measurable(out_dir) if frozen is None else frozen
     pa, _ = read_predictions(Path(out_dir) / "predictions" / f"{run_a}.parquet")
     pb, _ = read_predictions(Path(out_dir) / "predictions" / f"{run_b}.parquet")
     ra, _ = joined(pa, manifest, test_set)
@@ -347,6 +353,52 @@ def compare_runs(
             f"**Difference (A - B): {fmt_ci(point, interval)}** -> {verdict} (paired 95% CI, {n_boot} patient resamples).\n"
         )
     return result
+
+
+def compare_labels(
+    pred: pd.DataFrame,
+    manifest_a: pd.DataFrame,
+    manifest_b: pd.DataFrame,
+    frozen: dict,
+    test_set: str = "test_clean",
+    metric: str = "v2",
+    n_boot: int = N_BOOT,
+    seed: int = 0,
+) -> dict:
+    """
+    One run's macro AUROC with labels A minus with labels B, on the same studies, paired over the same patient
+    resamples (M7a: a radiologist's labels against the labeler's). The two manifests differ only in their labels.
+    """
+    ra, _ = joined(pred, manifest_a, test_set)
+    rb, _ = joined(pred, manifest_b, test_set)
+    if not np.array_equal(ra["study_id"].to_numpy(), rb["study_id"].to_numpy()):
+        raise ValueError("the two label sets must cover the same studies")
+    if len(ra) == 0:
+        raise SystemExit(f"no {test_set} studies with predictions to compare labels on")
+    classes = classes_for(test_set, metric, frozen, ra)
+    cols = [LABELS.index(c) for c in classes]
+    Ya, Ma = targets_and_mask(label_matrix(ra), metric)
+    Yb, Mb = targets_and_mask(label_matrix(rb), metric)
+    S = ra[[f"score::{label}" for label in LABELS]].to_numpy(np.float64)
+    a, b = per_class_auroc(Ya, Ma, S, cols), per_class_auroc(Yb, Mb, S, cols)
+    boot_class = np.full((n_boot, len(cols)), np.nan)
+    boot_macro = np.full(n_boot, np.nan)
+    for i, idx in enumerate(bootstrap_indices(ra["subject_id"].to_numpy(), n_boot, seed)):
+        ba, bb = per_class_auroc(Ya[idx], Ma[idx], S[idx], cols), per_class_auroc(Yb[idx], Mb[idx], S[idx], cols)
+        boot_class[i] = ba - bb
+        with np.errstate(invalid="ignore"):
+            boot_macro[i] = np.nanmean(ba) - np.nanmean(bb)
+    macro_a = float(np.nanmean(a)) if cols else float("nan")
+    macro_b = float(np.nanmean(b)) if cols else float("nan")
+    interval = ci(boot_macro)
+    return {
+        "test_set": test_set, "metric": metric, "classes": classes, "n_studies": int(len(ra)),
+        "n_patients": int(ra["subject_id"].nunique()), "macro_a": macro_a, "macro_b": macro_b,
+        "diff": macro_a - macro_b, "diff_ci": interval, "a_better": bool(interval[0] > 0),
+        "b_better": bool(interval[1] < 0), "n_boot": n_boot,
+        "per_class": [{"label": c, "a": float(a[j]), "b": float(b[j]), "diff": float(a[j] - b[j]),
+                       "diff_ci": ci(boot_class[:, j])} for j, c in enumerate(classes)],
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -402,9 +454,14 @@ def g4b(out_dir: Path, prefix: str, n_boot: int = N_BOOT, reports: Optional[dict
 
 
 def split_scheme(out_dir: Path) -> str:
-    """'official' for M5's benchmark output dirs, 'v2' otherwise (from prepare_data's audit)."""
+    """'official' for M5's benchmark output dirs, 'external' for M7's external test sets, 'v2' otherwise."""
     audit = Path(out_dir) / "audit.json"
     return json.loads(audit.read_text()).get("split_scheme", "v2") if audit.exists() else "v2"
+
+
+def external_name(out_dir: Path) -> str:
+    """An external test set's name, from its audit (M7)."""
+    return json.loads((Path(out_dir) / "audit.json").read_text()).get("test_set_name", "external test")
 
 
 def summarize(out_dir: Path, n_boot: int = N_BOOT, runs: Optional[list[str]] = None) -> str:
@@ -460,10 +517,14 @@ def summarize(out_dir: Path, n_boot: int = N_BOOT, runs: Optional[list[str]] = N
         return f"n/a: val has too few positives/negatives to pick a {kind} run"
 
     lines += ["", "## Gates", ""]
-    benchmark = split_scheme(out_dir) == "official"
+    scheme = split_scheme(out_dir)
+    benchmark, external = scheme == "official", scheme == "external"
     if benchmark:
         lines.append("- None here: this directory holds M5's benchmark (official split, §6 M5). G1-G4b are defined "
                      "on the v2 cohort; the comparisons with published results are in reports/lineup.md.")
+    elif external:
+        lines.append("- None here: this directory holds an external test set (§6 M7). Gate G7 is in "
+                     "reports/m7b_chexpert.md.")
     else:
         best_probe = best("probe")
         if best_probe:
@@ -529,14 +590,15 @@ def summarize(out_dir: Path, n_boot: int = N_BOOT, runs: Optional[list[str]] = N
     for run, rep in reports.items():
         meta = rep["meta"]
         day = str(meta.get("created") or today)[:10]  # when the run was made, not when the summary is
-        sets = (("test_clean", "u0"), ("test_clean", "v2")) if benchmark else (("test_clean", "v2"), ("test_v1", "v1"))
+        sets = (("test_clean", "u0"), ("test_clean", "v2")) if benchmark else (("test_clean", "v2"),) if external \
+            else (("test_clean", "v2"), ("test_v1", "v1"))
         for test_set, metric in sets:
             res = _get(rep, test_set, metric)
             if res:
-                label = ("official test" if benchmark else f"`{test_set}`") + \
-                    {"v1": ", v1 metric", "u0": ", positive vs rest", "v2": ""}[metric]
+                where = "official test" if benchmark else external_name(out_dir) if external else f"`{test_set}`"
+                label = where + {"v1": ", v1 metric", "u0": ", positive vs rest", "v2": ""}[metric]
                 own = meta.get("milestone") or MILESTONE.get(meta.get("kind"), "?")
-                milestone = ("M6" if own == "M6" else "M5") if benchmark else own
+                milestone = ("M6" if own == "M6" else "M5") if benchmark else "M7" if external else own
                 lines.append(f"| {day} | {milestone} | {meta.get('commit', '?')} | "
                              f"{run} | {label} | {fmt_ci(res['macro_auroc'], res['macro_auroc_ci'])} | "
                              f"{len(res['classes'])} | |")

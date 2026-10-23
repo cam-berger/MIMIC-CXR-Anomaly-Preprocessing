@@ -803,6 +803,24 @@ complex component replaces the incumbent only if its paired val gain has a
 95% interval above 0; otherwise the simpler one stays. M6's adoption stands as
 pre-registered.
 
+*Clarifications (2026-10-23, before any M7 run; from the data-prep check on the
+Mac, nothing scored):*
+- The radiologist's file names Lung Opacity "Airspace Opacity", CheXpert's
+  first name for the category. M7a reads it as Lung Opacity and says so in
+  its report.
+- The CheXlocalize copy on Redivis holds only annotations, no images. The test
+  images are in the original CheXlocalize release on Stanford AIMI's Azure
+  portal, as planned. If that is no longer available, M7b waits. VinDr-CXR,
+  which RAD-DINO never saw, would then need its own pre-registration (G7's
+  reference is a CheXpert number).
+- Consolidation has 29 positives in the test set. It stays in the five-finding
+  mean, as in the literature, and drops out of the secondary macro, which
+  keeps the 30-positive rule.
+- Two safety checks beyond the above: if the images come with
+  `test_labels.csv`, it must match `groundtruth.csv`; and each fine-tune,
+  reloaded from its best checkpoint, must reproduce its benchmark predictions
+  on 64 test studies (correlation at least 0.99), or the run stops.
+
 **Done when:** `reports/m7a_radiologist.md` (in `BENCH_OUT`) and
 `reports/m7b_chexpert.md` (in `EXT_OUT`) exist, G7 is decided, and their rows
 are logged in §9.
@@ -829,6 +847,7 @@ v2/
   lineup.py         # M5: our runs next to published MIMIC-CXR results, scored the same way
   textenc.py        # M6: BERT-family encoders (pinned), frozen text embeddings per source
   textft.py         # M6: fine-tune an encoder on one text source; reports/m6_text.md and gate G6
+  external.py       # M7: a radiologist's labels on the official test split; the CheXpert test set, gate G7
   evaluate.py       # metrics, bootstrap CIs, paired comparisons, reports, gates
   doctor.py         # setup check for any machine
   synth.py          # synthetic MIMIC-CXR-JPG tree with a planted signal (tests)

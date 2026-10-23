@@ -125,17 +125,22 @@ def jobs_for_memory(n_jobs: int, n_rows: int, n_cols: int, share: float = 0.6) -
 
 def fit_probe(
     X_tr: np.ndarray, raw_tr: np.ndarray, X_va: np.ndarray, raw_va: np.ndarray,
-    Cs=DEFAULT_CS, n_jobs: int = -1, max_iter: int = 2000,
+    Cs=DEFAULT_CS, n_jobs: int = -1, max_iter: int = 2000, chosen: Optional[dict] = None,
 ) -> Probe:
-    """One logistic regression per label on standardized features; C chosen on val AUROC."""
+    """
+    One logistic regression per label on standardized features; C chosen on val AUROC. `chosen` fixes a label's
+    C instead (M7 refits a probe at the C each label picked, which gives back the same fit).
+    """
     Y_tr, M_tr = targets_and_mask(raw_tr, "v2")
     Y_va, M_va = targets_and_mask(raw_va, "v2")
     scaler = StandardScaler().fit(X_tr)
     Z_tr, Z_va = scaler.transform(X_tr), scaler.transform(X_va)
     # Keep the Cs ordered small -> large so "first best" prefers stronger regularization on ties.
     Cs = sorted(Cs)
+    chosen = chosen or {}
     fits = Parallel(n_jobs=jobs_for_memory(n_jobs, *Z_tr.shape))(
-        delayed(_fit_label)(label, Z_tr, Y_tr[:, k], M_tr[:, k], Z_va, Y_va[:, k], M_va[:, k], Cs, max_iter)
+        delayed(_fit_label)(label, Z_tr, Y_tr[:, k], M_tr[:, k], Z_va, Y_va[:, k], M_va[:, k],
+                            [chosen[label]] if chosen.get(label) is not None else Cs, max_iter)
         for k, label in enumerate(LABELS)
     )
     return Probe(scaler, list(fits))
