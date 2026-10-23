@@ -1101,6 +1101,7 @@ Add one row per run. Don't edit old rows; add new ones.
 | 2026-10-23 | M7b | 87ce530 | rad-dino_518_probe | CheXpert test, five findings | 0.900 [0.885, 0.915] | 5 | Frozen encoder and linear probe, refit at the benchmark's chosen C. Secondary (6 classes) 0.857. The three models span 0.004 on the five findings and 0.012 on the secondary macro (unpaired): on another hospital's images, fine-tuning on MIMIC adds little to the frozen encoder |
 | 2026-10-23 | M7b | 87ce530 | transfer gap, `rad-dino_518_ft_attn_s0` | MIMIC official test against CheXpert test, five findings | 0.826 [0.811, 0.839] against 0.904 | 5 | Descriptive only (different labels, patients and hospitals): P scores 0.078 higher on CheXpert (0.814 on MIMIC under positive vs rest). It fits M7a: MIMIC's test labels come from a report labeler, CheXpert's from five radiologists, and M7a showed the labeler alone costs about 0.03 |
 | 2026-10-23 | M7b | 87ce530 | bug: CheXlocalize's label file | | | | CheXlocalize's `test_labels.csv` keys its rows by `Path`, one per image (frontal and lateral), not by `Study`, so the first M7b run stopped at the label-agreement check, before anything was scored. Fixed on the Mac in 87ce530: key on `Study`, else `Path`; collapse images to studies; stop if a study's images disagree. Both files read as 500 studies, 0 labels differ. Data: 668 images (518 frontal, 150 lateral) from the AIMI Azure release (azcopy, 1.2 GB); every study has a frontal image and 18 have two (the lower view number is used) |
+| 2026-10-23 | M7b | 87ce530 | correction: G7's reference | CheXpert test, five findings | 0.904 [0.886, 0.919] | 5 | §6 M7 called CheXzero the best published model trained on MIMIC-CXR without CheXpert labels; it isn't. KAD reports 0.905 (level with ours) and CARZero 0.923 (above our interval), both trained on MIMIC-CXR's images and reports. Both numbers are self-reported: an independent re-evaluation with their public weights found 0.699 and 0.824, and CheXzero's 0.889 again (SCCL-DT, 2026). G7's PASS stands as pre-registered, but it means at least level with CheXzero, not with the best MIMIC-trained model. Models trained on CheXpert's own labels lead at about 0.93 (Pham et al. 0.930; DAM 0.931) |
 
 ## 10. Backlog (after v2.0, one at a time)
 
@@ -1164,3 +1165,7 @@ Ordered by expected value per unit of cost:
 - CheXpert (test set, the five findings): <https://arxiv.org/abs/1901.07031>; test labels:
   <https://github.com/rajpurkarlab/cheXpert-test-set-labels>; images: <https://aimi.stanford.edu/datasets/chexlocalize>
 - CheXzero (0.889 on the CheXpert test set): <https://doi.org/10.1038/s41551-022-00936-9>
+- Other results on the CheXpert test set: CARZero (0.923; its table also lists KAD 0.905 and MedKLIP 0.879):
+  <https://arxiv.org/abs/2402.17417>; an independent re-evaluation with public weights (SCCL-DT):
+  <https://arxiv.org/abs/2610.22094>; trained on CheXpert's labels: Pham et al. (0.930)
+  <https://arxiv.org/abs/1911.06475>, DAM <https://arxiv.org/abs/2012.03173>
