@@ -333,6 +333,8 @@ Verified on the real data (October 2026; results in `docs/V2_PLAN.md` §9):
   its 49 GB token cache.
 - M5b on a Lambda GH200 (aarch64, CUDA 12.8, the provider's torch 2.7.0): both
   benchmark fine-tunes in 102 min at about 220 img/s, with no non-finite steps.
+- M6 and M7a on the M5 Pro: the three text encoders' fine-tunes, embeddings and
+  probes in 9 h 25 min; the radiologist-label comparison in 88 s.
 
 Not verified: other providers' machine images. Start every new machine with
 `bash v2/scripts/run.sh smoke`.
