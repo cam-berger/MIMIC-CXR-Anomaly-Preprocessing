@@ -279,12 +279,17 @@ def find_one(root: Path, name: str) -> Optional[Path]:
 
 
 def read_chexpert_labels(path: Path) -> pd.DataFrame:
-    """CheXpert's test labels (binary) for our 12 classes, keyed by study_id; subject_id is the patient number."""
-    df = pd.read_csv(path, dtype={"Study": str})
-    missing = [c for c in ("Study", *LABELS) if c not in df.columns]
+    """
+    CheXpert's test labels (binary) for our 12 classes, keyed by study_id; subject_id is the patient number.
+    groundtruth.csv has one row per study (Study); CheXlocalize's test_labels.csv has one per image (Path),
+    and a study's images must carry the same labels.
+    """
+    df = pd.read_csv(path, dtype={"Study": str, "Path": str})
+    key = "Study" if "Study" in df.columns else ("Path" if "Path" in df.columns else None)
+    missing = ([] if key else ["Study"]) + [c for c in LABELS if c not in df.columns]
     if missing:
         raise SystemExit(f"{Path(path).name} has no column(s) {missing}; its columns are {list(df.columns)}")
-    keys = df["Study"].str.extract(STUDY_RE)
+    keys = df[key].str.extract(STUDY_RE)
     if keys.isna().any(axis=None):
         raise SystemExit(f"{Path(path).name}: {int(keys.isna().any(axis=1).sum())} Study values name no patient and study")
     values = df[list(LABELS)].apply(pd.to_numeric, errors="coerce")
@@ -293,6 +298,11 @@ def read_chexpert_labels(path: Path) -> pd.DataFrame:
     out = values.astype(np.float64)
     out.insert(0, "subject_id", keys[0].astype(np.int64).to_numpy())
     out.insert(0, "study_id", [chexpert_study_id(p, s) for p, s in zip(keys[0], keys[1])])
+    if key == "Path":  # one row per image: collapse to one per study
+        by_study = out.groupby("study_id", sort=False)
+        if (by_study[list(LABELS)].nunique() > 1).any(axis=None):
+            raise SystemExit(f"{Path(path).name}: the images of one study carry different labels")
+        out = by_study.first().reset_index()[["study_id", "subject_id", *LABELS]]
     if out["study_id"].duplicated().any():
         raise SystemExit(f"{Path(path).name}: {int(out['study_id'].duplicated().sum())} studies appear twice")
     return out.reset_index(drop=True)
