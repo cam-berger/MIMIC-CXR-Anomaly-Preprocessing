@@ -71,5 +71,5 @@ from `.env` (`MIMIC_CXR_JPG_PATH`, `MIMIC_IV_PATH`, `MIMIC_IV_ED_PATH`,
 
 ## Git
 
-- Branch `v2` holds the current work; `main` holds v1.
+- `main` holds the current work: v2, plus v1 for reference.
 - Don't commit data files (`.h5`, `.parquet`, `.csv`, images) or `.env`.

@@ -33,6 +33,91 @@ how to run it.
 - **It's cheap.** About $18 of rented GPU time in all (8.5 hours); v1's single
   training run cost $54.
 
+## From v1 to v2
+
+v1 trained everything from scratch: a ViT image encoder, pretrained as a masked
+autoencoder on normal X-rays, fused with labs, vital signs and text about the
+visit. A review of its code and evaluation
+([V1.md](V1.md#what-v2-found-about-v1s-evaluation)) found problems that made its
+numbers hard to trust and impossible to compare with published work. v2 kept
+the question and the 12 findings and changed the rest. Each change below
+answers something v1 showed.
+
+**Measurement first.** v1 reported 0.701, but it picked its best epoch on the
+same set it reported, and four of its findings had only 2 to 23 negative
+studies there, too few to measure. Without those four, v1 scores 0.792. v2
+scores a finding only when it has at least 30 positive and 30 negative studies,
+gives every score a 95% interval, makes every choice on a separate validation
+split and scores each test set once. Every later change was judged this way.
+
+**The studies.** v1's cohort held 23% of MIMIC-CXR's abnormal studies, and a
+time-parsing bug dropped almost every study taken before 10:00. v2 kept that
+cohort at first, to compare with v1 on the same patients, then moved to all
+218k frontal studies on MIMIC-CXR's official split, the split published results
+use.
+
+**The image.** v1 meant to pick the frontal view by file name, but MIMIC-CXR
+names its files by DICOM ID, so the rule never matched and 31% of its training
+images were side views. It also fed the encoder a 1024 px center crop, about
+13% of a 3,056 × 2,544 X-ray, so the model never saw the whole chest. v2 reads
+the view from MIMIC-CXR's metadata (PA, else AP), shrinks the image to 518 px
+on its shorter side and trims the longer side to a square, which keeps about
+83% of it.
+
+**The image encoder.** Both versions use a ViT-Base. v1 pretrained its own as a
+masked autoencoder on about 20,000 normal X-rays; the recipe called for 800
+epochs at 1024 px, weeks of GPU time, and training the classifier on top took
+36 hours and $54. v2 starts from RAD-DINO, a ViT-Base already pretrained on
+883,000 chest X-rays. With the encoder frozen and only a linear classifier on
+top, it matches v1's whole multimodal model on v1's own test set from the image
+alone (0.803 against 0.792); fine-tuned, it reaches 0.823. The same
+architecture pretrained on natural images (DINOv2) scores 0.060 lower, so the
+gain comes from pretraining on chest X-rays, not from the architecture. A
+fine-tune on all 213,000 benchmark training studies takes about 50 minutes.
+
+**What goes in.** The labels are extracted from the report, so anything written
+after the X-ray can carry the answer. v1's text was either that report or a
+description of the visit that included data recorded after the X-ray, such as
+labs and discharge diagnosis codes. v2 uses only what existed before the X-ray:
+the indication, the ED chief complaint, the prior report and the triage vitals.
+It uses no labs. As a check, no finding scores above 0.90 from the text alone.
+The text adds about +0.02, while the triage vitals, age and sex add nothing
+(-0.001), so v2 keeps the text and drops v1's structured branch.
+
+**Combining text and image.** v1 used cross-attention, but over one image
+vector and one text vector, so each attention step had a single item to look
+at and acted as a plain linear layer. v2 puts the text features next to the
+image features in one classifier. It also tested real attention: a head over
+the image's patch tokens helps the frozen image (+0.015), but letting the text
+steer it adds nothing over adding the text at the end (+0.004 [-0.003, 0.011]).
+
+**The text model.** v1 tokenized its text with Bio_ClinicalBERT's vocabulary
+and encoded it with PubMedBERT, which reads the same IDs as different tokens.
+v2 started with TF-IDF, then tried BERT, BiomedBERT and ClinicalBERT, each with
+its own tokenizer, frozen and fine-tuned. With the image, all seven text models
+land between 0.812 and 0.819, so TF-IDF, the simplest, is enough.
+
+**The labels.** v1 left out every finding a report doesn't mention. In an
+abnormal-only cohort that leaves some findings with almost no negatives:
+Atelectasis had 1,329 labeled validation studies, 98.3% of them positive. v2
+counts an unmentioned finding as negative, as published work does, and leaves
+out only the uncertain ones.
+
+**Training length.** v1 trained for 50 epochs. RAD-DINO's validation score
+peaks after one or two epochs and then falls, so the benchmark fine-tunes run
+for 3 epochs and keep the best on validation. Six epochs add only +0.003 on the
+benchmark.
+
+**Findings, not anomaly scores.** v1 also scored anomalies by how poorly its
+autoencoder reconstructed an image. That score can't say which finding is
+present, so v2 works on the 12 labeled findings, which can be checked against
+labels, a radiologist and published models.
+
+**New checks.** v2 lines its models up with published results on the official
+split, scores them against a radiologist's labels on 596 test studies, tests
+the image model on the CheXpert test set at Stanford, and repeats the
+fine-tunes with a second seed. The results are under [Findings](#findings).
+
 ## Setup
 
 | | |
