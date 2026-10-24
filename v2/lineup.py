@@ -1,5 +1,5 @@
 """
-M5: our runs next to published MIMIC-CXR results, scored the same way (docs/V2_PLAN.md §6 M5).
+M5: our runs next to published MIMIC-CXR results, scored the same way (docs/ANALYSIS.md, M5).
 
     python -m v2.lineup --out output/v2_bench
 
@@ -8,7 +8,7 @@ where test_clean is the official test split. Every run there is scored on that
 split under "positive vs rest" (the u0 policy, the published convention) and
 under v2's policy, over the classes measurable in it. Published results enter
 through their per-class tables, averaged over the same classes, and are read by
-the rule fixed in §6 M5: below (under our 95% CI), level (inside it) or above.
+the rule fixed in M5: below (under our 95% CI), level (inside it) or above.
 Writes reports/lineup.md; only aggregates are logged.
 """
 
@@ -82,7 +82,7 @@ def role(meta: dict) -> Optional[str]:
     """
     What a run of ours is compared as: its inputs, if a published model had the same ones. Text on a stronger
     image model is lined up through the val combiner (a stack with the `indication` run); M4's fusion on
-    fine-tuned features stays exploratory (§6 M5b amendment).
+    fine-tuned features stays exploratory (M5b).
     """
     if meta.get("kind") in ("probe", "finetune"):
         return "image"
@@ -106,7 +106,7 @@ def published_mean(ref: Published, classes: list) -> Optional[float]:
 
 
 def verdict(published: Optional[float], ci: list) -> str:
-    """§6 M5: below if under our 95% CI, above if over it, level (a tie) otherwise."""
+    """M5: below if under our 95% CI, above if over it, level (a tie) otherwise."""
     if published is None or not all(np.isfinite(ci)):
         return "-"
     if published < ci[0]:
@@ -150,7 +150,7 @@ def lineup(out_dir: Path, n_boot: int = 1000, runs: Optional[list] = None) -> di
             row["subset"] = evaluate_set(pred, sub, frozen, "test_clean", "u0", n_boot)
         rows[run] = row
 
-    # M4's red flags on every text-only run come first: a flagged lineup isn't read (§6 M5, M6).
+    # M4's red flags on every text-only run come first: a flagged lineup isn't read (M5, M6).
     flags = []
     images = {r[: -len("_ctx_image")]: rows[r]["v2"] for r in rows if r.endswith("_ctx_image") and rows[r]["v2"]}
     # A fine-tuned text run belongs to no embeddings: it is held to the weakest `image` arm, the strictest test.
@@ -167,7 +167,7 @@ def lineup(out_dir: Path, n_boot: int = 1000, runs: Optional[list] = None) -> di
              f"Official test split: {test['studies']:,} studies, {test['patients']:,} patients "
              f"(population: {audit.get('population')}). Macro AUROC [95% patient-bootstrap CI] over the classes "
              "measurable there, under positive vs rest (u0, the published convention) unless noted. Published "
-             "numbers are averaged over the same classes from their per-class tables (docs/V2_PLAN.md §6 M5).", ""]
+             "numbers are averaged over the same classes from their per-class tables (docs/ANALYSIS.md, M5).", ""]
     lines += ["## Red flags (read these first)", ""]
     lines += [f"- **RED FLAG:** {f}. Don't read the lineup until the extraction is inspected." for f in flags] or \
         ["- none"]
@@ -229,7 +229,7 @@ def lineup(out_dir: Path, n_boot: int = 1000, runs: Optional[list] = None) -> di
     for ref in PUBLISHED:
         lines.append(f"| {ref.name} | {ref.inputs} | {fmt(ref.macro)} | {ref.macro_over} | "
                      f"{'yes' if ref.role else 'no: context only'} | {ref.protocol} | {ref.source} |")
-    lines += ["", "Caveats (§6 M5): 12 of the 14 CheXpert labels (No Finding and Support Devices are not v2 classes); "
+    lines += ["", "Caveats (M5): 12 of the 14 CheXpert labels (No Finding and Support Devices are not v2 classes); "
               "our labels come from the MIMIC-CXR-JPG CheXpert file, where MMBT ran the labeler on full reports; one "
               "frontal image per study; published numbers carry their own uncertainty, so *level* is a tie."]
     path = Path(out_dir) / "reports" / "lineup.md"

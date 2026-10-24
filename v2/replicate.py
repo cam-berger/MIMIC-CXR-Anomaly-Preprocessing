@@ -1,5 +1,5 @@
 """
-M8: a second seed of the benchmark fine-tunes, and a longer fine-tune (docs/V2_PLAN.md §6 M8).
+M8: a second seed of the benchmark fine-tunes, and a longer fine-tune (docs/ANALYSIS.md, M8).
 
     python -m v2.replicate --bench output/v2_bench --ext output/v2_chexpert
 
@@ -32,11 +32,12 @@ SEEDS = (0, 1)
 HEADS = ("ft_attn", "ft")  # the attention head (M7's primary model P) first, then mean pooling
 LONG, SHORT = "ft_attn_e6_s0", "ft_attn_s0"  # 6 epochs against M5b's 3, same seed
 STACK_TAGS = ("indication_bert", "indication", "text_prior_labels")  # M6's adopted text first, then M5b's two
-# What a run must share with its twin (§6 M8 checks). The seed and run name differ by design; for the 6-epoch
+# What a run must share with its twin (M8). The seed and run name differ by design; for the 6-epoch
 # run also the epochs and total steps.
 RECIPE = ("model", "revision", "size", "head", "grid", "warmup_epochs", "encoder_lr", "head_lr", "llrd",
           "weight_decay", "clip", "precision", "steps_per_epoch", "warmup_steps", "n_train", "n_val")
 SAME_LENGTH = ("epochs", "total_steps")
+MAY_BE_UNRECORDED = ("revision",)  # runs from before c1159c7's successor recorded no Hub commit
 VERSIONS = ("torch", "transformers")
 FIVE_SETS = {"test_clean:v2": list(FIVE), "test_clean:u0": list(FIVE)}
 # Each kind of verdict from best to worst for our claim; when the seeds differ, both support the worse one.
@@ -49,16 +50,17 @@ def recipe_check(out_dir: Path, run: str, twin: str, same_length: bool = True) -
     a, b = (read_predictions(Path(out_dir) / "predictions" / f"{r}.parquet")[1].get("config") or {}
             for r in (run, twin))
     keys = RECIPE + (SAME_LENGTH if same_length else ())
-    differs = {k: [a.get(k), b.get(k)] for k in keys if a.get(k) != b.get(k)}
+    unrecorded = [k for k in MAY_BE_UNRECORDED if a.get(k) is None or b.get(k) is None]
+    differs = {k: [a.get(k), b.get(k)] for k in keys if k not in unrecorded and a.get(k) != b.get(k)}
     batch = [(c.get("batch_size") or 0) * (c.get("accum") or 0) for c in (a, b)]  # what each optimizer step sees
     if batch[0] != batch[1]:
         differs["effective batch"] = batch
-    return {"run": run, "twin": twin, "differs": differs, "no_config": not a or not b,
+    return {"run": run, "twin": twin, "differs": differs, "no_config": not a or not b, "unrecorded": unrecorded,
             "versions": {k: [a.get(k), b.get(k)] for k in VERSIONS if a.get(k) != b.get(k)}}
 
 
 def combine(v0: Optional[str], v1: Optional[str], order: tuple) -> str:
-    """§6 M8: a verdict stands if both seeds give it; otherwise the write-up states the weaker one."""
+    """M8: a verdict stands if both seeds give it; otherwise the write-up states the weaker one."""
     if v0 is None or v1 is None:
         return "not decided: no result for seed " + ("1" if v1 is None else "0")
     if v0 == v1:
@@ -149,7 +151,7 @@ def replicate(bench: Path, ext: Optional[Path] = None, labels: Optional[Path] = 
               f"(at least {RELOAD_MIN_CORR} needed)" for run, rc in reloads.items()
               if rc and rc["correlation"] < RELOAD_MIN_CORR]
 
-    # The four headline verdicts, seed by seed (§6 M8).
+    # The four headline verdicts, seed by seed (M8).
     claims = []
     for title, rule, order, results in (
         ("Image only against ResNet-50", "ResNet-50 below our 95% CI (official test, positive vs rest)",
@@ -201,7 +203,7 @@ def write_report(bench: Path, prefix: str, have_ext: bool, rad_note: Optional[st
     long, short = f"{prefix}_{LONG}", f"{prefix}_{SHORT}"
     lines = ["# M8: a second seed, and a longer fine-tune", "",
              "Each headline verdict that rests on seed 0 of the attention-head fine-tune, recomputed with seed 1 "
-             "(docs/V2_PLAN.md §6 M8). The official test is scored positive vs rest, as the published results "
+             "(docs/ANALYSIS.md, M8). The official test is scored positive vs rest, as the published results "
              "are; CheXpert over its five findings; M7a's comparison under the v2 policy. Nothing logged is "
              f"replaced: P stays `{short}` for M7's records, and nothing here is chosen on a test set.", "",
              "## Red flags (read these first)", ""]
@@ -210,6 +212,8 @@ def write_report(bench: Path, prefix: str, have_ext: bool, rad_note: Optional[st
         lines.append("- Not recomputed: G7 (no prepared CheXpert test set; pass `--ext`)")
     if rad_note:
         lines.append(f"- Not recomputed: M7a ({rad_note})")
+    lines += [f"- Unchecked: {', '.join(c['unrecorded'])} isn't recorded for `{c['run']}` or `{c['twin']}`; compare "
+              "the model's Hub commit by hand" for c in out["checks"] if c["unrecorded"]]
 
     lines += ["", "## Checks", "", "| Run | Twin | Recipe | Library versions | Best epoch | Stopped early | "
               "CheXpert reload |", "|---|---|---|---|---|---|---|"]
@@ -285,7 +289,7 @@ def main(argv: Optional[list[str]] = None) -> dict:
     parser.add_argument("--labels", help=f"the radiologist's labels (default: MIMIC_CXR_JPG_PATH/{RADIOLOGIST_FILE})")
     parser.add_argument("--prefix", default=PREFIX, help="the benchmark's image run prefix")
     parser.add_argument("--n-boot", type=int, default=N_BOOT)
-    parser.add_argument("--min-count", type=int, default=MIN_COUNT, help="M7a's measurable-class threshold (§3.2)")
+    parser.add_argument("--min-count", type=int, default=MIN_COUNT, help="M7a's measurable-class threshold")
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args(argv)
     setup_logging(args.verbose)

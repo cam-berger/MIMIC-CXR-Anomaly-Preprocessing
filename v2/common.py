@@ -3,7 +3,7 @@ Shared definitions for v2: labels, label policy, splits, paths, devices and
 the one prediction-file format every experiment writes.
 
 Everything that must be identical across experiments lives here, so the
-evaluation protocol in docs/V2_PLAN.md §3 is defined in exactly one place.
+evaluation protocol (docs/ANALYSIS.md, Setup) is defined in exactly one place.
 """
 
 from __future__ import annotations
@@ -53,7 +53,7 @@ TRAIN, VAL, TEST = "train", "val", "test"
 TEST_SETS: tuple[str, ...] = ("test_clean", "test_v1")
 TEST_FLAG = {"test_clean": "in_test_clean", "test_v1": "in_test_v1"}
 
-# Measurable-class rule (§3.2) and the looser rule used for in-training
+# Measurable-class rule and the looser rule used for in-training
 # validation, where a missing class only weakens model selection.
 MIN_COUNT = 30
 MIN_COUNT_VAL = 10
@@ -108,7 +108,7 @@ def label_counts(raw: np.ndarray, metric: str = "v2") -> pd.DataFrame:
 
 
 def measurable(raw: np.ndarray, metric: str = "v2", min_count: int = MIN_COUNT) -> list[str]:
-    """Labels with at least `min_count` positives and negatives (§3.2)."""
+    """Labels with at least `min_count` positives and negatives."""
     counts = label_counts(raw, metric)
     ok = (counts["pos"] >= min_count) & (counts["neg"] >= min_count)
     return counts.loc[ok, "label"].tolist()
@@ -251,7 +251,7 @@ def setup_logging(verbose: bool = False) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Predictions: the one format every experiment writes (§7)
+# Predictions: the one format every experiment writes
 # ---------------------------------------------------------------------------
 
 PRED_COLUMNS = ("study_id", "split", "label", "score", "run")

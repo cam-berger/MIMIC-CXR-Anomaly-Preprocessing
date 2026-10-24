@@ -1,4 +1,4 @@
-# v2: modern pretrained chest X-ray encoders (docs/V2_PLAN.md). Python 3.10+.
+# v2: pretrained chest X-ray encoders (docs/ANALYSIS.md). Python 3.10+.
 #
 #   pip install -r v2/requirements.txt          (or: bash v2/scripts/setup.sh)
 #

@@ -98,7 +98,7 @@ def test_finetune_writes_checkpoints_predictions_and_resumes(prepared):
 
 
 def test_attention_classifier_starts_at_the_priors():
-    """--head attention (§6 M5b amendment): M4b's h0 head on the encoder's tokens, bias at the label priors."""
+    """--head attention (M5b): M4b's h0 head on the encoder's tokens, bias at the label priors."""
     enc = load_encoder("tiny-dinov2")
     g = enc.token_grid(12)
     p = np.linspace(0.05, 0.6, len(LABELS))

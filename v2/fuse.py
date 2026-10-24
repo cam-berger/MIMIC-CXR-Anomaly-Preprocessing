@@ -1,5 +1,5 @@
 """
-M4: does text written before the X-ray add to the image? (docs/V2_PLAN.md §6 M4)
+M4: does text written before the X-ray add to the image? (docs/ANALYSIS.md, M4)
 
     python -m v2.context                 # first: context.parquet
     python -m v2.fuse --embeddings output/v2/embeddings/rad-dino_518.npz
@@ -14,11 +14,11 @@ predictions/{embeddings stem}_ctx_{arm}.parquet:
     text, indication, complaint, prior      text only: the controls
     image_vitals, image_text_vitals         + triage vitals, acuity, sex and age
 
-M4b (§6), only with --arms: the prior report encoded as the prior study's 14
+M4b, only with --arms: the prior report encoded as the prior study's 14
 CheXpert labels (one-hot, 57 features), alone and with the image:
 
     prior_labels, image_prior_labels, image_text_prior_labels
-    text_prior_labels                       all text with them, text only (§6 M5b amendment)
+    text_prior_labels                       all text with them, text only (M5b)
 
 Text features per source: TF-IDF over word 1-2-grams and a truncated SVD, both
 fit on train only, plus a presence indicator. With --text-encoder ENCODER (M6) a
@@ -176,7 +176,7 @@ def text_flags(name: str, res: Optional[dict], ref: Optional[dict]) -> list[str]
 
 
 def red_flags(clean: dict) -> list[str]:
-    """Leakage red flags (§6 M4) on every text-only arm, against the `image` arm."""
+    """Leakage red flags (M4) on every text-only arm, against the `image` arm."""
     ref = clean.get(REFERENCE)
     return [flag for arm, res in clean.items() if not ARMS[arm].image for flag in text_flags(arm, res, ref)]
 
@@ -247,7 +247,7 @@ def gate_report(out_dir: Path, prefix: str, runs: dict, n_boot: int, features: s
     if bench:
         title = f"# M5: text arms on the benchmark ({prefix}{suffix})"
     lines = [title, "", f"Macro AUROC on {'the official test split' if bench else 'test_clean'}; paired differences "
-             "against `image` (docs/V2_PLAN.md §6 " + ("M4b part 2)." if m4b else "M4)."), ""]
+             "against `image` (docs/ANALYSIS.md, " + ("M4b)." if m4b else "M4)."), ""]
     if features != "frozen":
         lines += ["**Exploratory:** these image features come from a fine-tune that was fit on the training "
                   "studies, which likely understates what text adds. G4 is defined on frozen features only.", ""]
@@ -280,8 +280,8 @@ def gate_report(out_dir: Path, prefix: str, runs: dict, n_boot: int, features: s
         if not bench:
             lines += ["", "Read test_v1 under the v2 policy first. Under the v1 policy only findings the report "
                       "mentions count, and text the radiologist reads makes a mention more likely, which biases text "
-                      "gains toward zero (§6 M4b amendment)."]
-        lines += ["", "Caveat (§6 M4b): radiologists read the prior report and often carry its wording forward, "
+                      "gains toward zero (M4b)."]
+        lines += ["", "Caveat (M4b): radiologists read the prior report and often carry its wording forward, "
                   "and the same labeler reads both reports, so part of any gain is predicting the report rather "
                   "than the patient."]
     rep_dir = Path(out_dir) / "reports"

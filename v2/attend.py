@@ -1,5 +1,5 @@
 """
-M4b part 1: can text steer where the model looks? (docs/V2_PLAN.md §6 M4b)
+M4b part 1: can text steer where the model looks? (docs/ANALYSIS.md, M4b)
 
     python -m v2.embed --model rad-dino --size 518 --tokens 12     # first: cached patch tokens
     python -m v2.attend --tokens output/v2/embeddings/rad-dino_518_tokens12.npy
@@ -61,7 +61,7 @@ SEEDS = (0, 1, 2, 3, 4)
 
 @dataclass(frozen=True)
 class Recipe:
-    """The pre-registered head and training recipe (§6 M4b)."""
+    """The pre-registered head and training recipe (M4b)."""
 
     width: int = 256
     heads: int = 4
@@ -266,7 +266,7 @@ def predict_head(model: TokenAttentionHead, inputs: Inputs, rows: np.ndarray, de
 def fit_head(arm: str, inputs: Inputs, seed: int, recipe: Recipe, device, train_rows: Optional[np.ndarray] = None,
              val_rows: Optional[np.ndarray] = None) -> tuple[TokenAttentionHead, dict]:
     """
-    Train one arm with one seed; keeps the epoch with the best val macro AUROC (§6 M4b recipe). Only when val
+    Train one arm with one seed; keeps the epoch with the best val macro AUROC (M4b). Only when val
     has no class with MIN_COUNT_VAL positives and negatives (tiny test data) does it select by val loss.
     """
     train_rows = inputs.rows(TRAIN) if train_rows is None else train_rows
@@ -380,7 +380,7 @@ def write_report(out_dir: Path, prefix: str, runs: dict, infos: dict, shift: Opt
         f"# M4b: text-steered attention ({prefix})"
     lines = [title, "",
              f"Frozen `{meta.get('encoder')}` tokens ({meta.get('token_grid')} x {meta.get('token_grid')} grid + "
-             f"CLS) with M4's text features; seeds {meta.get('seeds')}, mean of their logits (docs/V2_PLAN.md §6 M4b).",
+             f"CLS) with M4's text features; seeds {meta.get('seeds')}, mean of their logits (docs/ANALYSIS.md, M4b).",
              ""]
     if recipe != Recipe():
         changed = {k: v for k, v in asdict(recipe).items() if asdict(Recipe())[k] != v}
@@ -401,8 +401,8 @@ def write_report(out_dir: Path, prefix: str, runs: dict, infos: dict, shift: Opt
                   "improving (the recipe caps training at " f"{recipe.max_epochs} epochs)."]
     diff = fmt_ci(gate["cmp"]["diff"], gate["cmp"]["diff_ci"]) if gate["cmp"] else "-"
     if bench:
-        lines += ["", "## 3. Gate G4b", "", "Not here: G4b is defined on the v2 cohort, and M5 drops `h2` (§6 M5 "
-                  "amendment). The comparisons with published results are in reports/lineup.md.", ""]
+        lines += ["", "## 3. Gate G4b", "", "Not here: G4b is defined on the v2 cohort, and M5 drops `h2`. "
+                  "The comparisons with published results are in reports/lineup.md.", ""]
     else:
         lines += ["", "## 3. Gate G4b", "", f"**G4b** (`h2` minus `h1` on test_clean): {diff} -> **{gate['verdict']}**",
                   ""]

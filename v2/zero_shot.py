@@ -1,5 +1,5 @@
 """
-M2: zero-shot classification with a vision-language model (docs/V2_PLAN.md §6).
+M2: zero-shot classification with a vision-language model (docs/ANALYSIS.md).
 
     python -m v2.embed --model medsiglip            # image embeddings first
     python -m v2.zero_shot --model medsiglip

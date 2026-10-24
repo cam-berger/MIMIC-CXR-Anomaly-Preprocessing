@@ -1,5 +1,5 @@
 """
-M0: build the v2 manifest, resized images and data audit (docs/V2_PLAN.md §6).
+M0: build the v2 manifest, resized images and data audit (docs/ANALYSIS.md).
 
     python -m v2.prepare_data --mimic-cxr-jpg /Volumes/drive/mimic-cxr-jpg/2.1.0 \\
         --cohort-dir output/cohorts --out output/v2
@@ -9,12 +9,12 @@ given) v1's cohort files. Writes, under --out:
 
     manifest.parquet           one row per study: ids, view, split flags, 12 raw labels, image path
     images/{study_id}.png      8-bit grayscale, shorter side --image-size px
-    measurable_classes.json    measurable classes per test set and metric (§3.2)
+    measurable_classes.json    measurable classes per test set and metric
     audit.md, audit.json       counts, overlaps, drops, RAD-DINO check, gate G0
 
 Re-running is safe: existing PNGs are kept, so an interrupted run resumes.
 
-M5's standard benchmark (§6) uses every study and the official split, in its own
+M5's standard benchmark uses every study and the official split, in its own
 output directory:
 
     python -m v2.prepare_data --population all --split-scheme official --image-format jpg --out output/v2_bench
@@ -156,7 +156,7 @@ def assign_splits(
     seed: int,
 ) -> pd.DataFrame:
     """
-    Add official_split, in_test_clean, in_test_v1 and split (§3.1).
+    Add official_split, in_test_clean, in_test_v1 and split.
 
     test_clean: studies of patients in the official validate or test split.
     test_v1:    studies in v1's validation file.
@@ -184,7 +184,7 @@ def assign_splits(
 
 def assign_official_splits(df: pd.DataFrame, official: pd.Series) -> pd.DataFrame:
     """
-    §6 M5: train, val and test are the official train, validate and test patients, and test_clean is the
+    M5: train, val and test are the official train, validate and test patients, and test_clean is the
     official test split. Studies of patients missing from the split file are dropped by the caller.
     """
     df = df.copy()
@@ -439,7 +439,7 @@ def audit_markdown(audit: dict) -> str:
     for key, labels in audit["measurable"].items():
         lines.append(f"- **{key}** ({len(labels)}): {', '.join(labels) if labels else '(none)'}")
     g0 = audit["gate_g0"]
-    verdict = "PASS" if g0["pass"] else "FAIL: re-run with --extend-test-clean (§3.1 fallback)"
+    verdict = "PASS" if g0["pass"] else "FAIL: re-run with --extend-test-clean (the fallback for too few measurable classes)"
     lines += [
         "",
         f"**Gate G0:** test_clean has {g0['measurable_test_clean']} measurable classes "
@@ -472,7 +472,7 @@ def audit_markdown(audit: dict) -> str:
         for name in ("test_clean", "test_v1", "train", "val"):
             r = rad[name]
             lines.append(f"| {name} | {r['images']:,} | {r['images_in_list']:,} | {r['patients']:,} | {r['patients_in_list']:,} |")
-        lines += ["", f"test_clean must not overlap: **{status}**. test_v1 overlap is expected (§3.1)."]
+        lines += ["", f"test_clean must not overlap: **{status}**. test_v1 overlap is expected."]
     cov = audit.get("v1_cohort_coverage")
     if cov:
         lines += [
@@ -620,7 +620,7 @@ def main(argv: Optional[list[str]] = None) -> None:
                         help="cohort (v1's, the default with a cohort dir), abnormal (the default without one), "
                              "or all (every study: M5's benchmark)")
     parser.add_argument("--split-scheme", choices=SPLIT_SCHEMES, default="v2",
-                        help="v2 (§3.1, default) or official (M5: official train / validate / test)")
+                        help="v2 (default) or official (M5: official train / validate / test)")
     parser.add_argument("--image-format", choices=("png", "jpg"), default="png",
                         help="png (default) or jpg at quality 95, for large populations")
     parser.add_argument("--out", default=None, help="Output dir (default: $OUTPUT_PATH/v2 or output/v2)")
@@ -629,12 +629,12 @@ def main(argv: Optional[list[str]] = None) -> None:
     parser.add_argument("--limit", type=int, default=0, help="Keep about N studies (whole patients), for rehearsals")
     parser.add_argument("--seed", type=int, default=DEFAULT_SEED)
     parser.add_argument("--val-frac", type=float, default=0.1)
-    parser.add_argument("--min-count", type=int, default=MIN_COUNT, help="Measurable-class threshold (§3.2)")
+    parser.add_argument("--min-count", type=int, default=MIN_COUNT, help="Measurable-class threshold")
     parser.add_argument("--rad-dino-list", default="auto",
                         help="'auto' (download from Hugging Face), a local training_images.csv, or 'skip'")
     parser.add_argument("--v1-hdf5", help="v1 images.h5 (or its directory): report its share of lateral views")
     parser.add_argument("--extend-test-clean", action="store_true",
-                        help="§3.1 fallback: add every abnormal frontal study of official validate/test patients")
+                        help="Fallback: add every abnormal frontal study of official validate/test patients")
     parser.add_argument("--skip-images", action="store_true", help="Manifest and audit only")
     parser.add_argument("--max-unreadable", type=float, default=0.005,
                         help="Stop if more than this share of images fail to read (default 0.005): usually a "

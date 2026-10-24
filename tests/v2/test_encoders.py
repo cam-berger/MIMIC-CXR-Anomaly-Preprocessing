@@ -130,3 +130,21 @@ def test_pixel_tokens_are_cell_means_after_a_global_token():
 def test_encoders_without_tokens_say_so():
     with pytest.raises(NotImplementedError, match="tokens"):
         load_encoder("tiny-siglip").token_grid(12)
+
+
+def test_hub_revision_reads_the_cached_snapshot(tmp_path):
+    from v2.encoders import hub_revision
+
+    repo = tmp_path / "models--org--name"
+    (repo / "snapshots" / "abc123").mkdir(parents=True)
+    (repo / "snapshots" / "abc123" / "config.json").write_text("{}")
+    (repo / "refs").mkdir()
+    (repo / "refs" / "main").write_text("abc123")
+    assert hub_revision("org/name", cache_dir=str(tmp_path)) == "abc123"
+    assert hub_revision("org/other", cache_dir=str(tmp_path)) is None  # not cached: left unrecorded
+
+    class Loaded:  # a transformers version that does fill in the commit
+        config = type("Config", (), {"_commit_hash": "fromconfig"})()
+
+    assert hub_revision("org/name", Loaded(), cache_dir=str(tmp_path)) == "fromconfig"
+

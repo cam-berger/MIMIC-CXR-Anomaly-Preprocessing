@@ -99,7 +99,7 @@ def test_load_dotenv_does_not_override(tmp_path, monkeypatch):
 
 def test_mention_only_labels_bias_text_gains_toward_zero():
     """
-    §6 M4b amendment. A pre-imaging question about X makes the report address X either way. Under the v1
+    M4b. A pre-imaging question about X makes the report address X either way. Under the v1
     policy (mentioned findings only) that selection makes an informative question look useless or worse; under
     v2 (unmentioned = negative) it cancels, and the question scores what it is worth against the truth.
     """

@@ -1,5 +1,5 @@
 """
-M3: fine-tune an encoder end to end (docs/V2_PLAN.md §6).
+M3: fine-tune an encoder end to end (docs/ANALYSIS.md).
 
     python -m v2.finetune --model rad-dino --size 518 --seed 0        # rented GPU
     python -m v2.finetune --model rad-dino --size 224 --seed 0        # local GPU / Apple MPS
@@ -12,7 +12,7 @@ CUDA; gradient clipping 1.0. The epoch with the best val macro AUROC is kept,
 and val/test predictions are written once, at the end, from that checkpoint.
 
 The head is one linear layer on the pooled features. With --head attention
-(§6 M5b amendment) it is M4b's h0 head instead, on the CLS token and the patch
+(M5b) it is M4b's h0 head instead, on the CLS token and the patch
 tokens averaged to a 12 x 12 grid: it starts at random, with its token
 normalization fixed from the frozen encoder on 512 training studies.
 
@@ -254,7 +254,7 @@ def build_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
                                       "--head attention)")
     parser.add_argument("--head", default="mean", choices=["mean", "attention"],
                         help="mean: a linear layer on the pooled features; attention: M4b's h0 head on the tokens "
-                             "(§6 M5b amendment)")
+                             "(M5b)")
     parser.add_argument("--grid", type=int, default=12, help="--head attention: patch tokens averaged to G x G")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--epochs", type=int, default=10)

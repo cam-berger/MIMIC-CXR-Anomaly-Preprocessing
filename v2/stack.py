@@ -1,6 +1,6 @@
 """
 M4b part 3: what does text add to the fine-tuned image, when the combination is fit
-on studies no model here trained on? (docs/V2_PLAN.md §6 M4b)
+on studies no model here trained on? (docs/ANALYSIS.md, M4b)
 
     python -m v2.stack --pair rad-dino_518_ft_s1 rad-dino_518_ctx_text \\
                        --pair rad-dino_518_probe rad-dino_518_ctx_text
@@ -43,7 +43,7 @@ logger = logging.getLogger("v2.stack")
 
 FOLDS = 5
 C = 1.0
-CHECK_MARGIN = 0.005  # §6 M4b: a stack this far below the concatenation on frozen features loses information
+CHECK_MARGIN = 0.005  # M4b: a stack this far below the concatenation on frozen features loses information
 
 
 def _fit(X: np.ndarray, y: np.ndarray):
@@ -130,19 +130,19 @@ def later_milestone(meta_a: dict, meta_b: dict) -> Optional[str]:
 def write_report(out_dir: Path, stacks: dict, n_boot: int, name: Optional[str] = None) -> Path:
     bench = split_scheme(out_dir) == "official"
     if bench:  # M5: test_clean is the official test split, and test_v1 is empty
-        title, where = "# M5: combiners fit on val, on the benchmark", "§6 M5b amendment"
+        title, where = "# M5: combiners fit on val, on the benchmark", "M5"
         head = "| Stacked run | Image run | Text run | official test | minus the image run | minus the image run, " \
                "positive vs rest |"
         sets = (("test_clean", "v2"), ("test_clean", "u0"))
     else:
-        title, where = "# M4b: a combiner fit on val (exploratory)", "§6 M4b part 3"
+        title, where = "# M4b: a combiner fit on val (exploratory)", "M4b"
         head = "| Stacked run | Image run | Text run | test_clean | minus the image run, test_clean | " \
                "minus the image run, test_v1 | minus the image run, test_v1 (v1 metric) |"
         sets = (("test_clean", "v2"), ("test_v1", "v2"), ("test_v1", "v1"))
     lines = [title, "",
              f"Per class, a logistic regression on two runs' logits (C = {C}, standardized), fit on val; val's own "
              f"scores are cross-fitted ({FOLDS} folds grouped by patient), test scores come from the fit on all of "
-             f"val (docs/V2_PLAN.md {where}).", "", head, "|---" * (len(sets) + 4) + "|"]
+             f"val (docs/ANALYSIS.md {where}).", "", head, "|---" * (len(sets) + 4) + "|"]
     checks, weights = [], []
     for run, s in stacks.items():
         clean = _get(evaluate_run(out_dir, run, n_boot), "test_clean", "v2")
@@ -183,7 +183,7 @@ def write_report(out_dir: Path, stacks: dict, n_boot: int, name: Optional[str] =
               "slightly optimistic on val."]
     if not bench:
         lines[-1] += (" Under the v1 metric only findings the report mentions count, which biases text gains toward "
-                      "zero (§6 M4b amendment): read the v2 columns first.")
+                      "zero (M4b): read the v2 columns first.")
     path = Path(out_dir) / "reports" / (name or ("m5_stack.md" if bench else "m4b_stack.md"))
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("\n".join(lines) + "\n")

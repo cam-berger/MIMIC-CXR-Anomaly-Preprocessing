@@ -1,5 +1,5 @@
 """
-M1: linear probes on frozen embeddings (docs/V2_PLAN.md §6).
+M1: linear probes on frozen embeddings (docs/ANALYSIS.md).
 
     python -m v2.probe --embeddings output/v2/embeddings/rad-dino_224.npz
 

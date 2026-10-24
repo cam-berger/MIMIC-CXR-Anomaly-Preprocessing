@@ -395,7 +395,7 @@ def train_epoch(
 
             # FIX #1: Reset GradScaler via load_state_dict (not new GradScaler())
             # Creating a new object loses optimizer state synchronization and
-            # causes cascade failures. See tests/baseline_metrics.md.
+            # causes cascade failures. See docs/V1.md (training stability).
             if scaler is not None:
                 scaler.load_state_dict(_scaler_initial_state)
 
