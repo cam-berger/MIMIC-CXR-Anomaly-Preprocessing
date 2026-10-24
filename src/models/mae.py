@@ -521,7 +521,7 @@ class MaskedAutoencoder(nn.Module):
             var = target.var(dim=-1, keepdim=True)
             # FIX #4: Increased epsilon from 1e-6 to 1e-5 for FP16 safety
             # Prevents division by near-zero for low-variance patches (e.g., constant background regions)
-            # See: tests/baseline_metrics.md for NaN/Inf analysis
+            # See docs/V1.md (training stability)
             target = (target - mean) / (var + 1e-5) ** 0.5
 
         loss = (pred - target) ** 2

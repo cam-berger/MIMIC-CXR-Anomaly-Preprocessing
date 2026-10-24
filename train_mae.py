@@ -3,7 +3,7 @@
 Train Masked Autoencoder (MAE) for chest X-ray anomaly detection.
 
 This script implements the self-supervised pretraining pipeline described
-in MODEL_TRAINING_RESEARCH.md:
+in docs/V1.md:
 
 Phase 1: MAE Pretraining on normal cohort
 - Model learns to reconstruct masked patches
@@ -30,7 +30,7 @@ Example:
         --epochs 800 \\
         --batch-size 64
 
-Data format (per PREPROCESSED_DATA_SCHEMA.md):
+Data format (docs/V1.md):
     output/preprocessed/{cohort_name}/
     ├── images.h5              # HDF5: /images/{idx}, /metadata/{idx}, /index
     ├── structured.parquet     # Clinical features

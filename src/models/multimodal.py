@@ -54,7 +54,7 @@ def safe_normalize(x: torch.Tensor, dim: int = -1, eps: float = 1e-8) -> torch.T
         embeddings. Without this, zero-norm embeddings (e.g., from projection layers
         with all-zero inputs) cause NaN in cosine similarity computations.
 
-        See: tests/baseline_metrics.md for NaN/Inf root cause analysis
+        See docs/V1.md (training stability)
     """
     # Compute L2 norm along specified dimension
     norm = x.norm(p=2, dim=dim, keepdim=True)

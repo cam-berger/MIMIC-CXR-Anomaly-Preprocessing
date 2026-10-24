@@ -1,7 +1,7 @@
 """
 Configuration for MAE training and anomaly detection.
 
-Based on MODEL_TRAINING_RESEARCH.md recommendations for medical imaging.
+The presets are summarized in docs/V1.md.
 """
 
 from dataclasses import dataclass, field
