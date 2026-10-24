@@ -28,7 +28,8 @@ the X-ray, published benchmarks and a second hospital (v2).
   most. Total GPU cost: about $18.
 
 The full write-up, with every step and its numbers:
-[`docs/ANALYSIS.md`](docs/ANALYSIS.md).
+[`docs/ANALYSIS.md`](docs/ANALYSIS.md). Why each part of v1 changed, and what
+the change bought: [From v1 to v2](docs/ANALYSIS.md#from-v1-to-v2).
 
 ## What's here
 
@@ -45,7 +46,7 @@ tests/              v1's tests
 ## Getting started
 
 ```bash
-git clone <repo> && cd MIMIC-CXR-Anomaly-Preprocessing && git checkout v2
+git clone <repo> && cd MIMIC-CXR-Anomaly-Preprocessing
 bash v2/scripts/setup.sh && source .venv-v2/bin/activate
 python -m v2.smoke        # the whole pipeline on synthetic data, ~2 min, no MIMIC access needed
 python -m v2.doctor       # checks the machine and your data paths

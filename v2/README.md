@@ -10,7 +10,7 @@ needs a rented GPU.
 ## 1. Set up
 
 ```bash
-git clone <repo> && cd MIMIC-CXR-Anomaly-Preprocessing && git checkout v2
+git clone <repo> && cd MIMIC-CXR-Anomaly-Preprocessing
 bash v2/scripts/setup.sh          # venv, install, unit tests, synthetic wiring check (~5 min)
 source .venv-v2/bin/activate
 ```
@@ -84,7 +84,7 @@ the results only with other 224 px runs.
    GH200).
 2. On the GPU box:
    ```bash
-   git clone <repo> && cd MIMIC-CXR-Anomaly-Preprocessing && git checkout v2
+   git clone <repo> && cd MIMIC-CXR-Anomaly-Preprocessing
    bash v2/scripts/setup.sh && source .venv-v2/bin/activate
    python -c 'import torch; print(torch.cuda.is_available(), torch.cuda.get_device_name(0))'   # must print True
    ```
