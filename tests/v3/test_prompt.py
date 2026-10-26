@@ -1,10 +1,12 @@
-"""What Jev reads: the state text per arm and the 12 yes/no questions (docs/V3_PLAN.md §3-4)."""
+"""What Jev reads: the state text per arm and the 12 questions in each format (docs/V3_PLAN.md §3-4)."""
 
 import numpy as np
 import pytest
 
 from v2.common import LABELS
 from v3 import prompt
+
+PILOT_HASH = "e99b96a72ad9"  # jev_est_text's yes/no prompt in the 2026-10-26 pilot, the pre-registered one
 
 
 def ctx(**overrides):
@@ -19,14 +21,34 @@ def test_arms_use_known_blocks_and_v3_0_leaves_out_the_image():
     assert prompt.PRIMARY in prompt.V3_0_ARMS
     assert not any(prompt.needs_image(arm) for arm in prompt.V3_0_ARMS)
     assert prompt.needs_image("jev_img_est_text")
+    assert prompt.run_name("jev_est_text", "score") == "jev_est_text_score"
 
 
-def test_questions_are_12_yes_no_questions_in_label_order():
-    qs = prompt.questions()
-    assert list(qs) == [prompt.question_name(label) for label in LABELS]
-    assert len(set(qs)) == 12
+@pytest.mark.parametrize("fmt", prompt.FORMATS)
+def test_questions_are_12_in_label_order(fmt):
+    qs = prompt.questions(fmt)
+    assert list(qs) == [prompt.question_name(label) for label in LABELS] and len(set(qs)) == 12
     for q in qs.values():
-        assert q["type"] == "noul" and set(q["criteria"]) == {"true", "false"} and q["instructions"].endswith("?")
+        assert q["type"] == fmt and "radiologist's report" in q["instructions"]
+        if fmt == "noul":
+            assert set(q["criteria"]) == {"true", "false"} and q["instructions"].endswith("?")
+        else:
+            assert q["criteria"] == list(prompt.LEVELS) and len(q["criteria"]) == 10
+            assert all(len(level) <= 7 for level in q["criteria"])  # short: they repeat 12 times per request
+
+
+def test_unknown_format_is_an_error():
+    with pytest.raises(ValueError):
+        prompt.questions("choice")
+
+
+def test_likelihood_keeps_probabilities_and_maps_bands_to_midpoints():
+    noul, score = prompt.questions("noul")["edema"], prompt.questions("score")["edema"]
+    assert prompt.likelihood(noul, 0.37) == pytest.approx(0.37)
+    assert prompt.likelihood(score, 0.0) == pytest.approx(0.05)
+    assert prompt.likelihood(score, 4.5) == pytest.approx(0.5)
+    assert prompt.likelihood(score, 9.0) == pytest.approx(0.95)
+    assert prompt.likelihood(score, 0.01) > prompt.likelihood(score, 0.0)
 
 
 def test_estimates_are_percentages_in_label_order():
@@ -67,9 +89,13 @@ def test_the_image_arm_puts_the_placeholder_in_state():
     assert prompt.IMAGE_PLACEHOLDER not in prompt.render_state("jev_est_text", ctx(), np.full(12, 0.5))
 
 
-def test_prompt_hash_is_stable_per_arm_and_follows_the_wording(monkeypatch):
-    hashes = {arm: prompt.prompt_hash(arm) for arm in prompt.ARMS}
+def test_the_yes_no_format_is_still_the_pre_registered_prompt():
+    assert prompt.prompt_hash("jev_est_text", "noul") == PILOT_HASH
+
+
+def test_prompt_hash_is_stable_per_arm_and_format_and_follows_the_wording(monkeypatch):
+    hashes = {(arm, f): prompt.prompt_hash(arm, f) for arm in prompt.ARMS for f in prompt.FORMATS}
     assert len(set(hashes.values())) == len(hashes)
-    assert prompt.prompt_hash("jev_est") == hashes["jev_est"]
+    assert prompt.prompt_hash("jev_est", "score") == hashes[("jev_est", "score")]
     monkeypatch.setitem(prompt.DEFINITIONS, "Edema", "something else")
-    assert prompt.prompt_hash("jev_est") != hashes["jev_est"]
+    assert all(prompt.prompt_hash("jev_est", f) != hashes[("jev_est", f)] for f in prompt.FORMATS)

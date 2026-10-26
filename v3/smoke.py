@@ -1,15 +1,16 @@
 """
 v3's wiring check on synthetic data (docs/V3_PLAN.md §7 steps 1-2).
 
-    python -m v3.smoke                            # offline, a fake Jev, ~2 min
-    python -m v3.smoke --live --model MODEL       # 12 synthetic studies through the real API (no MIMIC data)
+    python -m v3.smoke                            # offline, a fake Jev, ~10 s
+    python -m v3.smoke --live --model MODEL       # 12 synthetic studies per format through the real API (no MIMIC)
 
 It builds a small synthetic benchmark as v2's tests do (v2.synth, official split, pixel embeddings, the probe, the
-context table, TF-IDF text arms), runs v3.setup, every v3.0 arm on val and then test, and v3.report. The fake Jev
-reads the estimates and v2.synth's planted text hints back out of `state`, so a study given another study's
-estimates or text, or answers stored under the wrong study, shows up as a score that differs from the one expected
-from that study's own inputs. Checks: every score as expected; a re-run asks nothing; jev_text finds the planted
-text signal; the report is written.
+context table, TF-IDF text arms), runs v3.setup, then the order of §7: jev_est_text on val in both question formats,
+val's choice, the other arms on val and every arm on test in the chosen format, and v3.report. The fake Jev reads
+the estimates and v2.synth's planted text hints back out of `state`, so a study given another study's estimates or
+text, or answers stored under the wrong study, shows up as a score that differs from the one expected from that
+study's own inputs. Checks: every score as expected; a re-run asks nothing; the losing format can't run on test;
+jev_text finds the planted text signal; the report is written.
 """
 
 from __future__ import annotations
@@ -65,6 +66,14 @@ def fake_probabilities(estimates: Optional[dict], text: str) -> dict:
     return out
 
 
+def fake_value(question: dict, p: float) -> float:
+    """The fake's answer in a question's own type: the probability, or the band whose midpoint it is (clipped)."""
+    if question["type"] == "noul":
+        return p
+    n = len(question["criteria"])
+    return min(max(n * p - 0.5, 0.0), n - 1.0)
+
+
 class FakeJev:
     """A transport for JevClient that answers from `state` alone, and counts requests."""
 
@@ -73,27 +82,34 @@ class FakeJev:
 
     def __call__(self, method, url, headers, json_body=None, files=None, timeout=None) -> Response:
         self.calls += 1
-        state = (json_body if json_body is not None else json.loads(files["request"][1]))["state"]
+        body = json_body if json_body is not None else json.loads(files["request"][1])
+        state = body["state"]
         found = {label: _percent(tok) for label, tok in _ESTIMATE.findall(state)}
         probs = fake_probabilities(found or None, state)
-        answers = {prompt.question_name(label): {"type": "noul", "noul": probs[label]} for label in LABELS}
+        answers = {}
+        for label in LABELS:
+            q = body["questions"][prompt.question_name(label)]
+            answers[prompt.question_name(label)] = {"type": q["type"], q["type"]: fake_value(q, probs[label])}
         return Response(200, {"model": self.model, "answers": answers,
                               "usage": {"input_tokens": len(state) // 4, "output_tokens": len(answers)}}, {})
 
 
-def expected_scores(out_dir: Path, arm: str) -> pd.DataFrame:
+def expected_scores(out_dir: Path, arm: str, fmt: str) -> pd.DataFrame:
     """What the fake Jev should answer for each study, from that study's own inputs (not from its state)."""
     setup = load_setup(out_dir)
     ctx = pd.read_parquet(out_dir / "context.parquet").drop_duplicates("study_id").set_index("study_id")
     probs = v3run.stage1_probabilities(out_dir, setup["image_run"])
     blocks = [b for b in prompt.ARMS[arm] if b in prompt.TEXT_BLOCKS]
+    questions = prompt.questions(fmt)
     rows = {}
     for sid in ctx.index:
         text = " ".join(prompt._text(ctx.at[sid, b]) for b in blocks)
         est = None
         if prompt.needs_estimates(arm) and sid in probs.index:
             est = {label: _percent(prompt.fmt_probability(p)[:-1]) for label, p in probs.loc[sid].items()}
-        rows[sid] = fake_probabilities(est, text)
+        fake = fake_probabilities(est, text)
+        rows[sid] = {label: prompt.likelihood(q, fake_value(q, fake[label]))
+                     for label, q in zip(LABELS, questions.values())}
     return pd.DataFrame.from_dict(rows, orient="index")[list(LABELS)]
 
 
@@ -122,28 +138,41 @@ def setup_synthetic(root: Path, n_patients: int = 400, seed: int = 3) -> Path:
     return out
 
 
-def check(out: Path, fake: FakeJev) -> list[str]:
+def check(out: Path, fake: FakeJev, chosen: str) -> list[str]:
     problems = []
-    for arm in prompt.V3_0_ARMS:
-        wide, meta = read_predictions(out / "predictions" / f"{arm}.parquet")
-        exp = expected_scores(out, arm).loc[wide["study_id"]]
-        worst = float(np.abs(wide[list(LABELS)].to_numpy() - exp.to_numpy()).max())
-        if worst > 1e-9:
-            problems.append(f"{arm}: scores differ from the study's own inputs by up to {worst:.3g} (misaligned?)")
-        n = len(v3run.split_rows(out, "val")) + len(v3run.split_rows(out, "test"))
-        if len(wide) != n:
-            problems.append(f"{arm}: {len(wide)} studies in predictions, expected {n}")
-        if meta.get("model") != fake.model or meta.get("prompt_hash") != prompt.prompt_hash(arm):
-            problems.append(f"{arm}: sidecar model or prompt hash wrong")
+    n_val, n_test = len(v3run.split_rows(out, "val")), len(v3run.split_rows(out, "test"))
+    for f in prompt.FORMATS:
+        for arm in prompt.V3_0_ARMS:
+            run = prompt.run_name(arm, f)
+            if not (out / "predictions" / f"{run}.parquet").exists():
+                if f == chosen or arm == prompt.PRIMARY:
+                    problems.append(f"{run}: no predictions")
+                continue
+            wide, meta = read_predictions(out / "predictions" / f"{run}.parquet")
+            exp = expected_scores(out, arm, f).loc[wide["study_id"]]
+            worst = float(np.abs(wide[list(LABELS)].to_numpy() - exp.to_numpy()).max())
+            if worst > 1e-9:
+                problems.append(f"{run}: scores differ from the study's own inputs by up to {worst:.3g} (misaligned?)")
+            n = n_val + n_test if f == chosen else n_val
+            if len(wide) != n:
+                problems.append(f"{run}: {len(wide)} studies in predictions, expected {n}")
+            if meta.get("model") != fake.model or meta.get("prompt_hash") != prompt.prompt_hash(arm, f):
+                problems.append(f"{run}: sidecar model or prompt hash wrong")
     before = fake.calls
     client = JevClient(fake.model, api_key="smoke", transport=fake)
-    v3run.run_arm(out, "jev_est_text", "val", client)
+    v3run.run_arm(out, prompt.PRIMARY, chosen, "val", client)
     if fake.calls != before:
         problems.append(f"re-run asked {fake.calls - before} questions again: the cache is not used")
+    other = next(f for f in prompt.FORMATS if f != chosen)
+    try:
+        v3run.run_arm(out, prompt.PRIMARY, other, "test", client)
+        problems.append(f"the {other} format ran on test although val chose {chosen}")
+    except SystemExit:
+        pass
     # The planted text signal, read by jev_text alone (the synthetic images' signal is near perfect, so on top of the
     # estimates the hints can only blur the ranking). Hint rates of 0.4-0.6 against 0.1 give AUROCs of about 0.65-0.75.
     manifest = load_manifest(out).drop_duplicates("study_id").set_index("study_id")
-    wide, _ = read_predictions(out / "predictions" / "jev_text.parquet")
+    wide, _ = read_predictions(out / "predictions" / f"{prompt.run_name('jev_text', chosen)}.parquet")
     aucs = []
     for label in PHRASES:
         y = manifest.loc[wide["study_id"], label].to_numpy()
@@ -158,28 +187,43 @@ def check(out: Path, fake: FakeJev) -> list[str]:
     return problems
 
 
+def run_order(out: Path, client: JevClient, concurrency: int = 2) -> str:
+    """§7's order: the primary arm on val in both formats, val's choice, then the rest. Returns the chosen format."""
+    for f in prompt.FORMATS:
+        v3run.run_arm(out, prompt.PRIMARY, f, "val", client, concurrency=concurrency)
+    chosen = report.choose_format(out)["chosen"]
+    for arm in prompt.V3_0_ARMS:
+        if arm != prompt.PRIMARY:
+            v3run.run_arm(out, arm, chosen, "val", client, concurrency=concurrency)
+    for arm in prompt.V3_0_ARMS:
+        v3run.run_arm(out, arm, chosen, "test", client, concurrency=concurrency)
+    return chosen
+
+
 def offline(root: Path) -> list[str]:
     out = setup_synthetic(root)
     fake = FakeJev()
-    client = JevClient(fake.model, api_key="smoke", transport=fake)
-    for arm in prompt.V3_0_ARMS:
-        for split in ("val", "test"):
-            v3run.run_arm(out, arm, split, client, concurrency=2)
-    return check(out, fake)
+    chosen = run_order(out, JevClient(fake.model, api_key="smoke", transport=fake))
+    return check(out, fake, chosen)
 
 
 def live(root: Path, model: str, n: int = 12) -> list[str]:
-    """The real API on synthetic text: checks the request format and the answers' shape. No MIMIC data."""
+    """The real API on synthetic text, in both formats: checks the requests and the answers' shape. No MIMIC data."""
     out = setup_synthetic(root, n_patients=150)
-    stats = v3run.run_arm(out, prompt.PRIMARY, "val", JevClient(model), limit=n, concurrency=2)
-    logger.info("live: %d of %d answered by %s; mean input tokens %s; latency median %s s", stats["n_answered"],
-                stats["n_studies"], ", ".join(stats["models"]), stats["mean_input_tokens"], stats["latency_median"])
-    return [] if stats["n_answered"] == stats["n_studies"] else [f"{stats['n_failed']} live requests failed"]
+    problems = []
+    for f in prompt.FORMATS:
+        stats = v3run.run_arm(out, prompt.PRIMARY, f, "val", JevClient(model), limit=n, concurrency=2)
+        logger.info("live %s: %d of %d answered by %s; mean input tokens %s; latency median %s s; distinct scores "
+                    "per finding (median) %s", f, stats["n_answered"], stats["n_studies"], ", ".join(stats["models"]),
+                    stats["mean_input_tokens"], stats["latency_median"], stats["distinct_scores_median"])
+        if stats["n_answered"] != stats["n_studies"]:
+            problems.append(f"{f}: {stats['n_failed']} live requests failed")
+    return problems
 
 
 def main(argv: Optional[list[str]] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--live", action="store_true", help="Send 12 synthetic studies to the real API")
+    parser.add_argument("--live", action="store_true", help="Send 12 synthetic studies per format to the real API")
     parser.add_argument("--model", help="The Jev version for --live")
     parser.add_argument("--keep", help="Build in this directory and keep it (default: a temporary one)")
     parser.add_argument("-v", "--verbose", action="store_true")

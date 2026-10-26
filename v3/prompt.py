@@ -1,9 +1,14 @@
 """
 What Jev reads for each study (docs/V3_PLAN.md §3-4): the `state` text, built from an arm's blocks, and the 12
-yes/no questions, one per finding.
+questions, one per finding, in one of two formats (§3 amendment):
+
+    noul   yes/no questions; the answer is the probability of yes (the pre-registered prompt, unchanged)
+    score  10 likelihood bands; the answer is the expected band, mapped to a likelihood
 
 Jev never sees the X-ray in v3.0, so each question asks what the radiologist's report will say: the labels come
-from the report. Anything changed here changes `prompt_hash`, so cached answers and runs never mix two prompts.
+from the report. Jev's answers come rounded to 0.01. For a yes/no probability that ties most studies on rare
+findings; a score is on a 0-9 scale, so about 9 times finer. Val picks the format (§7). Anything changed here
+changes `prompt_hash`, so cached answers and runs never mix two prompts.
 """
 
 from __future__ import annotations
@@ -17,8 +22,10 @@ import numpy as np
 
 from v2.common import LABELS
 
-PROMPT_VERSION = 1
+FORMATS = ("noul", "score")
+PROMPT_VERSION = {"noul": 1, "score": 2}  # noul is version 1, the pre-registered prompt, byte for byte
 MISSING = "none recorded"
+LEVELS = tuple(f"{10 * i}-{10 * (i + 1)}%" for i in range(10))  # short: they repeat in all 12 questions
 # Jev replaces an asset's key wherever it appears in `state`; TypeSafe recommends a UUID per image (v3.1).
 IMAGE_PLACEHOLDER = "6f1c2a7e-3b9d-4e8a-9c41-0d2b5e7f8a13"
 
@@ -78,23 +85,51 @@ DEFINITIONS = {
     "Pneumonia": "The report describes findings of pneumonia, or says they are consistent with it.",
     "Pneumothorax": "The report describes air in the pleural space (a pneumothorax), however small.",
 }
-ABSENT = "The report will say it is absent, or will not mention it."
+ABSENT = {"noul": "The report will say it is absent, or will not mention it.",
+          "score": "It counts as no if the report says it is absent, or does not mention it."}
 
 
 def question_name(label: str) -> str:
     return label.lower().replace(" ", "_")
 
 
-def questions() -> dict:
-    """The 12 yes/no questions, keyed by question_name, in LABELS order."""
-    return {
-        question_name(label): {
-            "type": "noul",
-            "instructions": f"Will the radiologist's report of this chest X-ray say that there is {NAMES[label]}?",
-            "criteria": {"true": DEFINITIONS[label], "false": ABSENT},
+def run_name(arm: str, fmt: str) -> str:
+    return f"{arm}_{fmt}"
+
+
+def questions(fmt: str) -> dict:
+    """The 12 questions in format `fmt`, keyed by question_name, in LABELS order."""
+    if fmt == "noul":
+        return {
+            question_name(label): {
+                "type": "noul",
+                "instructions": f"Will the radiologist's report of this chest X-ray say that there is {NAMES[label]}?",
+                "criteria": {"true": DEFINITIONS[label], "false": ABSENT["noul"]},
+            }
+            for label in LABELS
         }
-        for label in LABELS
-    }
+    if fmt == "score":
+        return {
+            question_name(label): {
+                "type": "score",
+                "instructions": (f"How likely is it that the radiologist's report of this chest X-ray will say that "
+                                 f"there is {NAMES[label]}? It counts as yes if: {DEFINITIONS[label]} "
+                                 f"{ABSENT['score']}"),
+                "criteria": list(LEVELS),
+            }
+            for label in LABELS
+        }
+    raise ValueError(f"unknown question format {fmt!r} (expected one of {', '.join(FORMATS)})")
+
+
+def likelihood(question: dict, value: float) -> float:
+    """
+    The score v2's evaluation ranks: a yes/no answer's probability as is, a score's expected band (0 to n - 1) as
+    the likelihood at that band's midpoint, (band + 0.5) / n. Monotone, so ranks and AUROC are those of the answer.
+    """
+    if question["type"] == "noul":
+        return float(value)
+    return (float(value) + 0.5) / len(question["criteria"])
 
 
 def needs_estimates(arm: str) -> bool:
@@ -138,10 +173,10 @@ def render_state(arm: str, ctx: Mapping, estimates: Optional[np.ndarray]) -> str
     return "\n\n".join(parts)
 
 
-def prompt_hash(arm: str) -> str:
+def prompt_hash(arm: str, fmt: str) -> str:
     """Twelve hex digits over everything that shapes a request except the study itself."""
     sample = {"indication": "INDICATION", "chief_complaint": "COMPLAINT", "prior_report": "PRIOR"}
     estimates = np.linspace(0.0, 1.0, len(LABELS)) if needs_estimates(arm) else None
-    blob = json.dumps({"version": PROMPT_VERSION, "blocks": ARMS[arm], "questions": questions(),
+    blob = json.dumps({"version": PROMPT_VERSION[fmt], "blocks": ARMS[arm], "questions": questions(fmt),
                        "state": render_state(arm, sample, estimates)}, sort_keys=True)
     return hashlib.sha256(blob.encode()).hexdigest()[:12]

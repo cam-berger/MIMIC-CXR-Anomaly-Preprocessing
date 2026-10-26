@@ -1,15 +1,16 @@
 """
-Ask Jev about every study of a split, for one arm (docs/V3_PLAN.md §3-4, §7).
+Ask Jev about every study of a split, for one arm and question format (docs/V3_PLAN.md §3-4, §7).
 
-    python -m v3.run --arm jev_est_text --split val --limit 40 --model MODEL   # the pilot
-    python -m v3.run --arm jev_est_text --split val --model MODEL
-    python -m v3.run --arm jev_est_text --split test --model MODEL             # after val, same prompt and model
+    python -m v3.run --arm jev_est_text --format score --split val --limit 40 --model MODEL   # a pilot
+    python -m v3.run --arm jev_est_text --format score --split val --model MODEL
+    python -m v3.run --arm jev_est_text --format score --split test --model MODEL             # after val's choice
 
-Answers are cached in V3_OUT/jev_cache/{arm}__{prompt hash}__{model}.jsonl, which is record-level: keep it local and
-never print it. A re-run asks only about studies without an answer, so nothing is paid for twice. Without --limit,
-the run then writes predictions/{arm}.parquet from every cached answer (val, and test once it is done). With
---limit (the pilot) it writes reports/v3_pilot_{arm}.md instead. Console output is counts, tokens and timings only;
-the studies that failed go to logs/, locally.
+The run is named {arm}_{format}, e.g. jev_est_text_score. Answers are cached in
+V3_OUT/jev_cache/{arm}__{prompt hash}__{model}.jsonl, which is record-level: keep it local and never print it. A
+re-run asks only about studies without an answer, so nothing is paid for twice. Without --limit, the run then
+writes predictions/{run}.parquet from every cached answer (val, and test once it is done). With --limit (a pilot)
+it writes reports/v3_pilot_{run}.md instead. Test runs only in the format val chose (§7), after that arm's val
+run. Console output is counts, tokens and timings only; the studies that failed go to logs/, locally.
 """
 
 from __future__ import annotations
@@ -39,9 +40,9 @@ ALIASES = ("jev-latest", "jev-preview")        # §3: a run pins a version
 PILOT_SEED = 0
 
 
-def cache_path(out_dir: Path, arm: str, model: str) -> Path:
+def cache_path(out_dir: Path, arm: str, fmt: str, model: str) -> Path:
     safe = "".join(c if c.isalnum() or c in "-._" else "_" for c in model)
-    return Path(out_dir) / "jev_cache" / f"{arm}__{prompt.prompt_hash(arm)}__{safe}.jsonl"
+    return Path(out_dir) / "jev_cache" / f"{arm}__{prompt.prompt_hash(arm, fmt)}__{safe}.jsonl"
 
 
 def load_cache(path: Path) -> dict[int, dict]:
@@ -88,39 +89,55 @@ def study_states(out_dir: Path, arm: str, rows: pd.DataFrame, image_run: str) ->
     return out
 
 
-def val_done(out_dir: Path, arm: str, model: str) -> bool:
-    """A full val run of this arm wrote predictions with the current prompt and model."""
-    sidecar = Path(out_dir) / "predictions" / f"{arm}.json"
+def val_done(out_dir: Path, arm: str, fmt: str, model: str) -> bool:
+    """A full val run of this arm and format wrote predictions with the current prompt and model."""
+    sidecar = Path(out_dir) / "predictions" / f"{prompt.run_name(arm, fmt)}.json"
     if not sidecar.exists():
         return False
     meta = json.loads(sidecar.read_text())
-    return meta.get("prompt_hash") == prompt.prompt_hash(arm) and meta.get("requested_model") == model
+    return meta.get("prompt_hash") == prompt.prompt_hash(arm, fmt) and meta.get("requested_model") == model
+
+
+def check_test_allowed(out_dir: Path, arm: str, fmt: str, model: str) -> None:
+    """§7: test runs once, after the arm's val run, and only in the format val chose."""
+    from .report import choose_format
+
+    if not val_done(out_dir, arm, fmt, model):
+        raise SystemExit(f"{prompt.run_name(arm, fmt)}: run val first with the same prompt and model (§7)")
+    choice = choose_format(out_dir)
+    if choice is None:
+        raise SystemExit(f"run {prompt.PRIMARY} on val in both formats first: val picks the format (§7)")
+    if fmt != choice["chosen"]:
+        raise SystemExit(f"val chose the {choice['chosen']} format, not {fmt}: test runs only in the chosen one (§7)")
 
 
 def _ask(client: JevClient, state: str, questions: dict, image: Optional[Path]):
     return client.ask(state, questions, image.read_bytes() if image is not None else None)
 
 
-def run_arm(out_dir: Path, arm: str, split: str, client: JevClient, limit: Optional[int] = None,
+def run_arm(out_dir: Path, arm: str, fmt: str, split: str, client: JevClient, limit: Optional[int] = None,
             concurrency: int = 4, allow_image: bool = False) -> dict:
     if arm not in prompt.ARMS:
         raise SystemExit(f"unknown arm {arm!r}: one of {', '.join(prompt.ARMS)}")
+    if fmt not in prompt.FORMATS:
+        raise SystemExit(f"unknown format {fmt!r}: one of {', '.join(prompt.FORMATS)}")
     if prompt.needs_image(arm) and not allow_image:
         raise SystemExit(f"{arm} sends the X-ray itself (v3.1, docs/V3_PLAN.md §8): pass --allow-image once its "
                          "amendment is written")
     setup = load_setup(out_dir)
-    path = cache_path(out_dir, arm, client.model)
+    run, phash = prompt.run_name(arm, fmt), prompt.prompt_hash(arm, fmt)
+    path = cache_path(out_dir, arm, fmt, client.model)
     path.parent.mkdir(parents=True, exist_ok=True)
     cache = load_cache(path)
-    if split == "test" and not val_done(out_dir, arm, client.model):
-        raise SystemExit(f"{arm}: run val first with the same prompt and model (§7): test runs once, after val")
+    if split == "test":
+        check_test_allowed(out_dir, arm, fmt, client.model)
     rows = split_rows(out_dir, split)
     if limit is not None:
         rows = rows.sample(n=min(limit, len(rows)), random_state=PILOT_SEED).sort_values("study_id")
     todo = rows[~rows["study_id"].isin(list(cache))]
-    logger.info("%s on %s: %d studies, %d already answered, %d to ask (model %s, prompt %s)", arm, split, len(rows),
-                len(rows) - len(todo), len(todo), client.model, prompt.prompt_hash(arm))
-    questions = prompt.questions()
+    logger.info("%s on %s: %d studies, %d already answered, %d to ask (model %s, prompt %s)", run, split, len(rows),
+                len(rows) - len(todo), len(todo), client.model, phash)
+    questions = prompt.questions(fmt)
     names = [prompt.question_name(label) for label in LABELS]
     failures: dict[int, str] = {}
     if len(todo):
@@ -134,30 +151,31 @@ def run_arm(out_dir: Path, arm: str, split: str, client: JevClient, limit: Optio
                 except JevError as exc:
                     failures[sid] = str(exc.status or "network")
                     continue
-                rec = {"study_id": sid, "model": ans.model, "scores": [ans.scores[n] for n in names],
+                rec = {"study_id": sid, "model": ans.model,
+                       "scores": [prompt.likelihood(questions[n], ans.scores[n]) for n in names],
                        "usage": ans.usage, "latency": round(ans.latency, 3)}
                 f.write(json.dumps(rec) + "\n")
                 f.flush()
                 cache[sid] = rec
                 if done % 200 == 0:
-                    logger.info("%s: %d of %d asked (%d failed)", arm, done, len(todo), len(failures))
+                    logger.info("%s: %d of %d asked (%d failed)", run, done, len(todo), len(failures))
     stats = summarize(rows, cache, failures)
-    stats.update({"arm": arm, "split": split, "requested_model": client.model, "prompt_hash": prompt.prompt_hash(arm),
-                  "cache": path.name})
-    log_failures(out_dir, arm, split, failures)
+    stats.update({"run": run, "arm": arm, "format": fmt, "split": split, "requested_model": client.model,
+                  "prompt_hash": phash, "cache": path.name})
+    log_failures(out_dir, run, split, failures)
     logger.info("%s on %s: %d answered, %d failed %s; input tokens %s (mean %s); latency median %s s, p90 %s s",
-                arm, split, stats["n_answered"], stats["n_failed"], stats["failed_by_status"] or "",
+                run, split, stats["n_answered"], stats["n_failed"], stats["failed_by_status"] or "",
                 stats["input_tokens"], stats["mean_input_tokens"], stats["latency_median"], stats["latency_p90"])
     models = {rec["model"] for rec in cache.values()}
     if len(models) > 1:
-        raise SystemExit(f"{arm}: answers come from {len(models)} models ({', '.join(sorted(models))}): §3 pins one")
+        raise SystemExit(f"{run}: answers come from {len(models)} models ({', '.join(sorted(models))}): §3 pins one")
     if stats["n_failed"] > MAX_FAILED_SHARE * len(rows):
-        raise SystemExit(f"{arm} on {split}: {stats['n_failed']} of {len(rows)} studies have no answer, more than "
+        raise SystemExit(f"{run} on {split}: {stats['n_failed']} of {len(rows)} studies have no answer, more than "
                          f"{MAX_FAILED_SHARE:.0%}: stop (docs/V3_PLAN.md §6)")
     if limit is not None:
         stats["report"] = str(write_pilot_report(out_dir, stats))
     else:
-        stats["predictions"] = str(write_arm_predictions(out_dir, arm, cache, setup, client.model, path))
+        stats["predictions"] = str(write_arm_predictions(out_dir, arm, fmt, cache, setup, client.model, path))
     return stats
 
 
@@ -172,14 +190,15 @@ def summarize(rows: pd.DataFrame, cache: dict, failures: dict) -> dict:
         "input_tokens": int(sum(tokens)), "mean_input_tokens": round(float(np.mean(tokens)), 1) if tokens else None,
         "latency_median": round(float(np.nanmedian(latency)), 2), "latency_p90": round(float(np.nanpercentile(latency, 90)), 2),
         "models": sorted({rec["model"] for rec in answered}),
+        "distinct_scores": [len(np.unique(scores[:, k])) for k in range(len(LABELS))] if len(scores) else [],
         "distinct_scores_median": float(np.median([len(np.unique(scores[:, k])) for k in range(len(LABELS))]))
         if len(scores) else None,
     }
 
 
-def log_failures(out_dir: Path, arm: str, split: str, failures: dict) -> None:
+def log_failures(out_dir: Path, run: str, split: str, failures: dict) -> None:
     """Record-level: which studies failed, for a local re-run. Never printed."""
-    path = Path(out_dir) / "logs" / f"{arm}_{split}_failures.csv"
+    path = Path(out_dir) / "logs" / f"{run}_{split}_failures.csv"
     if failures:
         path.parent.mkdir(parents=True, exist_ok=True)
         pd.DataFrame({"study_id": list(failures), "status": list(failures.values())}).to_csv(path, index=False)
@@ -187,16 +206,17 @@ def log_failures(out_dir: Path, arm: str, split: str, failures: dict) -> None:
         path.unlink()
 
 
-def write_arm_predictions(out_dir: Path, arm: str, cache: dict, setup: dict, model: str, path: Path) -> Path:
+def write_arm_predictions(out_dir: Path, arm: str, fmt: str, cache: dict, setup: dict, model: str,
+                          path: Path) -> Path:
     manifest = load_manifest(out_dir).drop_duplicates("study_id")
     rows = pd.concat([eval_rows(manifest, name) for name in SPLITS.values()]).drop_duplicates("study_id")
     rows = rows[rows["study_id"].isin(list(cache))].sort_values("study_id")
     scores = np.array([cache[int(sid)]["scores"] for sid in rows["study_id"]], dtype=np.float64)
     expected = {split: len(eval_rows(manifest, name)) for split, name in SPLITS.items()}
     answered = {VAL: int((rows["split"] == VAL).sum()), TEST: int((rows["split"] == TEST).sum())}
-    return write_predictions(out_dir, arm, rows["study_id"], rows["split"], scores, {
-        "kind": "jev", "milestone": "v3", "arm": arm, "blocks": list(prompt.ARMS[arm]),
-        "prompt_version": prompt.PROMPT_VERSION, "prompt_hash": prompt.prompt_hash(arm),
+    return write_predictions(out_dir, prompt.run_name(arm, fmt), rows["study_id"], rows["split"], scores, {
+        "kind": "jev", "milestone": "v3", "arm": arm, "format": fmt, "blocks": list(prompt.ARMS[arm]),
+        "prompt_version": prompt.PROMPT_VERSION[fmt], "prompt_hash": prompt.prompt_hash(arm, fmt),
         "requested_model": model, "model": next(iter({rec["model"] for rec in cache.values()}), None),
         "image_run": setup["image_run"] if prompt.needs_estimates(arm) else None, "cache": path.name,
         "studies_expected": expected, "studies_answered": answered,
@@ -205,16 +225,17 @@ def write_arm_predictions(out_dir: Path, arm: str, cache: dict, setup: dict, mod
 
 
 def write_pilot_report(out_dir: Path, stats: dict) -> Path:
-    path = Path(out_dir) / "reports" / f"v3_pilot_{stats['arm']}.md"
+    path = Path(out_dir) / "reports" / f"v3_pilot_{stats['run']}.md"
     path.parent.mkdir(parents=True, exist_ok=True)
     rows = [("Studies", stats["n_studies"]), ("Answered", stats["n_answered"]),
             ("Failed", f"{stats['n_failed']} {stats['failed_by_status'] or ''}".strip()),
             ("Model asked / answered", f"`{stats['requested_model']}` / {', '.join(f'`{m}`' for m in stats['models'])}"),
-            ("Prompt hash", f"`{stats['prompt_hash']}`"),
+            ("Question format / prompt hash", f"`{stats['format']}` / `{stats['prompt_hash']}`"),
             ("Input tokens, total / mean per study", f"{stats['input_tokens']:,} / {stats['mean_input_tokens']}"),
             ("Latency per request, median / p90 (s)", f"{stats['latency_median']} / {stats['latency_p90']}"),
-            ("Distinct scores per finding (median of 12)", stats["distinct_scores_median"])]
-    lines = [f"# v3 pilot: `{stats['arm']}` on {stats['split']}", "",
+            ("Distinct scores per finding (median of 12)", stats["distinct_scores_median"]),
+            ("Distinct scores per finding, in label order", ", ".join(map(str, stats["distinct_scores"])))]
+    lines = [f"# v3 pilot: `{stats['run']}` on {stats['split']}", "",
              "Aggregates only (docs/V3_PLAN.md §7 step 3).", "", "| | |", "|---|---|"]
     lines += [f"| {k} | {v} |" for k, v in rows]
     path.write_text("\n".join(lines) + "\n")
@@ -224,10 +245,12 @@ def write_pilot_report(out_dir: Path, stats: dict) -> Path:
 def main(argv: Optional[list[str]] = None) -> dict:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--arm", required=True, choices=list(prompt.ARMS))
+    parser.add_argument("--format", required=True, choices=list(prompt.FORMATS), dest="fmt",
+                        help="noul: yes/no questions; score: 10 likelihood bands (§3)")
     parser.add_argument("--split", required=True, choices=list(SPLITS))
     parser.add_argument("--model", required=True, help="A pinned Jev version (see `python -m v3.jev models`)")
     parser.add_argument("--out", default=None, help="v3 output dir (default: V3_OUT or $OUTPUT_PATH/v3)")
-    parser.add_argument("--limit", type=int, help="The pilot: this many studies, sampled with a fixed seed")
+    parser.add_argument("--limit", type=int, help="A pilot: this many studies, sampled with a fixed seed")
     parser.add_argument("--concurrency", type=int, default=4, help="Requests in flight at once")
     parser.add_argument("--long-context", action="store_true", help="Send TypeSafe's long-context header")
     parser.add_argument("--allow-image", action="store_true", help="v3.1 only: allow an arm that sends the X-ray")
@@ -238,8 +261,8 @@ def main(argv: Optional[list[str]] = None) -> dict:
     if args.model in ALIASES and not args.allow_alias:
         raise SystemExit(f"{args.model} is an alias that can change under a run: pin a version (§3)")
     client = JevClient(args.model, long_context=args.long_context)
-    return run_arm(Path(args.out) if args.out else default_out_dir(), args.arm, args.split, client, args.limit,
-                   args.concurrency, args.allow_image)
+    return run_arm(Path(args.out) if args.out else default_out_dir(), args.arm, args.fmt, args.split, client,
+                   args.limit, args.concurrency, args.allow_image)
 
 
 if __name__ == "__main__":

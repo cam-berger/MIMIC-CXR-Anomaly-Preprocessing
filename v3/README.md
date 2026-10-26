@@ -28,20 +28,29 @@ Nothing in `BENCH_OUT` is written.
 ```bash
 python -m pytest tests/v3 -q                        # offline, no data, no network
 python -m v3.smoke                                  # offline: synthetic benchmark and a fake Jev
-python -m v3.jev models                             # pick a pinned version (no MIMIC data is sent)
-python -m v3.smoke --live --model MODEL             # the real API on 12 synthetic studies
-python -m v3.run --arm jev_est_text --split val --limit 40 --model MODEL   # the pilot -> reports/v3_pilot_*.md
+python -m v3.jev models                             # lists aliases only; jev-1.14.0 is pinned (§9)
+python -m v3.smoke --live --model MODEL             # the real API on 12 synthetic studies per format
+python -m v3.run --arm jev_est_text --format score --split val --limit 40 --model MODEL   # a pilot
 ```
 
-Then each v3.0 arm on val, the report (the val prompt rule, §7 step 4), and only then the official test:
+Each question format is a run of its own: `--format noul` (yes/no) or `--format score` (10 likelihood bands),
+named `{arm}_{format}`. Val picks the format (§7 step 4): `jev_est_text` on all of val in both, then the report.
 
 ```bash
-for arm in jev_est jev_est_indication jev_est_text jev_text; do
-  python -m v3.run --arm $arm --split val --model MODEL
+for fmt in noul score; do python -m v3.run --arm jev_est_text --format $fmt --split val --model MODEL; done
+python -m v3.report                                 # "Question format (§7, val): ... -> FORMAT"
+```
+
+Then the other arms on val in that format, the report (the val prompt rule, §7 step 5), and only then the
+official test. `v3.run` refuses test in the format val didn't choose.
+
+```bash
+for arm in jev_est jev_est_indication jev_text; do
+  python -m v3.run --arm $arm --format FORMAT --split val --model MODEL
 done
 python -m v3.report
 for arm in jev_est jev_est_indication jev_est_text jev_text; do
-  python -m v3.run --arm $arm --split test --model MODEL
+  python -m v3.run --arm $arm --format FORMAT --split test --model MODEL
 done
 python -m v3.report                                 # -> V3_OUT/reports/v3_report.md
 ```

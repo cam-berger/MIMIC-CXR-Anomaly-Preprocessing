@@ -48,7 +48,7 @@ class Response:
 @dataclass
 class Answer:
     model: str
-    scores: dict  # question name -> probability of yes
+    scores: dict  # question name -> the answer's value (probability of yes, or expected level)
     usage: dict
     latency: float  # seconds, the successful attempt only
 
@@ -96,17 +96,22 @@ def _error_message(resp: Response) -> str:
 
 
 def parse_answer(payload: dict, questions: dict) -> tuple[str, dict]:
+    """The answering model, and each question's value: a yes/no probability (`noul`) or an expected level (`score`)."""
     answers = payload.get("answers")
     if not isinstance(answers, dict):
         raise JevError("malformed response: no answers", 200)
-    scores = {}
-    for name in questions:
+    values = {}
+    for name, question in questions.items():
+        kind = question["type"]
+        if kind not in ("noul", "score"):
+            raise ValueError(f"question {name!r}: type {kind!r} has no numeric answer")
+        top = 1.0 if kind == "noul" else len(question["criteria"]) - 1
         a = answers.get(name)
-        p = a.get("noul") if isinstance(a, dict) and a.get("type") == "noul" else None
-        if not isinstance(p, (int, float)) or not math.isfinite(p) or not 0.0 <= p <= 1.0:
-            raise JevError(f"malformed response: no yes/no probability for {name!r}", 200)
-        scores[name] = float(p)
-    return str(payload.get("model", "")), scores
+        v = a.get(kind) if isinstance(a, dict) and a.get("type") == kind else None
+        if not isinstance(v, (int, float)) or not math.isfinite(v) or not 0.0 <= v <= top:
+            raise JevError(f"malformed response: no {kind} value in [0, {top:g}] for {name!r}", 200)
+        values[name] = float(v)
+    return str(payload.get("model", "")), values
 
 
 class JevClient:

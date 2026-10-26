@@ -30,9 +30,21 @@ v3.0 is a proof of concept: text only, one stage-1 model, one seed, no training.
 ## 3. Jev
 
 - `POST https://api.typesafe.ai/v1/systemone`, one request per study. `state`
-  is the study's context as text (`v3/prompt.py`), and there are 12 yes/no
-  (`noul`) questions, one per finding. Each answer's `noul`, the probability of
-  yes, is that finding's score.
+  is the study's context as text (`v3/prompt.py`), with 12 questions, one per
+  finding, in one of two formats:
+  - **`noul`** (yes/no): the pre-registered prompt, unchanged (prompt hash
+    `e99b96a72ad9` for `jev_est_text`). Each answer's `noul`, the probability of
+    yes, is that finding's score.
+  - **`score`** (10 likelihood bands, `0-10%` to `90-100%`): Jev returns the
+    expected band, 0 to 9. The finding's score is that band's likelihood,
+    (band + 0.5) / 10, which is monotone, so AUROC is the answer's own.
+- **Amendment (2026-10-26, after the pilot, before any metric):** the pilot
+  showed Jev's probabilities on a 0.01 grid, which ties most studies on rare
+  findings (§9). A score comes on the same grid but over 0-9, about 9 times
+  finer. Val picks the format (§7 step 4), the user's call: "whichever works
+  best". Cost: on synthetic text a score request takes about 2,830 input tokens
+  against 1,450 for yes/no, since each of the 120 levels costs about 11 tokens.
+  Five bands would take about 2,170, and digits as labels about 2,520.
 - **No training and no examples:** nothing from MIMIC goes into the prompt
   beyond the study's own context. The prompt is fixed in `v3/prompt.py`, and its
   hash goes in every run's sidecar.
@@ -55,6 +67,8 @@ v3.0 is a proof of concept: text only, one stage-1 model, one seed, no training.
 | `jev_img_est_text` | + the frontal image | v3.1: request support is built, but not run in v3.0 (§8) |
 
 A missing source is written as "none recorded", so every arm scores every study.
+A run is named for its arm and question format, e.g. `jev_est_text_score`; the
+ladder and J1 are read in the format val chose.
 
 **Baselines** (v2 runs on the same studies):
 
@@ -65,8 +79,9 @@ A missing source is written as "none recorded", so every arm scores every study.
 
 ## 5. Gate J1 (fixed now)
 
-**J1:** `jev_est_text` minus `rad-dino_518_ft_attn_s0_stack_text`, official
-test, v2 policy, paired 95% CI from 1,000 patient resamples.
+**J1:** `jev_est_text`, in the format val chose, minus
+`rad-dino_518_ft_attn_s0_stack_text`, official test, v2 policy, paired 95% CI
+from 1,000 patient resamples.
 
 - **CI above 0: PASS.** Jev combines the estimates and the text better than the logistic regression.
 - **CI includes 0:** no detectable gain over the cheap combiner.
@@ -106,16 +121,22 @@ write-up claims.
    every arm, the report. Nothing leaves the machine.
 2. **Live smoke** (`python -m v3.smoke --live`): the same synthetic data
    through the real API. This checks the request format; no MIMIC data is sent.
-3. **Pilot:** 40 val studies, `jev_est_text`. This measures latency, tokens per
-   request and the failure rate. Only aggregates are printed.
-4. **Val, all four arms** (4 × 1,733 requests). Nothing is tuned on val. If
-   `jev_est_text` falls more than 0.03 below the val stack on val, the prompt is
-   revised and val re-run, at most twice. Each revision is logged in §9 with its
-   val score.
-5. **Official test, all four arms** (4 × 3,041 requests), once, with the final
-   prompt.
+3. **Pilot:** 40 val studies, `jev_est_text`, in each format. This measures
+   latency, tokens per request, the failure rate and the number of distinct
+   scores. Only aggregates are printed.
+4. **The format, on val:** `jev_est_text` on all of val in both formats
+   (2 × 1,733 requests). The format with the higher val macro AUROC (v2 policy)
+   wins; an exact tie goes to `score`, the finer one. Only the point estimate
+   decides, and the choice is logged in §9 before anything else runs.
+5. **Val, the other three arms**, in the chosen format (3 × 1,733 requests).
+   Nothing else is tuned on val. If `jev_est_text` falls more than 0.03 below
+   the val stack on val, the prompt is revised and val re-run, at most twice.
+   Each revision is logged in §9 with its val score.
+6. **Official test, all four arms**, in the chosen format only (4 × 3,041
+   requests), once, with the final prompt. `v3.run` refuses test in the other
+   format, or before the arm's val run.
 
-About 19,000 requests in all. Answers are cached, so a crash or a re-run never
+About 20,800 requests in all. Answers are cached, so a crash or a re-run never
 pays twice for the same (arm, study, prompt, model).
 
 ## 8. v3.1: adding the image (built, not run)
@@ -135,3 +156,4 @@ model (it must be a vision-language Jev), the image size, and the gate
 | 2026-10-26 | setup | d1bfba8 | `rad-dino_518_ft_attn_s0_stack_text` | official test | 0.827 [0.811, 0.840] | 12 | The J1 baseline, built by `v3.setup` (val combiner, image + all three text sources). Minus the image run +0.012 [0.005, 0.019]. The rebuilt `stack_indication` matches the benchmark's copy exactly (largest difference 0.0), 0.824 [0.809, 0.837] |
 | 2026-10-26 | live smoke | d1bfba8 | `jev_est_text`, 12 synthetic studies | none | n/a | n/a | Request format checked on synthetic text: 12 of 12 answered. `GET /v1/models` lists only the aliases `jev-latest` and `jev-preview`; `jev-1.14.0` (named in LiteLLM's docs) is accepted, and every answer reports it, so it is the pinned model (§3) |
 | 2026-10-26 | pilot | d1bfba8 | `jev_est_text`, 40 val studies | none | n/a | n/a | 40 of 40 answered, 0 failed; 1,521 input tokens per study (mean); latency 0.21 s median, 0.27 s p90, at 4 in flight. **Jev's probabilities come on a 0.01 grid** (480 of 480 answers): 69 distinct values overall, 8-30 per finding over 40 studies, fewest for Fracture (8) and Pleural Other (9). Tied ranks cap AUROC on rare findings |
+| 2026-10-26 | amendment | (this commit) | `score` format | none | n/a | n/a | §3 and §7 amended before any metric: a 10-band `score` format next to `noul`, val picks. On 12 made-up studies, `score` answers came on a 0.01 grid over 0-9 (56 distinct values of 144, against 35 for `noul`). Live smoke on synthetic text, both formats: 12 of 12 answered by `jev-1.14.0` in each; 1,477 against 2,857 input tokens per request |
