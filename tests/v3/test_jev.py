@@ -138,3 +138,25 @@ def test_api_error_messages_are_shown_unless_they_echo_the_request():
     with pytest.raises(jev.JevError) as err:
         c.ask(SECRET_TEXT, NOUL)
     assert "bad_state" in str(err.value) and SECRET_TEXT not in str(err.value)
+
+
+CHOICE = {"edema": {"type": "choice", "instructions": "?", "criteria": {"present": "", "uncertain": "", "absent": ""}}}
+
+
+def test_choice_answers_come_back_with_every_option_s_probability():
+    answer = {"type": "choice", "choice": "uncertain", "confidence": 0.6, "probabilities": {"present": 0.3, "uncertain": 0.6}}
+    c, _ = client(Scripted(jev.Response(200, {"model": "jev-1.14.0", "answers": {"edema": answer}}, {})))
+    value = c.ask("s", CHOICE).scores["edema"]
+    assert value == {"choice": "uncertain", "probabilities": {"present": 0.3, "uncertain": 0.6, "absent": 0.0}}
+
+
+@pytest.mark.parametrize("answer", [
+    {"type": "choice", "choice": "maybe", "probabilities": {"present": 1.0}},           # not an option
+    {"type": "choice", "choice": "present", "probabilities": {"present": 1.4}},         # not a probability
+    {"type": "choice", "choice": "present", "probabilities": {"yes": 1.0}},             # an unknown option
+    {"type": "noul", "noul": 0.5},                                                      # the wrong type
+])
+def test_malformed_choice_answers_are_errors(answer):
+    c, _ = client(Scripted(jev.Response(200, {"model": "jev-1.14.0", "answers": {"edema": answer}}, {})))
+    with pytest.raises(jev.JevError):
+        c.ask("s", CHOICE)

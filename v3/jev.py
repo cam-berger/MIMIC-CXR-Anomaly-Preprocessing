@@ -51,7 +51,7 @@ class Response:
 @dataclass
 class Answer:
     model: str
-    scores: dict  # question name -> the answer's value (probability of yes, or expected level)
+    scores: dict  # question name -> the answer's value (probability of yes, expected level, or choice; parse_answer)
     usage: dict
     latency: float  # seconds, the successful attempt only
 
@@ -114,22 +114,39 @@ def _error_message(resp: Response, sent: str = "") -> str:
     return message
 
 
+def _number_in(v, lo: float, hi: float) -> bool:
+    return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v) and lo <= v <= hi
+
+
 def parse_answer(payload: dict, questions: dict) -> tuple[str, dict]:
-    """The answering model, and each question's value: a yes/no probability (`noul`) or an expected level (`score`)."""
+    """
+    The answering model, and each question's value: a yes/no probability (`noul`), an expected level (`score`), or
+    for `choice` {"choice": option, "probabilities": {option: p}} over every option (one Jev leaves out counts 0).
+    """
     answers = payload.get("answers")
     if not isinstance(answers, dict):
         raise JevError("malformed response: no answers", 200)
     values = {}
     for name, question in questions.items():
         kind = question["type"]
-        if kind not in ("noul", "score"):
-            raise ValueError(f"question {name!r}: type {kind!r} has no numeric answer")
-        top = 1.0 if kind == "noul" else len(question["criteria"]) - 1
+        if kind not in ("noul", "score", "choice"):
+            raise ValueError(f"question {name!r}: type {kind!r} is not supported")
         a = answers.get(name)
-        v = a.get(kind) if isinstance(a, dict) and a.get("type") == kind else None
-        if not isinstance(v, (int, float)) or not math.isfinite(v) or not 0.0 <= v <= top:
+        if not isinstance(a, dict) or a.get("type") != kind:
+            raise JevError(f"malformed response: no {kind} answer for {name!r}", 200)
+        if kind == "choice":
+            options, probs = list(question["criteria"]), a.get("probabilities")
+            if a.get("choice") not in options or not isinstance(probs, dict) or set(probs) - set(options):
+                raise JevError(f"malformed response: no valid choice for {name!r}", 200)
+            p = {o: probs.get(o, 0.0) for o in options}
+            if not all(_number_in(v, 0.0, 1.0) for v in p.values()):
+                raise JevError(f"malformed response: choice probabilities outside [0, 1] for {name!r}", 200)
+            values[name] = {"choice": a["choice"], "probabilities": {o: float(v) for o, v in p.items()}}
+            continue
+        top = 1.0 if kind == "noul" else len(question["criteria"]) - 1
+        if not _number_in(a.get(kind), 0.0, top):
             raise JevError(f"malformed response: no {kind} value in [0, {top:g}] for {name!r}", 200)
-        values[name] = float(v)
+        values[name] = float(a[kind])
     return str(payload.get("model", "")), values
 
 

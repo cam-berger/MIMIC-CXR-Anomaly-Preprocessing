@@ -99,3 +99,18 @@ python -m v3.report                                  # gate J2 and the v3.1 ladd
 ```
 
 Further context sources become new blocks and arms in `v3/prompt.py`.
+
+## 6. Jev as a report labeler (v3.3, docs/V3_PLAN.md §8c)
+
+Jev reads each study's own report (findings and impression) and labels the 12 findings as present, uncertain or
+absent. v2's evaluation scores its labels and the CheXpert labeler's against a radiologist's, on the 596 official-test
+studies the radiologist labeled (gate L1). The report is what gets labeled; it never becomes a model input. The
+official-test run needs `mimic-cxr-2.1.0-test-set-labeled.csv` in `MIMIC_CXR_JPG_PATH` (or `--labels`); the val pilot
+needs only the reports.
+
+```bash
+python -m v3.smoke --live-label --model MODEL                  # synthetic reports (no MIMIC data)
+python -m v3.label run --split val --limit 40 --model MODEL    # pilot -> reports/v3_label_pilot.md
+python -m v3.label run --model MODEL                           # the radiologist's 596 studies
+python -m v3.label report                                      # -> reports/v3_label.md
+```

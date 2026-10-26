@@ -22,3 +22,11 @@ def v3out(v3_base, tmp_path):
     out = tmp_path / "v3"
     shutil.copytree(v3_base, out, symlinks=True)
     return out
+
+
+@pytest.fixture(scope="session")
+def synth_sources(v3_base):
+    """(reports zip, radiologist's labels) of the synthetic benchmark behind v3_base (v3.3)."""
+    from v3 import smoke
+
+    return smoke.synthetic_sources(v3_base.parent)

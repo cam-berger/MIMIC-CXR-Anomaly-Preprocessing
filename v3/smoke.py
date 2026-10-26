@@ -4,6 +4,7 @@ v3's wiring check on synthetic data (docs/V3_PLAN.md §7 steps 1-2).
     python -m v3.smoke                            # offline, a fake Jev, ~10 s
     python -m v3.smoke --live --model MODEL       # 12 synthetic studies per format through the real API (no MIMIC)
     python -m v3.smoke --live-image --model MODEL # synthetic images: does Jev see them, do image requests work (§8)
+    python -m v3.smoke --live-label --model MODEL # synthetic reports as labeler questions (§8c)
 
 It builds a small synthetic benchmark as v2's tests do (v2.synth, official split, pixel embeddings, the probe, the
 context table, TF-IDF text arms), runs v3.setup, then the order of §7: jev_est_text on val in both question formats,
@@ -30,8 +31,9 @@ import numpy as np
 import pandas as pd
 
 from v2 import context, embed, fuse, prepare_data, probe
-from v2.common import LABELS, load_manifest, read_predictions, setup_logging
+from v2.common import LABELS, label_matrix, load_manifest, read_predictions, setup_logging
 from v2.evaluate import auroc
+from v2.external import RADIOLOGIST_FILE
 from v2.synth import COMPLAINTS, HINTS, make_dataset
 
 from . import prompt, report
@@ -76,6 +78,11 @@ def fake_value(question: dict, p: float) -> float:
     return min(max(n * p - 0.5, 0.0), n - 1.0)
 
 
+def fake_label(label: str, text: str) -> str:
+    """The fake labeler's rule: present when the report names the finding, absent otherwise."""
+    return "present" if label.lower() in text.lower() else "absent"
+
+
 class FakeJev:
     """A transport for JevClient that answers from `state` alone, and counts requests."""
 
@@ -91,6 +98,12 @@ class FakeJev:
         answers = {}
         for label in LABELS:
             q = body["questions"][prompt.question_name(label)]
+            if q["type"] == "choice":  # v3.3: present when the report names the finding (v2.synth plants the names)
+                choice = fake_label(label, state)
+                p = {o: (0.9 if o == choice else 0.05) for o in q["criteria"]}
+                answers[prompt.question_name(label)] = {"type": "choice", "choice": choice, "confidence": 0.9,
+                                                        "probabilities": p}
+                continue
             answers[prompt.question_name(label)] = {"type": q["type"], q["type"]: fake_value(q, probs[label])}
         return Response(200, {"model": self.model, "answers": answers,
                               "usage": {"input_tokens": len(state) // 4, "output_tokens": len(answers)}}, {})
@@ -118,6 +131,8 @@ def expected_scores(out_dir: Path, arm: str, fmt: str) -> pd.DataFrame:
 def build_synthetic_bench(root: Path, n_patients: int = 400, seed: int = 3, image_size: int = 48) -> Path:
     """A small M5-style benchmark on v2.synth: official split, pixel probe, context, TF-IDF text-only arms."""
     synth = make_dataset(root / "synth", n_patients=n_patients, seed=seed)
+    (root / "synth_paths.json").write_text(json.dumps({"reports": str(synth.reports),
+                                                        "labels": str(synth.mimic_root / RADIOLOGIST_FILE)}))
     bench = root / "bench"
     prepare_data.main(["--mimic-cxr-jpg", str(synth.mimic_root), "--out", str(bench), "--population", "all",
                        "--split-scheme", "official", "--image-format", "jpg", "--image-size", str(image_size), "--workers", "0",
@@ -210,6 +225,38 @@ def run_v3_1(out: Path, client: JevClient, chosen: str, concurrency: int = 2) ->
                           image_sides=ANY_SIZE)
 
 
+def synthetic_sources(root: Path) -> tuple[Path, Path]:
+    """The synthetic reports and radiologist's labels that build_synthetic_bench made under `root` (v3.3)."""
+    paths = json.loads((Path(root) / "synth_paths.json").read_text())
+    return Path(paths["reports"]), Path(paths["labels"])
+
+
+def check_labels(out: Path, root: Path, fake: FakeJev) -> list[str]:
+    """§8c on synthetic reports: the pilot, the radiologist's studies, the predictions' alignment, the L1 report."""
+    from . import label
+
+    reports, labels = synthetic_sources(root)
+    client = JevClient(fake.model, api_key="smoke", transport=fake)
+    label.run(out, "val", client, reports, labels, limit=10)
+    label.run(out, "test", client, reports, labels)
+    problems = []
+    rows = label.target_rows(out, "test", labels)
+    texts = label.report_texts(rows, reports)
+    jev, _ = read_predictions(out / "predictions" / "labeler_jev.parquet")
+    expected = np.array([[label.LEVEL[fake_label(lab, texts[int(s)])] for lab in LABELS] for s in jev["study_id"]])
+    if len(jev) != len(rows) or not np.array_equal(jev[list(LABELS)].to_numpy(), expected):
+        problems.append("labeler_jev: the answers don't match each study's own report (misaligned?)")
+    chex, _ = read_predictions(out / "predictions" / "labeler_chexpert.parquet")
+    raw = label_matrix(load_manifest(out).drop_duplicates("study_id").set_index("study_id").loc[chex["study_id"]]
+                       .reset_index())
+    if not np.array_equal(chex[list(LABELS)].to_numpy(), np.where(raw == 1, 1.0, np.where(raw == -1, 0.5, 0.0))):
+        problems.append("labeler_chexpert is not the CheXpert labeler's labels")
+    rep = label.main(["report", "--out", str(out), "--reports", str(reports), "--labels", str(labels), "--n-boot", "20"])
+    if "Gate L1" not in Path(rep["report"]).read_text():
+        problems.append("v3_label.md missing or without L1")
+    return problems
+
+
 def offline(root: Path) -> list[str]:
     out = setup_synthetic(root)
     fake = FakeJev()
@@ -219,7 +266,17 @@ def offline(root: Path) -> list[str]:
     problems = check(out, fake, chosen, with_image=True)
     if "Gate J2" not in (out / "reports" / "v3_report.md").read_text():
         problems.append("v3_report.md without J2")
-    return problems
+    return problems + check_labels(out, root, fake)
+
+
+def live_label(root: Path, model: str, n: int = 6) -> list[str]:
+    """§8c through the real API on synthetic reports: the choice questions and answers' shape. No MIMIC data."""
+    from . import label
+
+    out = setup_synthetic(root, n_patients=150)
+    reports, labels = synthetic_sources(root)
+    stats = label.run(out, "val", JevClient(model), reports, labels, limit=n, concurrency=2)
+    return [] if stats["n_answered"] == stats["n_studies"] else [f"{stats['n_failed']} live labeler requests failed"]
 
 
 def live(root: Path, model: str, n: int = 12) -> list[str]:
@@ -280,18 +337,21 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("--live", action="store_true", help="Send 12 synthetic studies per format to the real API")
     parser.add_argument("--live-image", action="store_true",
                         help="Send synthetic images to the real API: does Jev see them, do image-arm requests work")
-    parser.add_argument("--model", help="The Jev version for --live and --live-image")
+    parser.add_argument("--live-label", action="store_true",
+                        help="Send 6 synthetic reports to the real API as labeler questions (§8c)")
+    parser.add_argument("--model", help="The Jev version for the live checks")
     parser.add_argument("--keep", help="Build in this directory and keep it (default: a temporary one)")
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args(argv)
     setup_logging(args.verbose)
-    if (args.live or args.live_image) and not args.model:
-        raise SystemExit("--live and --live-image need --model")
-    mode = "live image" if args.live_image else "live" if args.live else "offline"
+    if (args.live or args.live_image or args.live_label) and not args.model:
+        raise SystemExit("--live, --live-image and --live-label need --model")
+    mode = ("live label" if args.live_label else "live image" if args.live_image else "live" if args.live
+            else "offline")
     root = Path(args.keep) if args.keep else Path(tempfile.mkdtemp(prefix="v3smoke_"))
     try:
-        problems = (live_image(root, args.model) if args.live_image else live(root, args.model) if args.live
-                    else offline(root))
+        problems = (live_label(root, args.model) if args.live_label else live_image(root, args.model)
+                    if args.live_image else live(root, args.model) if args.live else offline(root))
     finally:
         if not args.keep:
             shutil.rmtree(root, ignore_errors=True)
