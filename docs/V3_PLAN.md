@@ -218,6 +218,62 @@ readings carry information the combiner can use. A result here would be a
 lead, to be confirmed on a second seed or another test set before anyone
 relies on it.
 
+## 8c. v3.3: Jev as a report labeler (written 2026-10-26, before any v3.3 request)
+
+**Question:** every model here learns from, and is scored against, the
+CheXpert labeler's reading of each report. In M7a a radiologist's labels on 596
+official-test studies raised the image model by +0.029 [0.012, 0.046], so the
+labeler's errors are measurable. Reading the same report, does Jev label the 12
+findings closer to the radiologist? This is about the labels (the targets),
+not about the image model's inputs. The current report is the thing being
+labeled, and it never becomes an input to a classifier.
+
+**Fixed now:**
+
+| Item | Definition |
+|---|---|
+| Studies | M7a's: the radiologist's studies in the benchmark's official test (`mimic-cxr-2.1.0-test-set-labeled.csv`), 596 studies, 268 patients |
+| Text | Each study's own report, FINDINGS and IMPRESSION (`v2.context.prior_text`: those sections, else the report up to any addendum; 4,000 characters at most) |
+| Questions | 12 `choice` questions, one per finding, with three options in the labeler's terms: **present**; **uncertain** (possible, probable, suggestive of, cannot be excluded); **absent** (said to be absent, or not mentioned). The wording is in `v3/label.py`, its hash in every sidecar. Nothing is tuned: radiologist labels exist only on the official test |
+| Model | `jev-1.14.0` |
+
+**Runs** (v2 prediction files on those studies, scored by `v2/evaluate.py`
+against the radiologist's labels, with M7a's manifest and the classes
+measurable under both sets of labels):
+
+| Run | Score per finding | Role |
+|---|---|---|
+| `labeler_chexpert` | the CheXpert labeler's label: positive 1, uncertain 0.5, negative or blank 0 | Comparator |
+| `labeler_jev` | Jev's chosen option on the same three levels | **Primary (L1)** |
+| `labeler_jev_prob` | P(present) + 0.5 × P(uncertain), from Jev's probabilities | Secondary |
+
+The AUROC of a three-level score is the area under its three-point ROC curve.
+It rewards calling the radiologist's positives present and the negatives
+absent, with uncertain in between.
+
+**Gate L1 (fixed now):** `labeler_jev` minus `labeler_chexpert`, both scored
+against the radiologist's labels on those 596 studies, v2 policy (the
+radiologist's uncertain labels ignored, blanks negative), paired 95% CI from
+1,000 patient resamples. Positive vs rest (u0) is reported next to it.
+
+- **CI above 0: PASS.** Jev labels closer to the radiologist. The next step,
+  relabeling the training reports, gets its own plan and budget.
+- **CI includes 0:** no detectable difference.
+- **CI below 0: FAIL.** The CheXpert labeler is closer.
+
+**Red flag:** `labeler_chexpert` below 0.70 against the radiologist means the
+studies or labels are misaligned (a labeler reading the same report should be
+far above chance): stop and inspect locally.
+
+**Order:** offline smoke (synthetic reports and a fake Jev); live smoke on
+synthetic reports; the pilot on 40 val reports (mechanics only: there are no
+radiologist labels there, and no metric is computed); the 596 studies, once;
+the report.
+
+**Cost and data:** about 640 requests, about 1.5M input tokens. The current
+report's findings and impression go to TypeSafe: MIMIC text, under the
+zero-retention terms the user verified (§3).
+
 ## 9. Results log
 
 | Date | Step | Commit | Run | Test set | Macro AUROC [95% CI] | Classes | Notes |
