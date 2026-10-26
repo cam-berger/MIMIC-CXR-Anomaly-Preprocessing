@@ -111,10 +111,10 @@ def train(out_dir: Path, model: str, emb_path: Path, n_train: int = N_TRAIN, n_j
     return facts
 
 
-def fit_probes(out_dir: Path, model: str, emb_path: Path, n_train: int = N_TRAIN, n_jobs: int = -1):
+def training_data(out_dir: Path, model: str, emb_path: Path, n_train: int = N_TRAIN) -> dict:
     """
-    The three probes, deterministic given the same inputs; (probes, the val and test rows, their features, aggregate
-    facts, the embeddings' meta). v3.6 refits them this way and checks them against the stored predictions.
+    v3.5's studies and features: the training sample Jev answered, the val studies Jev answered (for C), and every val
+    and test study to predict. Every v3.5 probe, and v3.7's control, trains on exactly these.
     """
     manifest = load_manifest(out_dir)
     ids, emb, meta = load_npz(emb_path)
@@ -129,8 +129,21 @@ def fit_probes(out_dir: Path, model: str, emb_path: Path, n_train: int = N_TRAIN
     keep_va = answered(cache, va_rows["study_id"].to_numpy(), "val")
     sel = va_rows["study_id"].isin(keep_va).to_numpy()
     va_fit_rows, X_va_fit = va_rows[sel].reset_index(drop=True), X_va[sel]
-    jev_tr, soft_tr = jev_targets(cache, tr_rows["study_id"].to_numpy())
-    jev_va, _ = jev_targets(cache, va_fit_rows["study_id"].to_numpy())
+    return {"cache": cache, "meta": meta, "tr_rows": tr_rows, "X_tr": X_tr, "va_fit_rows": va_fit_rows,
+            "X_va_fit": X_va_fit, "rows": pd.concat([va_rows, te_rows], ignore_index=True),
+            "X_all": np.concatenate([X_va, X_te]),
+            "unanswered": {"train": int(len(sample) - len(keep_tr)), "val": int(len(va_rows) - len(keep_va))}}
+
+
+def fit_probes(out_dir: Path, model: str, emb_path: Path, n_train: int = N_TRAIN, n_jobs: int = -1):
+    """
+    The three probes, deterministic given the same inputs; (probes, the val and test rows, their features, aggregate
+    facts, the embeddings' meta). v3.6 refits them this way and checks them against the stored predictions.
+    """
+    d = training_data(out_dir, model, emb_path, n_train)
+    tr_rows, X_tr, va_fit_rows, X_va_fit = d["tr_rows"], d["X_tr"], d["va_fit_rows"], d["X_va_fit"]
+    jev_tr, soft_tr = jev_targets(d["cache"], tr_rows["study_id"].to_numpy())
+    jev_va, _ = jev_targets(d["cache"], va_fit_rows["study_id"].to_numpy())
     logger.info("v3.5 probes: %d training studies, %d val studies for C, dim %d", len(tr_rows), len(va_fit_rows),
                 X_tr.shape[1])
     probes = {
@@ -138,11 +151,9 @@ def fit_probes(out_dir: Path, model: str, emb_path: Path, n_train: int = N_TRAIN
         "probe20k_jev_hard": fit_probe(X_tr, jev_tr, X_va_fit, jev_va, n_jobs=n_jobs),
         "probe20k_jev_soft": fit_soft_probe(X_tr, soft_tr, X_va_fit, jev_va, n_jobs=n_jobs),
     }
-    rows = pd.concat([va_rows, te_rows], ignore_index=True)
-    facts = {"n_train": int(len(tr_rows)), "n_val": int(len(va_fit_rows)),
-             "unanswered": {"train": int(len(sample) - len(keep_tr)), "val": int(len(va_rows) - len(keep_va))},
+    facts = {"n_train": int(len(tr_rows)), "n_val": int(len(va_fit_rows)), "unanswered": d["unanswered"],
              "C": {run: {f.label: f.C for f in p.fits} for run, p in probes.items()}}
-    return probes, rows, np.concatenate([X_va, X_te]), facts, meta
+    return probes, d["rows"], d["X_all"], facts, d["meta"]
 
 
 def link_reference(out_dir: Path) -> Optional[str]:
