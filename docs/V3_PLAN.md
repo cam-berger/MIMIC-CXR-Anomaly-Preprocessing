@@ -363,6 +363,41 @@ learns the same labeler it is scored against.
 **Order:** offline smoke; the labels (training sample, then val), run by the
 user; `python -m v3.downstream` (local: the probes and the report).
 
+## 8f. v3.6: the v3.5 probes on the CheXpert test set (written 2026-10-26 after L2, before any v3.6 run)
+
+**Why:** L2 came out +0.009 [-0.007, 0.027]: in Jev's favour, but too small for
+596 studies to settle. The CheXpert test set gives a second judge with no new
+Jev requests. It was prepared by v2's M7b (`EXT_OUT`): 500 Stanford studies
+from 500 patients, one frontal image each, labeled by the majority vote of 5
+radiologists reading the images. It is a different hospital, with
+image-based ground truth.
+
+**Fixed now:**
+
+- **Probes:** the three v3.5 probes, refit exactly as v3.5 fit them. The fit
+  is deterministic, and the refit must reproduce their stored predictions to
+  within 1e-6 or the run stops. They are applied to M7b's RAD-DINO 518 px
+  embeddings of the CheXpert test images (same encoder, size and transformers
+  version as the benchmark's). Nothing is trained or chosen on this set.
+- **Where it runs:** `V3_OUT/chexpert/` links `EXT_OUT`'s manifest, frozen
+  classes and audit, and nothing is written into `EXT_OUT`.
+- **Reference:** M7b's `rad-dino_518_probe` (all 213k training studies,
+  CheXpert labels).
+
+**Gate L3 (fixed now):** `probe20k_jev_soft` minus `probe20k_chexpert` on the
+CheXpert test set, v2 policy, over the classes frozen as measurable there at
+M7b (Atelectasis, Cardiomegaly, Edema, Enlarged Cardiomediastinum, Lung
+Opacity, Pleural Effusion), paired 95% CI from 1,000 patient resamples. CI
+above 0: PASS; includes 0: no detectable difference; below 0: FAIL.
+Reported, not gates: the same on the five standard CheXpert findings (M7b's
+set), and `probe20k_jev_hard` minus `probe20k_chexpert`. L2 and L3 are read
+side by side. A gain that holds on both judges is the result; one that holds
+on one of them is a lead.
+
+**Caveat:** RAD-DINO's encoder saw 223k unlabeled CheXpert images in
+pretraining (M7b). That affects every probe alike, so it doesn't bias the
+comparison between them.
+
 ## 9. Results log
 
 | Date | Step | Commit | Run | Test set | Macro AUROC [95% CI] | Classes | Notes |
