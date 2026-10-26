@@ -398,6 +398,35 @@ on one of them is a lead.
 pretraining (M7b). That affects every probe alike, so it doesn't bias the
 comparison between them.
 
+## 8g. v3.7 (exploratory, written 2026-10-26 after L3, before any v3.7 run): the hierarchy control
+
+**Why:** L3's gain sits in Lung Opacity and Enlarged Cardiomediastinum. The
+CheXpert test set labels both hierarchically (P(parent | a child positive) =
+1.0); Jev nearly does (0.88, 0.95); the CheXpert labeler doesn't (0.33, 0.04).
+The control asks whether the gain is Jev's reading of the reports or only the
+definition. It applies the same hierarchy to the CheXpert labeler's own labels,
+with no Jev involved. It is exploratory, because the L3 diagnostic prompted it.
+
+**The arm:** `probe20k_chexpert_hier` is v3.5's `probe20k_chexpert` with its
+labels changed in one way. Before fitting, on the training studies and on val
+(used for C), a parent becomes positive whenever any of its children is
+positive in the CheXpert labeler's labels. That is Lung Opacity over
+Atelectasis, Consolidation, Edema, Lung Lesion and Pneumonia, and Enlarged
+Cardiomediastinum over Cardiomegaly, as in §8d. Otherwise the parent keeps its
+own label, uncertain or blank. The studies, features, model, C grid and
+selection are v3.5's own. No Jev requests.
+
+**Reading** (paired 95% CIs, 1,000 patient resamples, v2 policy):
+
+- **Primary:** `probe20k_jev_soft` minus `probe20k_chexpert_hier` on the
+  CheXpert test set, over L3's six measurable classes. CI including 0 or below
+  it: the L3 gain is the definition, and the hierarchy rule recovers it
+  without Jev. CI above 0: Jev's labels add something beyond the definition.
+- **Also reported:** `probe20k_chexpert_hier` minus `probe20k_chexpert` (the
+  definition alone); the same comparisons on the five standard findings; and
+  on M7a's 596 MIMIC-CXR studies against their radiologist, whose labels are
+  not hierarchical.
+
 ## 9. Results log
 
 | Date | Step | Commit | Run | Test set | Macro AUROC [95% CI] | Classes | Notes |
