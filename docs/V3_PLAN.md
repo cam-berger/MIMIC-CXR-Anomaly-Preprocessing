@@ -25,7 +25,7 @@ v3.0 is a proof of concept: text only, one stage-1 model, one seed, no training.
 | Labels and policy | The 12 CheXpert findings. Headline under the v2 policy (§3 of V2_PLAN), which is also how text gains are judged (M4b amendment); positive vs rest (`u0`) reported next to it. |
 | Metrics | Computed only by `v2/evaluate.py`, from files written by `v2.common.write_predictions`. Macro AUROC over the frozen measurable classes, patient-level bootstrap, paired comparisons. |
 | Text | `context.parquet` from `v2.context`: `indication`, `chief_complaint`, `prior_report`. Nothing written after the X-ray, and never the current report's findings or impression. |
-| Stage 1 | `rad-dino_518_ft_attn_s0`: image only, the model val chose in M7a and G7. Its logits are shown to Jev as probabilities (sigmoid, two decimals). |
+| Stage 1 | `rad-dino_518_ft_attn_s0`: image only, the model val chose in M7a and G7. Its logits are shown to Jev as probabilities: sigmoid, as percentages with one decimal (below 0.1% shown as "<0.1%"). Amended before any request: two decimals of a probability would tie most rare findings at 0.00-0.02. |
 
 ## 3. Jev
 

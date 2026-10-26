@@ -10,6 +10,10 @@ v2 rules: metrics are computed only in `v2/evaluate.py`, from the one prediction
 
 **MIMIC data handling (PhysioNet data use agreement and its Sept 2025 LLM guidance):** never read, print or list raw MIMIC content into the conversation. That covers CSV or parquet rows, images, report text, the v2 manifest, `context.parquet`, embeddings (including the `*_tokens*.npy` caches and their `.json` sidecars, and M6's `text_*.npz`) and predictions. Run the v2 commands and relay only their aggregate output (`audit.md`, `reports/*.md`, `summary.md`). Keep record-level diagnostics in local files. See `v2/README.md` §9. transformers is pinned in `v2/requirements.txt` because DINOv2 embeddings at non-native sizes differ between versions.
 
+## v3 (branch `v3`, from `v2`)
+
+v3 tests TypeSafe's Jev, a hosted classification model, as the combiner of v2's image estimates (`rad-dino_518_ft_attn_s0`) and the pre-imaging text, on M5's benchmark. It runs a context ladder of arms (`jev_est` → `jev_est_indication` → `jev_est_text`, plus `jev_text` as a control) and gate J1 (`jev_est_text` against v2's val combiner of the same inputs). The image itself comes in v3.1. **Read `docs/V3_PLAN.md` first** (pre-registered 2026-10-26); `v3/README.md` explains how to run it. The code lives in `v3/` and reuses v2 unchanged, with tests in `tests/v3/`. v3 works in its own output dir `V3_OUT`, which links into `BENCH_OUT` and never writes there. Metrics come only from `v2/evaluate.py`. Before changing anything, run `pytest tests/v3 -q` and `python -m v3.smoke`. Jev requests carry MIMIC text: the user verified TypeSafe's zero data retention. The v2 rules on record-level data apply to `V3_OUT/jev_cache/`, `predictions/` and `logs/`.
+
 ## Project Overview
 
 This is a **medical imaging pipeline** for chest X-ray anomaly detection using multimodal deep learning. The pipeline processes MIMIC datasets (images, labs, vitals, reports) and trains models to detect pathologies in chest X-rays.
