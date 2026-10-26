@@ -274,6 +274,47 @@ the report.
 report's findings and impression go to TypeSafe: MIMIC text, under the
 zero-retention terms the user verified (§3).
 
+## 8d. v3.4 (exploratory, written 2026-10-26 after L1, before any v3.4 run): closing the labeler's gap
+
+**Why:** L1 failed on two gaps. One is Lung Opacity (Jev's answer 0.682,
+its probabilities 0.846, the CheXpert labeler 0.914). The other is the rest:
+on the other nine findings, Jev's three-level answer is level with the labeler
+(0.939 against 0.943), while its probabilities reach 0.962. v3.4 tests two
+fixes on the cached v3.3 answers, with no new Jev requests. Both were prompted
+by results on the same 596 studies, so v3.4 is exploratory: a lead for a
+pre-registered test, not a revision of L1.
+
+**1. Hierarchy (decided on the training split only).** In CheXpert's scheme,
+Lung Opacity is a parent of Atelectasis, Consolidation, Edema, Lung Lesion and
+Pneumonia, and Enlarged Cardiomediastinum is a parent of Cardiomegaly. On the
+benchmark's training split, measure how often the CheXpert labeler marks each
+parent positive when any of its children is positive. A parent whose rate is
+at least **0.90** gets the rule: it is present when any child is present. On
+Jev's answers that means max(parent, children) per study, applied to both the
+chosen answer and the probability score. A parent below 0.90 gets no rule. The
+radiologist's own rate on the 596 studies is reported afterwards as a
+diagnostic, never used to decide.
+
+**2. Cut-offs (cross-fitted).** Per finding, two cut-offs on Jev's probability
+score, P(present) + 0.5 × P(uncertain), turn it back into present (1),
+uncertain (0.5) or absent (0). The cut-offs are fit on the radiologist's
+labels (v2 policy) by 5-fold cross-fitting grouped by patient: each study's
+label comes from cut-offs fit on the other folds. Each fit picks, from 41
+quantiles of the training folds' scores, the pair that maximizes that
+finding's AUROC (v2's `auroc`). A finding with only one label value in a
+training fold keeps Jev's own answer.
+
+**Runs** (scored against the radiologist exactly as in §8c, paired against
+`labeler_chexpert` and `labeler_jev`): `labeler_jev_cut`; and, for each
+parent that gets the rule, `labeler_jev_hier` (Jev's answer + hierarchy) and
+`labeler_jev_cut_hier` (cut-offs on the hierarchy-adjusted probabilities).
+
+**Fairness note:** the cut-offs learn from radiologist labels (cross-fitted)
+and the CheXpert labeler learns from none. A three-level score's AUROC doesn't
+change under any monotone relabeling of its levels, though, so the labeler
+couldn't gain from cut-offs of its own. Lung Opacity's confusion counts (Jev's
+answer by the radiologist's label) are reported as a diagnostic.
+
 ## 9. Results log
 
 | Date | Step | Commit | Run | Test set | Macro AUROC [95% CI] | Classes | Notes |
