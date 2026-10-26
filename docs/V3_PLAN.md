@@ -1,6 +1,6 @@
 # v3 Plan: Jev as the combiner (text first, the image later)
 
-**Status:** pre-registered 2026-10-26, before any Jev request on MIMIC data · how to run: [`v3/README.md`](../v3/README.md) · **Branch:** `v3` (from `v2`) · **Started:** 2026-10-26
+**Status:** pre-registered 2026-10-26, before any Jev request on MIMIC data; val chose the yes/no format (§9) · how to run: [`v3/README.md`](../v3/README.md) · **Branch:** `v3` (from `v2`) · **Started:** 2026-10-26
 
 ## 1. Question
 
@@ -158,3 +158,4 @@ model (it must be a vision-language Jev), the image size, and the gate
 | 2026-10-26 | pilot | d1bfba8 | `jev_est_text`, 40 val studies | none | n/a | n/a | 40 of 40 answered, 0 failed; 1,521 input tokens per study (mean); latency 0.21 s median, 0.27 s p90, at 4 in flight. **Jev's probabilities come on a 0.01 grid** (480 of 480 answers): 69 distinct values overall, 8-30 per finding over 40 studies, fewest for Fracture (8) and Pleural Other (9). Tied ranks cap AUROC on rare findings |
 | 2026-10-26 | amendment | c0f3871 | `score` format | none | n/a | n/a | §3 and §7 amended before any metric: a 10-band `score` format next to `noul`, val picks. On 12 made-up studies, `score` answers came on a 0.01 grid over 0-9 (56 distinct values of 144, against 35 for `noul`). Live smoke on synthetic text, both formats: 12 of 12 answered by `jev-1.14.0` in each; 1,477 against 2,857 input tokens per request |
 | 2026-10-26 | pilot | c0f3871 | `jev_est_text_score`, 40 val studies | none | n/a | n/a | The same 40 studies as the yes/no pilot: 40 of 40 answered, 0 failed; 2,901 input tokens per study (mean), against 1,521; latency 0.18 s median, 0.23 s p90. Distinct scores per finding, median 27.5 against 19.5; Fracture 18 against 8, Pleural Other 19 against 9; 162 distinct values over all findings against 69 |
+| 2026-10-26 | format choice (§7 step 4) | c3c5242 | `jev_est_text_noul` against `jev_est_text_score` | val (1,733 studies) | 0.840 [0.819, 0.857] against 0.827 [0.803, 0.847] | 12 | **Val chose `noul` (yes/no).** Score minus noul -0.013 [-0.024, -0.005]: the finer scores rank worse despite 240 distinct values per finding against 71. Both formats answered 1,733 of 1,733; 2.64M against 5.03M input tokens. Val prompt rule: `jev_est_text_noul` minus `rad-dino_518_ft_attn_s0_stack_text` on val -0.004 [-0.019, 0.010], within the 0.03 margin, so the prompt stands. For reference on val: the image run 0.830, the stack 0.844. No red flags |
