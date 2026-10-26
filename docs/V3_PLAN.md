@@ -315,6 +315,54 @@ change under any monotone relabeling of its levels, though, so the labeler
 couldn't gain from cut-offs of its own. Lung Opacity's confusion counts (Jev's
 answer by the radiologist's label) are reported as a diagnostic.
 
+## 8e. v3.5: Jev's labels as training targets (written 2026-10-26, before any v3.5 request)
+
+**Question:** do Jev's report labels train a better image classifier than the
+CheXpert labeler's? v3.3 compared the labels themselves, where a continuous
+score can't be judged fairly against three levels. Here each label source
+trains the same model on the same studies, and the radiologist judges the
+models.
+
+**Fixed now:**
+
+| Item | Definition |
+|---|---|
+| Training studies | 20,000 studies sampled from the benchmark's training split with a fixed seed (`v3.label`'s sample, seed 0). Every arm trains on the same studies: those Jev answered |
+| Val | All 1,733 val studies, labeled by each arm's own source, used only to choose each finding's C |
+| Model | v2's probe: frozen RAD-DINO 518 px embeddings (the benchmark's), standardized on the training studies, one L2 logistic regression per finding, C from v2's grid (1e-4 to 10) by val AUROC |
+| Jev's labels | The v3.3 labeler prompt, unchanged (hash `f2cb79b46c1c`, `jev-1.14.0`), on each study's own findings and impression. The narrowed Lung Opacity wording (§9, v3.4) is not used: it was prompted by the test labels |
+| Data and cost | About 21,700 new requests (20,000 train, 1,693 val; 40 cached), about 41M input tokens; MIMIC report text to TypeSafe under the verified zero-retention terms (§3) |
+
+**Arms** (predictions on val and the official test):
+
+| Arm | Training targets | Val targets (for C) |
+|---|---|---|
+| `probe20k_chexpert` | the CheXpert labeler (v2 policy: uncertain ignored) | the CheXpert labeler |
+| `probe20k_jev_hard` | Jev's answer: present 1, absent 0, uncertain ignored | Jev's answer |
+| `probe20k_jev_soft` | Jev's probabilities as soft targets, P(present) + 0.5 × P(uncertain): each study enters twice, as positive and negative, weighted p and 1 − p | Jev's answer |
+
+The reference is v2's `rad-dino_518_probe`, the same model trained on all
+213k training studies with the CheXpert labeler's labels.
+
+**Gate L2 (fixed now):** `probe20k_jev_soft` minus `probe20k_chexpert`,
+scored against the radiologist's labels on M7a's 596 official-test studies
+(v2 policy, the classes measurable under both sets of labels), paired 95% CI
+from 1,000 patient resamples.
+
+- **CI above 0: PASS.** At 20k training studies, Jev's soft labels train a
+  better classifier, as judged by a radiologist.
+- **CI includes 0:** no detectable difference. With 596 studies, a
+  difference under about 0.01 is unlikely to be detectable.
+- **CI below 0: FAIL.**
+
+Reported, not gates: `probe20k_jev_hard` minus `probe20k_chexpert` on the same
+studies, and every arm on the full official test against the CheXpert
+labeler's labels. That second view favours the CheXpert-trained arm, which
+learns the same labeler it is scored against.
+
+**Order:** offline smoke; the labels (training sample, then val), run by the
+user; `python -m v3.downstream` (local: the probes and the report).
+
 ## 9. Results log
 
 | Date | Step | Commit | Run | Test set | Macro AUROC [95% CI] | Classes | Notes |
