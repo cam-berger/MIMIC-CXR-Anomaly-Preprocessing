@@ -114,3 +114,16 @@ python -m v3.label run --split val --limit 40 --model MODEL    # pilot -> report
 python -m v3.label run --model MODEL                           # the radiologist's 596 studies
 python -m v3.label report                                      # -> reports/v3_label.md
 ```
+
+## 7. Jev's labels as training targets (v3.5, docs/V3_PLAN.md §8e)
+
+Jev labels 20,000 training reports and all of val; v2's probe is then trained three times on the same studies and
+frozen RAD-DINO features (CheXpert labels, Jev's answers, Jev's probabilities as soft targets) and judged by the
+radiologist (gate L2). The first two commands send report text to TypeSafe and are cached and resumable; the third
+runs locally.
+
+```bash
+python -m v3.label run --split train --limit 20000 --model MODEL
+python -m v3.label run --split val --model MODEL
+python -m v3.downstream --model MODEL --labels output/mimic-cxr-2.1.0-test-set-labeled.csv   # -> reports/v3_downstream.md
+```

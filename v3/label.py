@@ -4,6 +4,8 @@ v3.3 (docs/V3_PLAN.md §8c): Jev as a report labeler, scored against a radiologi
     python -m v3.label run --split val --limit 40 --model MODEL    # the pilot: val reports, mechanics only
     python -m v3.label run --model MODEL                           # the radiologist's official-test studies
     python -m v3.label report                                      # -> reports/v3_label.md (gate L1)
+    python -m v3.label run --split train --limit 20000 --model MODEL   # v3.5's training labels (cache only)
+    python -m v3.label run --split val --model MODEL                   # v3.5's val labels (cache only)
 
 Jev reads each study's own report (FINDINGS and IMPRESSION, v2.context.prior_text) and answers 12 three-way
 questions. Its answers and the CheXpert labeler's labels on the same studies become v2 prediction files
@@ -27,7 +29,7 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 
-from v2.common import LABELS, TEST, label_matrix, load_dotenv, load_manifest, read_predictions, setup_logging
+from v2.common import LABELS, TEST, TRAIN, label_matrix, load_dotenv, load_manifest, read_predictions, setup_logging
 from v2.common import write_predictions
 from v2.context import Reports, prior_text
 from v2.evaluate import compare_runs, eval_rows, evaluate_set, fmt, fmt_ci
@@ -105,13 +107,19 @@ def radiologist_set(out_dir: Path, labels_path: Path) -> tuple[pd.DataFrame, pd.
     return labeler, reader, joint_classes(labeler, reader), info
 
 
-def target_rows(out_dir: Path, split: str, labels_path: Path, limit: Optional[int] = None) -> pd.DataFrame:
-    """test: the radiologist's official-test studies; val: val studies (pilots only). One row per study."""
+def target_rows(out_dir: Path, split: str, labels_path: Optional[Path], limit: Optional[int] = None) -> pd.DataFrame:
+    """
+    test: the radiologist's official-test studies (v3.3); val: val studies (a pilot, or v3.5's val labels); train:
+    v3.5's sample of training studies. With `limit`, a sample of that size with a fixed seed. One row per study.
+    """
     if split == "test":
         _, reader, _, _ = radiologist_set(out_dir, labels_path)
         rows = eval_rows(reader, "test_clean")
-    else:
+    elif split == "val":
         rows = eval_rows(load_manifest(out_dir), "val")
+    else:
+        manifest = load_manifest(out_dir)
+        rows = manifest[manifest["split"] == TRAIN]
     rows = rows.drop_duplicates("study_id").sort_values("study_id")
     if limit is not None:
         rows = rows.sample(n=min(limit, len(rows)), random_state=PILOT_SEED).sort_values("study_id")
@@ -133,8 +141,8 @@ def report_texts(rows: pd.DataFrame, reports_path: Path) -> dict[int, str]:
 
 def run(out_dir: Path, split: str, client: JevClient, reports_path: Path, labels_path: Path,
         limit: Optional[int] = None, concurrency: int = 4) -> dict:
-    if split == "val" and limit is None:
-        raise SystemExit("val is for pilots only (--limit): the radiologist's labels are on the official test")
+    if split == "train" and limit is None:
+        raise SystemExit("train needs --limit: v3.5 labels a fixed-seed sample of 20,000 training studies (§8e)")
     rows = target_rows(out_dir, split, labels_path, limit)
     path = cache_path(out_dir, client.model)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -147,7 +155,9 @@ def run(out_dir: Path, split: str, client: JevClient, reports_path: Path, labels
     failures: dict[int, str] = {}
     with ThreadPoolExecutor(max_workers=concurrency) as pool, path.open("a") as f:
         futures = {pool.submit(client.ask, render_state(text), qs): sid for sid, text in texts.items()}
-        for fut in as_completed(futures):
+        for done, fut in enumerate(as_completed(futures), 1):
+            if done % 1000 == 0:
+                logger.info("labeler on %s: %d of %d asked (%d failed)", split, done, len(futures), len(failures))
             sid = futures[fut]
             try:
                 ans = fut.result()
@@ -176,10 +186,12 @@ def run(out_dir: Path, split: str, client: JevClient, reports_path: Path, labels
     if stats["n_failed"] > MAX_FAILED_SHARE * len(rows):
         raise SystemExit(f"{stats['n_failed']} of {len(rows)} studies have no answer, more than "
                          f"{MAX_FAILED_SHARE:.0%}: stop (docs/V3_PLAN.md §6)")
-    if limit is not None:
-        stats["report"] = str(write_pilot(out_dir, stats))
-    else:
+    if split == "test" and limit is None:
         stats["predictions"] = write_label_predictions(out_dir, rows, cache, client.model)
+    elif split == "val" and limit is not None:
+        stats["report"] = str(write_pilot(out_dir, stats))
+    else:  # v3.5's training and val labels: the cache is the output, the report holds aggregates
+        stats["report"] = str(write_pilot(out_dir, stats, f"v3_label_{split}.md"))
     return stats
 
 
@@ -203,8 +215,8 @@ def write_label_predictions(out_dir: Path, rows: pd.DataFrame, cache: dict, mode
     return list(RUNS)
 
 
-def write_pilot(out_dir: Path, stats: dict) -> Path:
-    path = Path(out_dir) / "reports" / "v3_label_pilot.md"
+def write_pilot(out_dir: Path, stats: dict, name: str = "v3_label_pilot.md") -> Path:
+    path = Path(out_dir) / "reports" / name
     path.parent.mkdir(parents=True, exist_ok=True)
     shares = ", ".join(f"{o} {v:.1%}" for o, v in stats["choice_shares"].items())
     rows = [("Studies", stats["n_studies"]), ("Answered", stats["n_answered"]),
@@ -215,8 +227,10 @@ def write_pilot(out_dir: Path, stats: dict) -> Path:
             ("Input tokens, total / mean per study", f"{stats['input_tokens']:,} / {stats['mean_input_tokens']}"),
             ("Latency per request, median / p90 (s)", f"{stats['latency_median']} / {stats['latency_p90']}"),
             ("Jev's choices over all 12 findings", shares)]
-    lines = [f"# v3.3 pilot: Jev as a report labeler, on {stats['split']}", "",
-             "Aggregates only (docs/V3_PLAN.md §8c); no metric on a pilot.", "", "| | |", "|---|---|"]
+    title = ("v3.3 pilot: Jev as a report labeler" if name == "v3_label_pilot.md" else
+             "v3.5 labels: Jev as a report labeler")
+    lines = [f"# {title}, on {stats['split']}", "",
+             "Aggregates only (docs/V3_PLAN.md §8c, §8e); no metric here.", "", "| | |", "|---|---|"]
     lines += [f"| {k} | {v} |" for k, v in rows]
     path.write_text("\n".join(lines) + "\n")
     return path
@@ -291,7 +305,7 @@ def main(argv: Optional[list[str]] = None) -> dict:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest="command", required=True)
     p_run = sub.add_parser("run", help="Ask Jev to label reports")
-    p_run.add_argument("--split", choices=["test", "val"], default="test")
+    p_run.add_argument("--split", choices=["test", "val", "train"], default="test")
     p_run.add_argument("--limit", type=int, help="A pilot: this many studies, sampled with a fixed seed")
     p_run.add_argument("--model", required=True, help="A pinned Jev version")
     p_run.add_argument("--concurrency", type=int, default=4)

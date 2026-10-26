@@ -19,10 +19,14 @@ def test_questions_are_12_three_way_choices_in_the_labeler_s_terms():
     assert label.render_state("  ").endswith(prompt.MISSING) and label.render_state("x").startswith(label.PREAMBLE)
 
 
-def test_val_is_for_pilots_only(v3out, synth_sources):
+def test_train_labels_need_a_sample_size_and_write_no_predictions(v3out, synth_sources):
     reports, labels = synth_sources
-    with pytest.raises(SystemExit, match="pilots only"):
-        label.run(v3out, "val", client_for(smoke.FakeJev()), reports, labels)
+    with pytest.raises(SystemExit, match="--limit"):
+        label.run(v3out, "train", client_for(smoke.FakeJev()), reports, labels)
+    stats = label.run(v3out, "train", client_for(smoke.FakeJev()), reports, None, limit=12)
+    assert stats["n_answered"] == 12 and (v3out / "reports" / "v3_label_train.md").exists()
+    assert set(label.target_rows(v3out, "train", None, 12)["split"]) == {"train"}
+    assert not (v3out / "predictions" / "labeler_jev.parquet").exists()
 
 
 def test_a_pilot_writes_its_report_and_no_predictions(v3out, synth_sources):
