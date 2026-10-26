@@ -101,6 +101,21 @@ def answered(cache: dict, ids: np.ndarray, what: str) -> np.ndarray:
 
 def train(out_dir: Path, model: str, emb_path: Path, n_train: int = N_TRAIN, n_jobs: int = -1) -> dict:
     """Fit the three probes and write their val and test predictions. Returns aggregate facts for the report."""
+    probes, rows, X_all, facts, meta = fit_probes(out_dir, model, emb_path, n_train, n_jobs)
+    for run, probe in probes.items():
+        write_predictions(out_dir, run, rows["study_id"], rows["split"], probe.predict(X_all), {
+            "kind": "probe", "milestone": "v3.5", "targets": ARMS[run], "embeddings": str(emb_path),
+            "encoder": meta.get("encoder"), "size": meta.get("size"), "n_train": facts["n_train"],
+            "n_val_for_C": facts["n_val"], "Cs": list(DEFAULT_CS), "per_label": probe.summary(),
+            "label_prompt_hash": label.label_hash(), "label_model": model})
+    return facts
+
+
+def fit_probes(out_dir: Path, model: str, emb_path: Path, n_train: int = N_TRAIN, n_jobs: int = -1):
+    """
+    The three probes, deterministic given the same inputs; (probes, the val and test rows, their features, aggregate
+    facts, the embeddings' meta). v3.6 refits them this way and checks them against the stored predictions.
+    """
     manifest = load_manifest(out_dir)
     ids, emb, meta = load_npz(emb_path)
     parts = split_xy(manifest, ids, emb)
@@ -124,16 +139,10 @@ def train(out_dir: Path, model: str, emb_path: Path, n_train: int = N_TRAIN, n_j
         "probe20k_jev_soft": fit_soft_probe(X_tr, soft_tr, X_va_fit, jev_va, n_jobs=n_jobs),
     }
     rows = pd.concat([va_rows, te_rows], ignore_index=True)
-    X_all = np.concatenate([X_va, X_te])
-    for run, probe in probes.items():
-        write_predictions(out_dir, run, rows["study_id"], rows["split"], probe.predict(X_all), {
-            "kind": "probe", "milestone": "v3.5", "targets": ARMS[run], "embeddings": str(emb_path),
-            "encoder": meta.get("encoder"), "size": meta.get("size"), "n_train": int(len(tr_rows)),
-            "n_val_for_C": int(len(va_fit_rows)), "Cs": list(DEFAULT_CS), "per_label": probe.summary(),
-            "label_prompt_hash": label.label_hash(), "label_model": model})
-    return {"n_train": int(len(tr_rows)), "n_val": int(len(va_fit_rows)),
-            "unanswered": {"train": int(len(sample) - len(keep_tr)), "val": int(len(va_rows) - len(keep_va))},
-            "C": {run: {f.label: f.C for f in p.fits} for run, p in probes.items()}}
+    facts = {"n_train": int(len(tr_rows)), "n_val": int(len(va_fit_rows)),
+             "unanswered": {"train": int(len(sample) - len(keep_tr)), "val": int(len(va_rows) - len(keep_va))},
+             "C": {run: {f.label: f.C for f in p.fits} for run, p in probes.items()}}
+    return probes, rows, np.concatenate([X_va, X_te]), facts, meta
 
 
 def link_reference(out_dir: Path) -> Optional[str]:
