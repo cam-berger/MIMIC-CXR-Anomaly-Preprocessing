@@ -30,6 +30,9 @@ DEFAULT_BASE_URL = "https://api.typesafe.ai"
 RETRY_STATUS = frozenset({408, 409, 425, 429, 500, 502, 503, 504})
 IMAGE_PART = "frontal"
 MAX_BACKOFF = 60.0
+# jev-1.14.0 on synthetic JPEGs (V3_PLAN §9): 256 px and smaller, and 2048 px, are "Invalid image dimensions";
+# 384 to 1100 px on a side are accepted. The range here is the one tested, not TypeSafe's documented limit.
+IMAGE_SIDES = (384, 1100)
 
 
 class JevError(RuntimeError):
@@ -84,14 +87,30 @@ def build_request(model: str, state: str, questions: dict, image: Optional[bytes
     return body, files
 
 
-def _error_message(resp: Response) -> str:
-    """The status, plus where and why for validation errors. `input` and `ctx` can echo the request: dropped."""
+def _echoes(message: str, sent: str, width: int = 24) -> bool:
+    """Whether `message` repeats any `width`-character stretch of the text that was sent (or all of a shorter text)."""
+    if len(sent) < width:
+        return len(sent) >= 8 and sent in message  # a few characters identify nothing
+    return any(sent[i:i + width] in message for i in range(0, len(sent) - width + 1, width // 2))
+
+
+def _error_message(resp: Response, sent: str = "") -> str:
+    """
+    The status, plus where and why for validation errors (422: `input` and `ctx` can echo the request, so they are
+    dropped) and the API's own error type and short message otherwise (e.g. 400 "Invalid image dimensions."),
+    unless that message repeats the text that was sent.
+    """
     message = f"HTTP {resp.status}"
-    detail = resp.payload.get("detail") if resp.status == 422 else None
-    if isinstance(detail, list):
+    detail = resp.payload.get("detail")
+    if resp.status == 422 and isinstance(detail, list):
         why = ["{}: {}".format(".".join(str(p) for p in d.get("loc", [])), d.get("msg", "")) for d in detail
                if isinstance(d, dict)]
         message += " (" + "; ".join(why) + ")"
+    elif isinstance(detail, dict):
+        kind, text = str(detail.get("error_type", "")), str(detail.get("message", ""))
+        shown = text if text and len(text) <= 120 and not _echoes(text, sent) else ""
+        if kind or shown:
+            message += " (" + ": ".join(p for p in (kind, shown) if p) + ")"
     return message
 
 
@@ -160,7 +179,8 @@ class JevClient:
             if resp is not None and resp.status == 200:
                 return resp, time.monotonic() - start
             if resp is not None:
-                failure = JevError(_error_message(resp).replace(self._key, "<key>"), resp.status)
+                sent = str((body or {}).get("state", ""))
+                failure = JevError(_error_message(resp, sent).replace(self._key, "<key>"), resp.status)
                 if resp.status not in RETRY_STATUS:
                     raise failure
             if attempt == self.max_retries:

@@ -79,9 +79,23 @@ AI assistant runs the commands and reads only the aggregate reports, never the c
 context table. v3's console output is counts, tokens and timings only. The client's errors carry the HTTP status
 and the API's validation messages, without the request's text or any input the API echoes back.
 
-## 5. Adding the image (v3.1)
+## 5. The X-ray itself (v3.1, docs/V3_PLAN.md §8)
 
-`jev_img_est_text` puts the prepared frontal JPEG (`BENCH_OUT/images/{study_id}.jpg`) in the request as an image
-asset, behind TypeSafe's `TypeSafe-Danger-Zone-Images` header. It refuses to run without `--allow-image`, which
-waits for the v3.1 amendment to `docs/V3_PLAN.md` (§8). Further context sources become new blocks and arms in
-`v3/prompt.py`.
+The three image arms (`jev_img`, `jev_img_est`, `jev_img_est_text`) put the prepared frontal JPEG
+(`BENCH_OUT/images/{study_id}.jpg`, 518 px on the shorter side) in each request as a multipart image asset, behind
+TypeSafe's `TypeSafe-Danger-Zone-Images` header. They run only with `--allow-image`, only in the format val chose in
+v3.0, and only after every image passes a local size check (Jev rejects images under 384 px or over about 1100 px).
+
+```bash
+python -m v3.smoke --live-image --model MODEL        # synthetic images: does Jev see them (no MIMIC data)
+python -m v3.run --arm jev_img_est_text --format noul --split val --limit 40 --model MODEL --allow-image   # pilot
+for arm in jev_img jev_img_est jev_img_est_text; do
+  python -m v3.run --arm $arm --format noul --split val --model MODEL --allow-image
+done
+for arm in jev_img jev_img_est jev_img_est_text; do
+  python -m v3.run --arm $arm --format noul --split test --model MODEL --allow-image
+done
+python -m v3.report                                  # gate J2 and the v3.1 ladder
+```
+
+Further context sources become new blocks and arms in `v3/prompt.py`.

@@ -126,3 +126,15 @@ def test_the_key_never_appears_in_errors():
     with pytest.raises(jev.JevError) as err:
         c.ask("s", NOUL)
     assert "test-key" not in str(err.value) and err.value.status == 401
+
+
+def test_api_error_messages_are_shown_unless_they_echo_the_request():
+    detail = {"error_type": "api_usage_error", "message": "Invalid image dimensions."}
+    c, _ = client(Scripted(jev.Response(400, {"detail": detail}, {})))
+    with pytest.raises(jev.JevError, match="api_usage_error: Invalid image dimensions"):
+        c.ask("s", NOUL)
+    echo = {"error_type": "bad_state", "message": f"cannot parse {SECRET_TEXT}"}
+    c, _ = client(Scripted(jev.Response(400, {"detail": echo}, {})))
+    with pytest.raises(jev.JevError) as err:
+        c.ask(SECRET_TEXT, NOUL)
+    assert "bad_state" in str(err.value) and SECRET_TEXT not in str(err.value)

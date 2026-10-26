@@ -3,6 +3,7 @@ v3's wiring check on synthetic data (docs/V3_PLAN.md §7 steps 1-2).
 
     python -m v3.smoke                            # offline, a fake Jev, ~10 s
     python -m v3.smoke --live --model MODEL       # 12 synthetic studies per format through the real API (no MIMIC)
+    python -m v3.smoke --live-image --model MODEL # synthetic images: does Jev see them, do image requests work (§8)
 
 It builds a small synthetic benchmark as v2's tests do (v2.synth, official split, pixel embeddings, the probe, the
 context table, TF-IDF text arms), runs v3.setup, then the order of §7: jev_est_text on val in both question formats,
@@ -45,6 +46,7 @@ FAKE_MODEL = "jev-fake-0"
 BUMP = 2.0          # the fake's log-odds lift for a planted hint
 TEXT_ONLY_BASE = -1.0
 TEXT_SIGNAL_MIN = 0.6
+ANY_SIZE = (1, 10**6)  # the fake Jev takes any image; the synthetic benchmark's are 48 px
 _ESTIMATE = re.compile(r"^- (.+?): (<0\.1|>99\.9|\d+\.\d)%$", re.M)
 # v2.synth's planted phrases (indications and chief complaints), per finding.
 PHRASES = {label: [t[label][0].lower() for t in (HINTS, COMPLAINTS) if label in t] for label in {*HINTS, *COMPLAINTS}}
@@ -113,12 +115,12 @@ def expected_scores(out_dir: Path, arm: str, fmt: str) -> pd.DataFrame:
     return pd.DataFrame.from_dict(rows, orient="index")[list(LABELS)]
 
 
-def build_synthetic_bench(root: Path, n_patients: int = 400, seed: int = 3) -> Path:
+def build_synthetic_bench(root: Path, n_patients: int = 400, seed: int = 3, image_size: int = 48) -> Path:
     """A small M5-style benchmark on v2.synth: official split, pixel probe, context, TF-IDF text-only arms."""
     synth = make_dataset(root / "synth", n_patients=n_patients, seed=seed)
     bench = root / "bench"
     prepare_data.main(["--mimic-cxr-jpg", str(synth.mimic_root), "--out", str(bench), "--population", "all",
-                       "--split-scheme", "official", "--image-format", "jpg", "--image-size", "48", "--workers", "0",
+                       "--split-scheme", "official", "--image-format", "jpg", "--image-size", str(image_size), "--workers", "0",
                        "--min-count", "3", "--rad-dino-list", str(synth.rad_dino_list)])
     embed.main(["--model", "test-pixels", "--out", str(bench), "--workers", "0"])
     emb = bench / "embeddings" / "test-pixels_48.npz"
@@ -130,22 +132,22 @@ def build_synthetic_bench(root: Path, n_patients: int = 400, seed: int = 3) -> P
     return bench
 
 
-def setup_synthetic(root: Path, n_patients: int = 400, seed: int = 3) -> Path:
-    bench = build_synthetic_bench(root, n_patients, seed)
+def setup_synthetic(root: Path, n_patients: int = 400, seed: int = 3, image_size: int = 48) -> Path:
+    bench = build_synthetic_bench(root, n_patients, seed, image_size)
     out = root / "v3"
     v3setup.setup(bench, out, "test-pixels_48_probe", "test-pixels_48_ctx_indication", "test-pixels_48_ctx_text",
                   n_boot=20)
     return out
 
 
-def check(out: Path, fake: FakeJev, chosen: str) -> list[str]:
+def check(out: Path, fake: FakeJev, chosen: str, with_image: bool = False) -> list[str]:
     problems = []
     n_val, n_test = len(v3run.split_rows(out, "val")), len(v3run.split_rows(out, "test"))
     for f in prompt.FORMATS:
-        for arm in prompt.V3_0_ARMS:
+        for arm in prompt.V3_0_ARMS + (prompt.V3_1_ARMS if f == chosen else ()):
             run = prompt.run_name(arm, f)
             if not (out / "predictions" / f"{run}.parquet").exists():
-                if f == chosen or arm == prompt.PRIMARY:
+                if (f == chosen or arm == prompt.PRIMARY) and (with_image or arm not in prompt.V3_1_ARMS):
                     problems.append(f"{run}: no predictions")
                 continue
             wide, meta = read_predictions(out / "predictions" / f"{run}.parquet")
@@ -200,11 +202,24 @@ def run_order(out: Path, client: JevClient, concurrency: int = 2) -> str:
     return chosen
 
 
+def run_v3_1(out: Path, client: JevClient, chosen: str, concurrency: int = 2) -> None:
+    """§8: the image arms, val then test, in the format val chose. The fake Jev ignores the image itself."""
+    for split in ("val", "test"):
+        for arm in prompt.V3_1_ARMS:
+            v3run.run_arm(out, arm, chosen, split, client, concurrency=concurrency, allow_image=True,
+                          image_sides=ANY_SIZE)
+
+
 def offline(root: Path) -> list[str]:
     out = setup_synthetic(root)
     fake = FakeJev()
-    chosen = run_order(out, JevClient(fake.model, api_key="smoke", transport=fake))
-    return check(out, fake, chosen)
+    client = JevClient(fake.model, api_key="smoke", transport=fake)
+    chosen = run_order(out, client)
+    run_v3_1(out, client, chosen)
+    problems = check(out, fake, chosen, with_image=True)
+    if "Gate J2" not in (out / "reports" / "v3_report.md").read_text():
+        problems.append("v3_report.md without J2")
+    return problems
 
 
 def live(root: Path, model: str, n: int = 12) -> list[str]:
@@ -221,25 +236,68 @@ def live(root: Path, model: str, n: int = 12) -> list[str]:
     return problems
 
 
+WHITE = {"white": {"type": "noul", "instructions": "Is this image almost entirely white?",
+                   "criteria": {"true": "Nearly every pixel is white or very light", "false": "The image is mostly dark"}}}
+
+
+def _flat_jpeg(value: int, size: tuple = (518, 630)) -> bytes:
+    import io
+
+    from PIL import Image
+
+    buf = io.BytesIO()
+    Image.fromarray(np.full(size[::-1], value, np.uint8), mode="L").save(buf, "JPEG", quality=90)
+    return buf.getvalue()
+
+
+def live_image(root: Path, model: str, n: int = 6) -> list[str]:
+    """
+    §8 on synthetic images: Jev must see the image (a white one judged white, a black one not), and the image arm's
+    requests (the prepared JPEG as a multipart asset) must come back with 12 answers. No MIMIC data.
+    """
+    client, problems = JevClient(model), []
+    seen = {name: client.ask(f"Here is an image: {prompt.IMAGE_PLACEHOLDER}", WHITE, _flat_jpeg(v)).scores["white"]
+            for name, v in (("white", 250), ("black", 5))}
+    logger.info("live image: P(white) %.2f for the white image, %.2f for the black one", seen["white"], seen["black"])
+    if not (seen["white"] > 0.8 and seen["black"] < 0.2):
+        problems.append(f"Jev does not seem to see the image: P(white) {seen['white']:.2f} and {seen['black']:.2f}")
+    out = setup_synthetic(root, n_patients=150, image_size=518)  # Jev rejects images under 384 px
+    rows = v3run.split_rows(out, "val").head(n)
+    states = v3run.study_states(out, prompt.PRIMARY_V3_1, rows, load_setup(out)["image_run"])
+    tokens = []
+    for _, state, image in states:
+        answer = client.ask(state, prompt.questions("noul"), image.read_bytes())
+        tokens.append(answer.usage.get("input_tokens", 0))
+        if len(answer.scores) != len(LABELS):
+            problems.append(f"an image-arm answer has {len(answer.scores)} of 12 findings")
+    logger.info("live image: %d of %d image-arm requests answered; mean input tokens %.0f", len(tokens), n,
+                np.mean(tokens))
+    return problems
+
+
 def main(argv: Optional[list[str]] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--live", action="store_true", help="Send 12 synthetic studies per format to the real API")
-    parser.add_argument("--model", help="The Jev version for --live")
+    parser.add_argument("--live-image", action="store_true",
+                        help="Send synthetic images to the real API: does Jev see them, do image-arm requests work")
+    parser.add_argument("--model", help="The Jev version for --live and --live-image")
     parser.add_argument("--keep", help="Build in this directory and keep it (default: a temporary one)")
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args(argv)
     setup_logging(args.verbose)
-    if args.live and not args.model:
-        raise SystemExit("--live needs --model")
+    if (args.live or args.live_image) and not args.model:
+        raise SystemExit("--live and --live-image need --model")
+    mode = "live image" if args.live_image else "live" if args.live else "offline"
     root = Path(args.keep) if args.keep else Path(tempfile.mkdtemp(prefix="v3smoke_"))
     try:
-        problems = live(root, args.model) if args.live else offline(root)
+        problems = (live_image(root, args.model) if args.live_image else live(root, args.model) if args.live
+                    else offline(root))
     finally:
         if not args.keep:
             shutil.rmtree(root, ignore_errors=True)
     for p in problems:
         logger.error("SMOKE: %s", p)
-    logger.info("v3 smoke (%s): %s", "live" if args.live else "offline", "FAILED" if problems else "passed")
+    logger.info("v3 smoke (%s): %s", mode, "FAILED" if problems else "passed")
     return 1 if problems else 0
 
 

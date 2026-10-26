@@ -36,10 +36,15 @@ ARMS: dict[str, tuple[str, ...]] = {
     "jev_est_indication": ("estimates", "indication"),
     "jev_est_text": ("estimates", *TEXT_BLOCKS),
     "jev_text": TEXT_BLOCKS,
-    "jev_img_est_text": ("image", "estimates", *TEXT_BLOCKS),  # v3.1 (§8): built, not run in v3.0
+    # v3.1 (§8): the prepared frontal X-ray itself
+    "jev_img": ("image",),
+    "jev_img_est": ("image", "estimates"),
+    "jev_img_est_text": ("image", "estimates", *TEXT_BLOCKS),
 }
 PRIMARY = "jev_est_text"
 V3_0_ARMS = ("jev_est", "jev_est_indication", "jev_est_text", "jev_text")
+PRIMARY_V3_1 = "jev_img_est_text"
+V3_1_ARMS = ("jev_img", "jev_img_est", "jev_img_est_text")  # run in the format val chose in v3.0 (§8)
 
 PREAMBLE = ("A patient is having a chest X-ray. Below is what was known when it was taken. A radiologist will then "
             "read the X-ray and write a report.")

@@ -30,8 +30,10 @@ LOST_ESTIMATES = 0.02   # §6: jev_est this far below the image run means Jev dr
 VAL_REVISE = 0.03       # §7 step 4: jev_est_text this far below the val stack on val means revise the prompt
 LEAK_CLASS = 0.90       # §6: a text-only class above this on the official test
 COARSE = 20             # §6: fewer distinct scores per finding than this (median of 12) is reported as coarse
+IMAGE_UNREAD = 0.60     # §8: jev_img below this on the official test means Jev barely reads the X-ray
 ROLES = {"jev_est": "estimates", "jev_est_indication": "+ indication", "jev_est_text": "+ complaint, prior report (J1)",
-         "jev_text": "text only (control)", "jev_img_est_text": "+ the image (v3.1)"}
+         "jev_text": "text only (control)", "jev_img": "the image only (v3.1)",
+         "jev_img_est": "image + estimates (v3.1)", "jev_img_est_text": "image + estimates + all text (v3.1, J2)"}
 
 
 def _has(out_dir: Path, run: str) -> bool:
@@ -117,14 +119,28 @@ def build(out_dir: Path, n_boot: int = 1000) -> dict:
                 ("Jev against TF-IDF, text alone", j["jev_text"], txt),
                 ("Like for like with MMBT's inputs", j["jev_est_indication"], stack_ind),
                 ("J1: Jev against the val combiner", j["jev_est_text"], stack_txt)]
-        if _has(out_dir, j["jev_img_est_text"]):
-            spec.insert(4, ("+ the image (v3.1)", j["jev_img_est_text"], j["jev_est_text"]))
         ladder = [{"step": step, "a": a, "b": b, "v2": _cmp(out_dir, a, b, "test_clean", "v2", n_boot),
                    "u0": _cmp(out_dir, a, b, "test_clean", "u0", n_boot)} for step, a, b in spec]
         j1 = ladder[-1]["v2"]
         val_rule = _cmp(out_dir, j["jev_est_text"], stack_txt, "val", "v2", n_boot)
+    ladder31, j2 = [], None
+    v = {arm: prompt.run_name(arm, chosen or "noul") for arm in prompt.ARMS}
+    if chosen and any(_has(out_dir, v[arm]) for arm in prompt.V3_1_ARMS):
+        spec = [("Jev's own reading of the X-ray, against RAD-DINO's", v["jev_img"], img),
+                ("+ the image, to the estimates", v["jev_img_est"], v["jev_est"]),
+                ("J2: + the image, to the estimates and the text", v["jev_img_est_text"], v["jev_est_text"]),
+                ("With the image, against the val combiner", v["jev_img_est_text"], stack_txt)]
+        ladder31 = [{"step": step, "a": a, "b": b, "v2": _cmp(out_dir, a, b, "test_clean", "v2", n_boot),
+                     "u0": _cmp(out_dir, a, b, "test_clean", "u0", n_boot)} for step, a, b in spec]
+        j2 = ladder31[2]["v2"]
+    flags = red_flags(table, ladder, img, chosen)
+    jev_img = next((row["test"] for row in table if row["run"] == v["jev_img"]), None)
+    if jev_img and jev_img["macro_auroc"] < IMAGE_UNREAD:
+        flags.append(f"IMAGE UNREAD: `{v['jev_img']}` scores {fmt(jev_img['macro_auroc'])} on the official test, "
+                     f"below {IMAGE_UNREAD}: Jev barely reads the X-ray, so J2 measures little (§8)")
     return {"setup": s, "choice": choice, "table": table, "ladder": ladder, "j1": j1, "verdict": j1_verdict(j1),
-            "val_rule": val_rule, "flags": red_flags(table, ladder, img, chosen)}
+            "val_rule": val_rule, "ladder31": ladder31, "j2": j2, "verdict_j2": j2_verdict(j2, bool(ladder31)),
+            "flags": flags}
 
 
 def j1_verdict(c: Optional[dict]) -> str:
@@ -137,6 +153,19 @@ def j1_verdict(c: Optional[dict]) -> str:
     if c["b_better"]:
         return "FAIL: Jev loses information the logistic regression keeps"
     return "no detectable gain over the logistic regression (the CI includes 0)"
+
+
+def j2_verdict(c: Optional[dict], started: bool) -> str:
+    if c is None:
+        return ("not run: needs jev_img_est_text and jev_est_text on the official test, in val's format" if started
+                else "not started (v3.1, docs/V3_PLAN.md §8)")
+    if not np.isfinite(c["diff"]):
+        return "n/a: no measurable classes"
+    if c["a_better"]:
+        return "PASS: the X-ray adds to Jev's estimates and text"
+    if c["b_better"]:
+        return "FAIL: the X-ray makes Jev worse"
+    return "no detectable gain from the X-ray (the CI includes 0)"
 
 
 def red_flags(table: list, ladder: list, image_run: str, chosen: Optional[str]) -> list[str]:
@@ -206,6 +235,12 @@ def write(out_dir: Path, result: dict) -> Path:
             lines.append(f"| {row['step']} | `{row['a']}` | `{row['b']}` | {_diff(row['v2'])} | {_diff(row['u0'])} |")
     else:
         lines.append("Not run: it is read in the format val chooses.")
+    lines += ["", "## v3.1: the X-ray itself (official test, paired)", "",
+              f"**Gate J2:** {_diff(result['j2'])} -> **{result['verdict_j2']}**", ""]
+    if result["ladder31"]:
+        lines += ["| Step | A | B | A minus B | A minus B (u0) |", "|---|---|---|---|---|"]
+        for row in result["ladder31"]:
+            lines.append(f"| {row['step']} | `{row['a']}` | `{row['b']}` | {_diff(row['v2'])} | {_diff(row['u0'])} |")
     models = sorted({row["model"] for row in result["table"] if row["model"]})
     hashes = {row["run"]: row["prompt_hash"] for row in result["table"] if row["prompt_hash"]}
     lines += ["", f"Jev model: {', '.join(f'`{m}`' for m in models) or 'none yet'}. Prompt hashes: "
@@ -232,6 +267,8 @@ def main(argv: Optional[list[str]] = None) -> dict:
     if result["choice"]:
         logger.info("Format (val): %s", result["choice"]["chosen"])
     logger.info("J1: %s -> %s", _diff(result["j1"]), result["verdict"])
+    if result["ladder31"]:
+        logger.info("J2: %s -> %s", _diff(result["j2"]), result["verdict_j2"])
     for flag in result["flags"]:
         logger.warning("%s", flag)
     logger.info("Report: %s", path)

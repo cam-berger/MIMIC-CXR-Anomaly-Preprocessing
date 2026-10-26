@@ -118,9 +118,25 @@ def test_answers_from_two_models_stop_the_run(v3out):
         v3run.run_arm(v3out, "jev_est", "score", "val", c, limit=5)
 
 
-def test_the_image_arm_needs_allow_image_and_sends_the_prepared_jpeg(v3out):
+def test_image_arms_need_allow_image_and_the_format_val_chose(v3out, monkeypatch):
+    c = client_for(smoke.FakeJev())
     with pytest.raises(SystemExit, match="allow-image"):
-        v3run.run_arm(v3out, "jev_img_est_text", "score", "val", client_for(smoke.FakeJev()))
+        v3run.run_arm(v3out, "jev_img_est_text", "noul", "val", c)
+    with pytest.raises(SystemExit, match="both formats first"):
+        v3run.run_arm(v3out, "jev_img_est_text", "noul", "val", c, allow_image=True)
+    monkeypatch.setattr(report, "choose_format", lambda out, n_boot=20: {"chosen": "noul"})
+    with pytest.raises(SystemExit, match="format val chose"):
+        v3run.run_arm(v3out, "jev_img", "score", "val", c, allow_image=True)
+
+
+def test_the_image_arm_sends_each_study_its_own_prepared_jpeg(v3out, monkeypatch):
+    monkeypatch.setattr(report, "choose_format", lambda out, n_boot=20: {"chosen": "noul"})
+    rows = v3run.split_rows(v3out, "val").head(5)
+    with pytest.raises(SystemExit, match="outside 384-1100 px"):  # the synthetic images are 48 px
+        v3run.study_states(v3out, "jev_img", rows, "test-pixels_48_probe")
+    states = v3run.study_states(v3out, "jev_img", rows, "test-pixels_48_probe", smoke.ANY_SIZE)
+    assert [image for _, _, image in states] == [v3out / name for name in rows["image"]]
+    assert all(prompt.IMAGE_PLACEHOLDER in state for _, state, _ in states)
     seen = []
 
     class Recording(smoke.FakeJev):
@@ -128,12 +144,26 @@ def test_the_image_arm_needs_allow_image_and_sends_the_prepared_jpeg(v3out):
             seen.append((headers, files))
             return super().__call__(method, url, headers, json_body, files, timeout)
 
-    v3run.run_arm(v3out, "jev_img_est_text", "score", "val", client_for(Recording()), limit=3, allow_image=True)
+    v3run.run_arm(v3out, "jev_img_est_text", "noul", "val", client_for(Recording()), limit=3, allow_image=True,
+                  image_sides=smoke.ANY_SIZE)
     assert len(seen) == 3
+    sampled = v3run.split_rows(v3out, "val").sample(n=3, random_state=v3run.PILOT_SEED)
+    expected = {(v3out / name).read_bytes() for name in sampled["image"]}
+    assert {files[jev.IMAGE_PART][1] for _, files in seen} == expected
     headers, files = seen[0]
     assert headers["TypeSafe-Danger-Zone-Images"] == "true"
-    body = json.loads(files["request"][1])
-    assert prompt.IMAGE_PLACEHOLDER in body["state"] and files[jev.IMAGE_PART][1][:2] == b"\xff\xd8"
+    assert prompt.IMAGE_PLACEHOLDER in json.loads(files["request"][1])["state"]
+
+
+def test_v3_1_runs_after_v3_0_and_the_report_reads_j2(v3out):
+    fake = smoke.FakeJev()
+    c = client_for(fake)
+    chosen = smoke.run_order(v3out, c)
+    smoke.run_v3_1(v3out, c, chosen)
+    assert smoke.check(v3out, fake, chosen, with_image=True) == []
+    rep = report.build(v3out, n_boot=20)
+    assert rep["j2"] is not None and not rep["verdict_j2"].startswith("not")
+    assert [row["a"] for row in rep["ladder31"]][:3] == [prompt.run_name(a, chosen) for a in prompt.V3_1_ARMS]
 
 
 def test_aliases_are_refused_before_any_request(v3out):

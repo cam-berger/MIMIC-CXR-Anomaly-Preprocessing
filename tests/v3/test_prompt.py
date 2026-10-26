@@ -20,7 +20,8 @@ def test_arms_use_known_blocks_and_v3_0_leaves_out_the_image():
         assert arm.startswith("jev_") and blocks and set(blocks) <= set(prompt.BLOCKS)
     assert prompt.PRIMARY in prompt.V3_0_ARMS
     assert not any(prompt.needs_image(arm) for arm in prompt.V3_0_ARMS)
-    assert prompt.needs_image("jev_img_est_text")
+    assert all(prompt.needs_image(arm) for arm in prompt.V3_1_ARMS) and prompt.PRIMARY_V3_1 in prompt.V3_1_ARMS
+    assert prompt.ARMS["jev_img"] == ("image",) and not prompt.needs_estimates("jev_img")
     assert prompt.run_name("jev_est_text", "score") == "jev_est_text_score"
 
 

@@ -30,7 +30,7 @@ from v2.evaluate import eval_rows
 
 from . import prompt
 from .common import default_out_dir, load_setup
-from .jev import JevClient, JevError
+from .jev import IMAGE_SIDES, JevClient, JevError
 
 logger = logging.getLogger("v3.run")
 
@@ -68,8 +68,9 @@ def stage1_probabilities(out_dir: Path, image_run: str) -> pd.DataFrame:
     return pd.DataFrame(probs, index=wide["study_id"].to_numpy(), columns=list(LABELS))
 
 
-def study_states(out_dir: Path, arm: str, rows: pd.DataFrame, image_run: str) -> list[tuple[int, str, Optional[Path]]]:
-    """(study_id, state, image path or None) for each row."""
+def study_states(out_dir: Path, arm: str, rows: pd.DataFrame, image_run: str,
+                 image_sides: tuple = IMAGE_SIDES) -> list[tuple[int, str, Optional[Path]]]:
+    """(study_id, state, image path or None) for each row; image arms check every image's size first."""
     ctx = pd.read_parquet(Path(out_dir) / "context.parquet", columns=["study_id", *prompt.TEXT_BLOCKS])
     ctx = ctx.drop_duplicates("study_id").set_index("study_id")
     absent = np.setdiff1d(rows["study_id"], ctx.index)
@@ -86,7 +87,26 @@ def study_states(out_dir: Path, arm: str, rows: pd.DataFrame, image_run: str) ->
         est = probs.loc[sid].to_numpy() if probs is not None else None
         image = Path(out_dir) / row["image"] if prompt.needs_image(arm) else None
         out.append((sid, prompt.render_state(arm, ctx.loc[sid].to_dict(), est), image))
+    if prompt.needs_image(arm):
+        check_images([image for _, _, image in out], image_sides)
     return out
+
+
+def check_images(paths: list, sides: tuple = IMAGE_SIDES) -> None:
+    """Every image readable and within the sizes Jev accepts (IMAGE_SIDES), before any request. Counts only."""
+    from PIL import Image
+
+    lo, hi = sides
+    unreadable = bad = 0
+    for path in paths:
+        try:
+            with Image.open(path) as im:
+                bad += not (lo <= min(im.size) and max(im.size) <= hi)
+        except OSError:
+            unreadable += 1
+    if unreadable or bad:
+        raise SystemExit(f"{unreadable} images missing or unreadable and {bad} outside {lo}-{hi} px on a side, of "
+                         f"{len(paths)}: Jev would reject them (§8)")
 
 
 def val_done(out_dir: Path, arm: str, fmt: str, model: str) -> bool:
@@ -116,14 +136,20 @@ def _ask(client: JevClient, state: str, questions: dict, image: Optional[Path]):
 
 
 def run_arm(out_dir: Path, arm: str, fmt: str, split: str, client: JevClient, limit: Optional[int] = None,
-            concurrency: int = 4, allow_image: bool = False) -> dict:
+            concurrency: int = 4, allow_image: bool = False, image_sides: tuple = IMAGE_SIDES) -> dict:
     if arm not in prompt.ARMS:
         raise SystemExit(f"unknown arm {arm!r}: one of {', '.join(prompt.ARMS)}")
     if fmt not in prompt.FORMATS:
         raise SystemExit(f"unknown format {fmt!r}: one of {', '.join(prompt.FORMATS)}")
-    if prompt.needs_image(arm) and not allow_image:
-        raise SystemExit(f"{arm} sends the X-ray itself (v3.1, docs/V3_PLAN.md §8): pass --allow-image once its "
-                         "amendment is written")
+    if prompt.needs_image(arm):
+        if not allow_image:
+            raise SystemExit(f"{arm} sends the X-ray itself (v3.1, docs/V3_PLAN.md §8): pass --allow-image")
+        from .report import choose_format
+
+        choice = choose_format(out_dir)
+        if choice is None or fmt != choice["chosen"]:
+            raise SystemExit(f"{arm} runs only in the format val chose in v3.0 (§8): "
+                             + (choice["chosen"] if choice else f"run {prompt.PRIMARY} on val in both formats first"))
     setup = load_setup(out_dir)
     run, phash = prompt.run_name(arm, fmt), prompt.prompt_hash(arm, fmt)
     path = cache_path(out_dir, arm, fmt, client.model)
@@ -141,7 +167,7 @@ def run_arm(out_dir: Path, arm: str, fmt: str, split: str, client: JevClient, li
     names = [prompt.question_name(label) for label in LABELS]
     failures: dict[int, str] = {}
     if len(todo):
-        states = study_states(out_dir, arm, todo, setup["image_run"])
+        states = study_states(out_dir, arm, todo, setup["image_run"], image_sides)
         with ThreadPoolExecutor(max_workers=concurrency) as pool, path.open("a") as f:
             futures = {pool.submit(_ask, client, state, questions, image): sid for sid, state, image in states}
             for done, fut in enumerate(as_completed(futures), 1):
