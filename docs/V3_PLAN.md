@@ -187,6 +187,37 @@ unanswered stops a run (§6).
 synthetic studies, against about 1,480 without it). Three arms on 4,774 studies
 come to about 14,300 requests and roughly 33M input tokens.
 
+## 8b. v3.2 (exploratory, written 2026-10-26 after v3.1, before any v3.2 run): Jev's answers as inputs
+
+**Question:** Jev can't combine the inputs better than a logistic regression,
+but are its readings worth anything as inputs? Here v2's val combiner
+(`v2/stack.py`: per class, a logistic regression on two runs' scores, fit on val,
+cross-fitted for val's own scores) takes a Jev run as its second input. No new
+Jev requests: only the cached answers are used.
+
+**Inputs:** Jev's probabilities are turned into log-odds, clipped at 0.005 and
+0.995 because Jev's answers come rounded to 0.01 and can be 0 or 1. The
+transform is monotone, so each Jev run's own AUROC is unchanged.
+
+| Stack | Inputs | Read against |
+|---|---|---|
+| A | image run + `jev_text_noul` | `rad-dino_518_ft_attn_s0_stack_text` (the same with TF-IDF's text), and the image run |
+| B | image run + `jev_img_noul` | the image run: does Jev's own X-ray reading add to RAD-DINO's? |
+| C | `rad-dino_518_ft_attn_s0_stack_text` + `jev_text_noul` | `stack_text`: does Jev's text reading add on top of v2's best system? |
+| D | `stack_text` + `jev_img_noul` | `stack_text`: does Jev's X-ray reading add on top of it? |
+| E | `stack_text` + `jev_img_est_text_noul` | `stack_text`: Jev's all-inputs answer on top of it |
+
+C to E feed the combiner's own output into a second combiner. That's nested:
+the first combiner's val scores are cross-fitted, and the second is fit on those
+same val studies, so its val score is slightly optimistic. The official test
+was used for no fit at all.
+
+**Reading:** all comparisons are paired on the official test (v2 policy, u0
+next to it), with 95% CIs. There is no gate: an interval above 0 says Jev's
+readings carry information the combiner can use. A result here would be a
+lead, to be confirmed on a second seed or another test set before anyone
+relies on it.
+
 ## 9. Results log
 
 | Date | Step | Commit | Run | Test set | Macro AUROC [95% CI] | Classes | Notes |
