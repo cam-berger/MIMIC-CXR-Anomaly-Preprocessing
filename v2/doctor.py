@@ -180,7 +180,7 @@ def check_cohort(r: Report, cohort_dir: Optional[Path]) -> None:
 
 
 def check_context_sources(r: Report, out_dir: Path) -> None:
-    """M4 inputs (docs/V2_PLAN.md §6 M4). Only M4 needs them, so a missing source is a warning."""
+    """M4 inputs (docs/ANALYSIS.md, M4). Only M4 needs them, so a missing source is a warning."""
     r.section("M4 sources (text written before the X-ray)")
     from .context import Reports, find_csv
 
@@ -222,7 +222,7 @@ def check_context_sources(r: Report, out_dir: Path) -> None:
 
 
 def check_m4b(r: Report, out_dir: Path, mimic_root: Optional[Path]) -> None:
-    """M4b inputs (docs/V2_PLAN.md §6 M4b): prior-study labels in the context table, and room for the token cache."""
+    """M4b inputs (docs/ANALYSIS.md, M4b): prior-study labels in the context table, and room for the token cache."""
     r.section("M4b (text-steered attention, prior-study labels, val combiner)")
     from .common import mimic_csv
 
@@ -246,7 +246,7 @@ def check_m4b(r: Report, out_dir: Path, mimic_root: Optional[Path]) -> None:
 
 
 def check_m7(r: Report, mimic_root: Optional[Path]) -> None:
-    """M7 inputs (docs/V2_PLAN.md §6 M7), as counts: the radiologist's labels, the CheXpert test set, the fine-tunes."""
+    """M7 inputs (docs/ANALYSIS.md, M7), as counts: the radiologist's labels, the CheXpert test set, the fine-tunes."""
     r.section("M7 (a radiologist's labels; the CheXpert test set)")
     from .external import CANDIDATES, IMAGE_RE, PREFIX, RADIOLOGIST_FILE, _env_dir
 
@@ -277,7 +277,7 @@ def check_m7(r: Report, mimic_root: Optional[Path]) -> None:
 
 
 def check_m8(r: Report) -> None:
-    """M8 inputs on the Mac (docs/V2_PLAN.md §6 M8): seed 0's runs and the text to stack with, then M8's own runs."""
+    """M8 inputs on the Mac (docs/ANALYSIS.md, M8): seed 0's runs and the text to stack with, then M8's own runs."""
     r.section("M8 (a second seed; a longer fine-tune)")
     from .external import PREFIX, _env_dir
 

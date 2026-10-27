@@ -6,7 +6,6 @@ Implements multiple anomaly detection approaches:
 2. Embedding-based: Uses distance in latent space (k-NN, GMM)
 3. Ensemble: Combines multiple methods
 
-Based on MODEL_TRAINING_RESEARCH.md recommendations.
 """
 
 import logging

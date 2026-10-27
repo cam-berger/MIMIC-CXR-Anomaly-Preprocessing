@@ -25,6 +25,7 @@ import logging
 import math
 import zlib
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Optional, Sequence
 
 import torch
@@ -87,7 +88,7 @@ def eval_transform(kind: str, size: int, mean, std) -> T.Compose:
 
 
 def train_transform(size: int, mean, std) -> T.Compose:
-    """§6 M3 augmentation. No horizontal flip: it would move the heart."""
+    """M3 augmentation. No horizontal flip: it would move the heart."""
     return T.Compose([
         T.RandomRotation(10, interpolation=T.InterpolationMode.BILINEAR),
         T.RandomResizedCrop(size, scale=(0.8, 1.0), ratio=(0.75, 1.333),
@@ -296,6 +297,25 @@ def _from_pretrained(cls, repo_id: str):
     return model.eval()
 
 
+def hub_revision(repo_id: str, model=None, cache_dir: Optional[str] = None) -> Optional[str]:
+    """
+    The Hub commit the weights came from, so two runs can be checked for the same model. The pinned transformers
+    leaves config._commit_hash empty; the local cache names each snapshot folder after its commit.
+    """
+    commit = getattr(getattr(model, "config", None), "_commit_hash", None)
+    if commit:
+        return commit
+    try:
+        from huggingface_hub import try_to_load_from_cache
+
+        path = try_to_load_from_cache(repo_id, "config.json", cache_dir=cache_dir)
+    except Exception:  # no readable cache: the revision stays unrecorded
+        return None
+    if not isinstance(path, str) or Path(path).parent.parent.name != "snapshots":
+        return None
+    return Path(path).parent.name
+
+
 def _versions() -> dict:
     import transformers
 
@@ -340,7 +360,7 @@ def load_encoder(name: str, size: Optional[int] = None, device="cpu", pretrained
 
             model = _from_pretrained(Dinov2Model, spec.source)
             mean, std = _preprocessor_stats(spec.source, IMAGENET_MEAN, IMAGENET_STD)
-            enc = DinoEncoder(spec, size, model, mean, std, getattr(model.config, "_commit_hash", None))
+            enc = DinoEncoder(spec, size, model, mean, std, hub_revision(spec.source, model))
     elif spec.kind == "siglip":
         if spec.source == "random":
             model = _tiny_siglip()
@@ -353,7 +373,7 @@ def load_encoder(name: str, size: Optional[int] = None, device="cpu", pretrained
             model = _from_pretrained(SiglipModel, spec.source)
             tok = AutoTokenizer.from_pretrained(spec.source)
             mean, std = _preprocessor_stats(spec.source, (0.5,) * 3, (0.5,) * 3)
-            enc = SiglipEncoder(spec, size, model, tok, mean, std, getattr(model.config, "_commit_hash", None))
+            enc = SiglipEncoder(spec, size, model, tok, mean, std, hub_revision(spec.source, model))
     elif spec.kind == "densenet":
         from torchvision.models import DenseNet121_Weights, densenet121
 

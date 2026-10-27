@@ -102,10 +102,15 @@ def test_m8_stages_run_seed_1_the_long_run_and_the_report(tmp_path):
     calls, fake = tmp_path / "calls.txt", tmp_path / "python"
     fake.write_text(f'#!/usr/bin/env bash\nif [ "$1" = -c ]; then exec "{sys.executable}" "$@"; fi\necho "$*" >> "{calls}"\n')
     fake.chmod(0o755)
-    bench, ext, p = tmp_path / "bench", tmp_path / "ext", "rad-dino_518"
+    bench, ext, mimic, p = tmp_path / "bench", tmp_path / "ext", tmp_path / "mimic", "rad-dino_518"
     (bench / "predictions").mkdir(parents=True)
     (bench / "manifest.parquet").touch()
-    paths = {"BENCH_OUT": str(bench), "EXT_OUT": str(ext), "PYTHON": str(fake)}
+    mimic.mkdir()
+    paths = {"BENCH_OUT": str(bench), "EXT_OUT": str(ext), "PYTHON": str(fake), "MIMIC_CXR_JPG_PATH": str(mimic)}
+    res = _run(["m8"], tmp_path, **paths)
+    assert res.returncode != 0 and "mount the MIMIC drive" in res.stderr  # M7a's labels: checked first
+    labels = mimic / "mimic-cxr-2.1.0-test-set-labeled.csv"
+    labels.touch()
     res = _run(["m8"], tmp_path, **paths)
     assert res.returncode != 0 and "m8 needs m8_gpu's runs" in res.stderr
     res = _run(["m8_gpu"], tmp_path, **paths)
@@ -133,8 +138,8 @@ def test_m8_stages_run_seed_1_the_long_run_and_the_report(tmp_path):
     assert pairs == {(img, text) for img in new for text in texts if (img, text) != (new[1], texts[2])}
     assert lines[1].startswith(f"-m v2.external chexpert --steps apply --bench {bench} --out {ext} "
                                f"--candidates {','.join(new)} --workers ")
-    assert lines[2:] == [f"-m v2.replicate --bench {bench} --ext {ext}", f"-m v2.evaluate --all --out {bench}",
-                         f"-m v2.evaluate --all --out {ext}"]
+    assert lines[2:] == [f"-m v2.replicate --bench {bench} --ext {ext} --labels {labels}",
+                         f"-m v2.evaluate --all --out {bench}", f"-m v2.evaluate --all --out {ext}"]
 
 def test_m0_requires_the_data_path(tmp_path):
     env_file = ROOT / ".env"

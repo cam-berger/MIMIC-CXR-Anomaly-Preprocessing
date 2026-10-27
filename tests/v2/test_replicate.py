@@ -1,4 +1,4 @@
-"""M8: a second seed of the benchmark fine-tunes, and a longer fine-tune (docs/V2_PLAN.md §6 M8)."""
+"""M8: a second seed of the benchmark fine-tunes, and a longer fine-tune (docs/ANALYSIS.md, M8)."""
 
 import shutil
 
@@ -81,6 +81,13 @@ def test_replicate_flags_a_recipe_that_differs(m8, tmp_path):
     text = out["path"].read_text()
     assert "Not recomputed: G7" in text and "Not recomputed: M7a" in text and "DIFFERS" in text
     assert [c["verdict"][:11] for c in out["claims"][2:]] == ["not decided", "not decided"]
+    assert "Unchecked: revision isn't recorded" in text  # the tiny models have no Hub commit
+    for r, rev in ((run, "abd"), (f"{T}_ft_s0", "abc")):  # both recorded and different: a red flag
+        pred, meta = read_predictions(bench / "predictions" / f"{r}.parquet")
+        write_predictions(bench, r, pred["study_id"], pred["split"], pred[list(LABELS)].to_numpy(),
+                          {**meta, "config": {**meta["config"], "revision": rev}})
+    out = replicate.replicate(bench, None, None, prefix=T, n_boot=20)
+    assert any("revision abd against abc" in f for f in out["flags"])
 
 
 def test_combine_states_the_verdict_both_seeds_support():

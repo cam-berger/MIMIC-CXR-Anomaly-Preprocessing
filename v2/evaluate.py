@@ -1,5 +1,5 @@
 """
-Metrics for v2: the only place results are computed (docs/V2_PLAN.md §3.2).
+Metrics for v2: the only place results are computed (docs/ANALYSIS.md, Setup).
 
     python -m v2.evaluate --run rad-dino_224_probe       # one run -> reports/{run}.md/.json
     python -m v2.evaluate --all                          # every run + summary.md + gates
@@ -48,9 +48,9 @@ G1_THRESHOLD = 0.77
 EVAL_SETS = (("test_clean", "v2"), ("test_clean", "u0"), ("test_v1", "v2"), ("test_v1", "v1"), ("val", "v2"))
 MILESTONE = {"probe": "M1", "zero_shot": "M2", "finetune": "M3", "fuse": "M4", "attend": "M4b", "stack": "M4b",
              "text_finetune": "M6"}
-# §6 M4b: the attention head's image-only arm (h0) may trail the M1 probe on val by at most this much.
+# M4b: the attention head's image-only arm (h0) may trail the M1 probe on val by at most this much.
 G4B_HEAD_MARGIN = 0.02
-# Encoders whose test_v1 numbers are not reportable (§4): they may have trained on those images
+# Encoders whose test_v1 numbers are not reportable: they may have trained on those images
 # and their reports. They are shown, flagged, but never used for the gates.
 TEST_CLEAN_ONLY = {"medsiglip"}
 
@@ -194,14 +194,14 @@ def evaluate_set(
 
 
 def caveats(meta: dict) -> dict:
-    """Known pretraining exposure of each encoder to MIMIC-CXR test images (§4)."""
+    """Known pretraining exposure of each encoder to MIMIC-CXR test images."""
     encoder = meta.get("encoder", "")
     notes = {}
     if encoder == "rad-dino":
         notes["test_v1"] = "RAD-DINO saw these images (without labels) in pretraining: not a headline number."
     if encoder == "medsiglip":
         notes["test_v1"] = "MedSigLIP's MIMIC-CXR training split is undocumented: report test_clean only."
-        notes["test_clean"] = "Flagged: MedSigLIP's MIMIC-CXR training split is undocumented (§4)."
+        notes["test_clean"] = "Flagged: MedSigLIP's MIMIC-CXR training split is undocumented."
     return notes
 
 
@@ -414,7 +414,7 @@ def _get(report: dict, test_set: str, metric: str) -> Optional[dict]:
 
 def g4b(out_dir: Path, prefix: str, n_boot: int = N_BOOT, reports: Optional[dict] = None) -> dict:
     """
-    Gate G4b (§6 M4b): {prefix}_attn_h2 minus {prefix}_attn_h1 on test_clean. It is read only after the head
+    Gate G4b (M4b): {prefix}_attn_h2 minus {prefix}_attn_h1 on test_clean. It is read only after the head
     validity check passes: h0's val macro AUROC at least {prefix}_probe's minus G4B_HEAD_MARGIN.
     """
     reports = dict(reports or {})
@@ -486,14 +486,14 @@ def summarize(out_dir: Path, n_boot: int = N_BOOT, runs: Optional[list[str]] = N
             cells.append(fmt_ci(res["macro_auroc"], res["macro_auroc_ci"]) + mark if res else "-")
         lines.append(f"| {run} | {rep['meta'].get('kind', '?')} | " + " | ".join(cells) + " |")
     if flagged:
-        lines += ["", "† Not reportable (§4): MedSigLIP may have trained on these images and their reports. "
+        lines += ["", "† Not reportable: MedSigLIP may have trained on these images and their reports. "
                   "Flagged runs are never used for the gates."]
 
     checks = [(run, rep) for run, rep in reports.items() if rep.get("exposure_check") and _get(rep, "test_clean", "v2")]
     if checks:
         lines += ["", "## Exposure check (same classes on both test sets)", "",
                   "Macro AUROC over test_clean's measurable classes. A larger test_v1 - test_clean gap than "
-                  "DINOv2's suggests test_v1 is inflated by pretraining exposure (§3.1).", "",
+                  "DINOv2's suggests test_v1 is inflated by pretraining exposure.", "",
                   "| Run | test_clean | test_v1, same classes | Gap |", "|---|---|---|---|"]
         for run, rep in checks:
             clean, ex = _get(rep, "test_clean", "v2"), rep["exposure_check"]
@@ -513,17 +513,17 @@ def summarize(out_dir: Path, n_boot: int = N_BOOT, runs: Optional[list[str]] = N
         if not runs_of_kind:
             return f"no {kind} runs yet"
         if all(rep["meta"].get("encoder") in TEST_CLEAN_ONLY for rep in runs_of_kind):
-            return f"n/a: only flagged {kind} runs (§4), which the gates don't use"
+            return f"n/a: only flagged {kind} runs, which the gates don't use"
         return f"n/a: val has too few positives/negatives to pick a {kind} run"
 
     lines += ["", "## Gates", ""]
     scheme = split_scheme(out_dir)
     benchmark, external = scheme == "official", scheme == "external"
     if benchmark:
-        lines.append("- None here: this directory holds M5's benchmark (official split, §6 M5). G1-G4b are defined "
+        lines.append("- None here: this directory holds M5's benchmark (official split, M5). G1-G4b are defined "
                      "on the v2 cohort; the comparisons with published results are in reports/lineup.md.")
     elif external:
-        lines.append("- None here: this directory holds an external test set (§6 M7). Gate G7 is in "
+        lines.append("- None here: this directory holds an external test set (M7). Gate G7 is in "
                      "reports/m7b_chexpert.md.")
     else:
         best_probe = best("probe")
@@ -537,7 +537,7 @@ def summarize(out_dir: Path, n_boot: int = N_BOOT, runs: Optional[list[str]] = N
                 verdict = "PASS: rent the GPU for M3"
             else:
                 verdict = "FAIL: study per-class results first"
-            excluded = " (flagged encoders excluded, §4)" if any(
+            excluded = " (flagged encoders excluded)" if any(
                 r["meta"].get("encoder") in TEST_CLEAN_ONLY for r in reports.values()) else ""
             lines.append(f"- **G1** (best probe by val{excluded}: `{best_probe}`): "
                          f"{fmt_ci(res['macro_auroc'], res['macro_auroc_ci'])} on {where} vs {G1_THRESHOLD} -> **{verdict}**")
@@ -585,7 +585,7 @@ def summarize(out_dir: Path, n_boot: int = N_BOOT, runs: Optional[list[str]] = N
             lines.append(f"- **G4b** (`{gate['h2']}` - `{gate['h1']}` on test_clean): {diff} -> **{gate['verdict']}**. "
                          f"Head validity check: {gate['check']}.")
 
-    lines += ["", "## Rows for the results log (docs/V2_PLAN.md §9)", "", "```"]
+    lines += ["", "## One row per run and test set", "", "```"]
     today = date.today().isoformat()
     for run, rep in reports.items():
         meta = rep["meta"]

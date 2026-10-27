@@ -1,5 +1,5 @@
 """
-M6: a language model for the text written before the X-ray (docs/V2_PLAN.md §6 M6).
+M6: a language model for the text written before the X-ray (docs/ANALYSIS.md, M6).
 
     python -m v2.textenc --encoder biomedbert --out output/v2_bench
 

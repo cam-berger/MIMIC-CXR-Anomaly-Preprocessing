@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Run v2 stages with logs and time limits (docs/V2_PLAN.md §6, §8).
+# Run v2 steps with logs and time limits (v2/README.md; the steps are described in docs/ANALYSIS.md).
 #
 #   bash v2/scripts/run.sh m0             # data prep + audit (your machine, data drive attached)
 #   bash v2/scripts/run.sh m1 eval        # frozen embeddings + probes, then reports
@@ -189,7 +189,7 @@ stage_m4() {  # the plan's M4 uses the 518 px embeddings: on a Mac, run it as SI
   run m4_fuse "$PY" -m v2.fuse --embeddings "$emb" --out "$OUT"
 }
 
-stage_m4b() {  # docs/V2_PLAN.md §6 M4b, on the 518 px embeddings: on a Mac, SIZE=518 TOTAL_HOURS=8 bash v2/scripts/run.sh m4b eval
+stage_m4b() {  # docs/ANALYSIS.md, M4b, on the 518 px embeddings: on a Mac, SIZE=518 TOTAL_HOURS=8 bash v2/scripts/run.sh m4b eval
   : "${MIMIC_CXR_REPORTS_PATH:?m4b needs MIMIC_CXR_REPORTS_PATH (it may rebuild context.parquet)}"
   : "${MIMIC_IV_ED_PATH:?m4b needs MIMIC_IV_ED_PATH (it may rebuild context.parquet)}"
   : "${MIMIC_CXR_JPG_PATH:?m4b needs MIMIC_CXR_JPG_PATH (prior-study labels)}"
@@ -219,13 +219,13 @@ bench_dir_ok() {  # M5 writes its own manifest: never into v2.0's output dir
   fi
 }
 
-stage_bench() {  # docs/V2_PLAN.md §6 M5a. On a Mac: TOTAL_HOURS=20 bash v2/scripts/run.sh bench
+stage_bench() {  # docs/ANALYSIS.md, M5. On a Mac: TOTAL_HOURS=20 bash v2/scripts/run.sh bench
   : "${MIMIC_CXR_JPG_PATH:?bench needs MIMIC_CXR_JPG_PATH}"
   bench_dir_ok
   local emb="$BENCH_OUT/embeddings/rad-dino_518.npz"
   run --hours 6 bench_prepare "$PY" -m v2.prepare_data --mimic-cxr-jpg "$MIMIC_CXR_JPG_PATH" --population all \
     --split-scheme official --image-format jpg --out "$BENCH_OUT" --workers "$WORKERS"
-  # One pass writes the pooled embeddings and the 12 x 12 token cache (§6 M5 amendment).
+  # One pass writes the pooled embeddings and the 12 x 12 token cache (M5).
   run --hours 12 bench_embed "$PY" -m v2.embed --model rad-dino --size 518 --tokens 12 --with-pooled \
     --out "$BENCH_OUT" --workers "$WORKERS"
   run --hours 3 bench_probe "$PY" -m v2.probe --embeddings "$emb" --out "$BENCH_OUT"
@@ -245,7 +245,7 @@ stage_bench() {  # docs/V2_PLAN.md §6 M5a. On a Mac: TOTAL_HOURS=20 bash v2/scr
   echo "Lineup: $BENCH_OUT/reports/lineup.md; results-log rows: $BENCH_OUT/reports/summary.md"
 }
 
-stage_bench_ft() {  # docs/V2_PLAN.md §6 M5b and its amendment, on a GPU, with BENCH_OUT's manifest and images
+stage_bench_ft() {  # docs/ANALYSIS.md, M5, on a GPU, with BENCH_OUT's manifest and images
   bench_dir_ok
   [ -f "$BENCH_OUT/manifest.parquet" ] || { echo "!!! bench_ft needs $BENCH_OUT from the bench stage" >&2; exit 1; }
   local hours=${BENCH_FT_HOURS:-3} head seed name
@@ -264,7 +264,7 @@ stage_bench_ft() {  # docs/V2_PLAN.md §6 M5b and its amendment, on a GPU, with 
   done
 }
 
-stage_bench_stack() {  # docs/V2_PLAN.md §6 M5b amendment, on the Mac: text on every image run via the val combiner
+stage_bench_stack() {  # docs/ANALYSIS.md, M5, on the Mac: text on every image run via the val combiner
   bench_dir_ok
   local p=rad-dino_518 pred="$BENCH_OUT/predictions" img seed pairs=()
   [ -f "$pred/${p}_ctx_indication.parquet" ] || {
@@ -287,7 +287,7 @@ stage_bench_stack() {  # docs/V2_PLAN.md §6 M5b amendment, on the Mac: text on 
   echo "Lineup: $BENCH_OUT/reports/lineup.md; combiners: $BENCH_OUT/reports/m5_stack.md"
 }
 
-stage_bench_text() {  # docs/V2_PLAN.md §6 M6, on the Mac, after bench_stack
+stage_bench_text() {  # docs/ANALYSIS.md, M6, on the Mac, after bench_stack
   bench_dir_ok
   local p=rad-dino_518 pred="$BENCH_OUT/predictions" emb="$BENCH_OUT/embeddings/rad-dino_518.npz" enc img pairs=()
   local encoders=${TEXT_ENCODERS:-bert biomedbert clinicalbert}
@@ -324,14 +324,14 @@ stage_bench_text() {  # docs/V2_PLAN.md §6 M6, on the Mac, after bench_stack
   echo "M6: $BENCH_OUT/reports/m6_text.md (gate G6); lineup: $BENCH_OUT/reports/lineup.md"
 }
 
-stage_m7a() {  # docs/V2_PLAN.md §6 M7a: minutes, on the Mac
+stage_m7a() {  # docs/ANALYSIS.md, M7: minutes, on the Mac
   bench_dir_ok
   : "${MIMIC_CXR_JPG_PATH:?m7a needs MIMIC_CXR_JPG_PATH, the MIMIC-CXR-JPG 2.1.0 root with the radiologist labels}"
   run m7a "$PY" -m v2.external radiologist --bench "$BENCH_OUT"
   echo "M7a: $BENCH_OUT/reports/m7a_radiologist.md"
 }
 
-stage_m7b() {  # docs/V2_PLAN.md §6 M7b: under 30 min on the Mac, after the download
+stage_m7b() {  # docs/ANALYSIS.md, M7: under 30 min on the Mac, after the download
   bench_dir_ok
   : "${CHEXPERT_TEST_PATH:?m7b needs CHEXPERT_TEST_PATH (the CheXpert test images and groundtruth.csv)}"
   local d
@@ -347,7 +347,7 @@ stage_m7b() {  # docs/V2_PLAN.md §6 M7b: under 30 min on the Mac, after the dow
   echo "M7b: $EXT_OUT/reports/m7b_chexpert.md (gate G7)"
 }
 
-stage_m8_gpu() {  # docs/V2_PLAN.md §6 M8, on a GPU, with BENCH_OUT's manifest and images (as bench_ft)
+stage_m8_gpu() {  # docs/ANALYSIS.md, M8, on a GPU, with BENCH_OUT's manifest and images (as bench_ft)
   bench_dir_ok
   [ -f "$BENCH_OUT/manifest.parquet" ] || { echo "!!! m8_gpu needs $BENCH_OUT's manifest and images" >&2; exit 1; }
   local hours=${BENCH_FT_HOURS:-3} head name
@@ -368,8 +368,11 @@ stage_m8_gpu() {  # docs/V2_PLAN.md §6 M8, on a GPU, with BENCH_OUT's manifest 
     --resume
 }
 
-stage_m8() {  # docs/V2_PLAN.md §6 M8, on the Mac, once m8_gpu's runs are home
+stage_m8() {  # docs/ANALYSIS.md, M8, on the Mac, once m8_gpu's runs are home
   bench_dir_ok
+  : "${MIMIC_CXR_JPG_PATH:?m8 needs MIMIC_CXR_JPG_PATH: the radiologist labels for M7a are on the MIMIC drive}"
+  local labels="$MIMIC_CXR_JPG_PATH/mimic-cxr-2.1.0-test-set-labeled.csv"
+  [ -f "$labels" ] || { echo "!!! m8 needs $labels: mount the MIMIC drive" >&2; exit 1; }
   local p=rad-dino_518 pred="$BENCH_OUT/predictions" img text pairs=() applied=()
   for img in ft_attn_s1 ft_s1 ft_attn_e6_s0; do
     [ -f "$pred/${p}_$img.parquet" ] || continue
@@ -391,7 +394,7 @@ stage_m8() {  # docs/V2_PLAN.md §6 M8, on the Mac, once m8_gpu's runs are home
   else
     echo "--- m8: no CheXpert test set in $EXT_OUT (m7b makes it); G7 won't be recomputed"
   fi
-  run m8_report "$PY" -m v2.replicate --bench "$BENCH_OUT" --ext "$EXT_OUT"
+  run m8_report "$PY" -m v2.replicate --bench "$BENCH_OUT" --ext "$EXT_OUT" --labels "$labels"
   run bench_eval "$PY" -m v2.evaluate --all --out "$BENCH_OUT"
   if [ -f "$EXT_OUT/manifest.parquet" ]; then run m8_ext_eval "$PY" -m v2.evaluate --all --out "$EXT_OUT"; fi
   echo "M8: $BENCH_OUT/reports/m8_replication.md (red flags first)"

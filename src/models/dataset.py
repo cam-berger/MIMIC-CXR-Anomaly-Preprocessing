@@ -1,7 +1,7 @@
 """
 PyTorch Dataset for loading preprocessed MIMIC-CXR images from HDF5.
 
-Supports the preprocessed data format as documented in PREPROCESSED_DATA_SCHEMA.md:
+Supports the preprocessed data format documented in docs/V1.md:
 - images.h5: HDF5 file with images and index
 - structured.parquet: Clinical features (demographics, vitals, labs)
 - text.parquet: Radiology reports and summaries

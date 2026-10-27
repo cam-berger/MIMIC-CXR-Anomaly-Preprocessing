@@ -1,5 +1,5 @@
 """
-M4 inputs: what was written before each X-ray (docs/V2_PLAN.md §6 M4).
+M4 inputs: what was written before each X-ray (docs/ANALYSIS.md, M4).
 
     python -m v2.context --reports /path/to/mimic-cxr-reports.zip --mimic-iv-ed /path/to/mimic-iv-ed/2.2
 
@@ -362,7 +362,7 @@ def build_audit(ctx: pd.DataFrame, stats: dict) -> dict:
 def audit_markdown(audit: dict) -> str:
     cols = ["studies", *TEXT_SOURCES, "vitals", "prior_labels"]
     lines = ["# M4 context audit", "",
-             "Pre-imaging inputs per study (docs/V2_PLAN.md §6 M4). Counts only; the text stays in context.parquet.", "",
+             "Pre-imaging inputs per study (docs/ANALYSIS.md, M4). Counts only; the text stays in context.parquet.", "",
              f"Sources found: {', '.join(k for k, v in audit['sources'].items() if v) or 'none'}. "
              f"Missing: {', '.join(k for k, v in audit['sources'].items() if not v) or 'none'}.", "",
              "## Coverage (share of studies with each input)", "",

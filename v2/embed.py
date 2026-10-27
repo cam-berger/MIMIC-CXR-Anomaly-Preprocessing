@@ -1,5 +1,5 @@
 """
-M1: frozen embeddings for every manifest study (docs/V2_PLAN.md §6).
+M1: frozen embeddings for every manifest study (docs/ANALYSIS.md).
 
     python -m v2.embed --model rad-dino --size 224        # CPU/MPS pilot
     python -m v2.embed --model rad-dino --size 518        # GPU

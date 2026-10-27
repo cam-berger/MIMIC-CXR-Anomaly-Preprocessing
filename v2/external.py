@@ -1,5 +1,5 @@
 """
-M7: external validation (docs/V2_PLAN.md §6 M7). Nothing is trained here.
+M7: external validation (docs/ANALYSIS.md, M7). Nothing is trained here.
 
     python -m v2.external radiologist --bench output/v2_bench                      # M7a
     python -m v2.external chexpert --chexpert DIR --bench output/v2_bench --out output/v2_chexpert   # M7b
@@ -56,7 +56,7 @@ from .evaluate import N_BOOT, _get, compare_labels, compare_runs, evaluate_run, 
 logger = logging.getLogger("v2.external")
 
 PREFIX = "rad-dino_518"
-CANDIDATES = ("probe", "ft_s0", "ft_attn_s0")  # §6 M7: the primary image model P is the best of these by val
+CANDIDATES = ("probe", "ft_s0", "ft_attn_s0")  # M7: the primary image model P is the best of these by val
 STACK, STACK_IMAGE = "ft_attn_s0_stack_indication_bert", "ft_attn_s0"  # M6's adopted image + indication system
 EXTERNAL = "external"  # split_scheme of an external test set's output dir
 
@@ -98,7 +98,7 @@ def val_score(out_dir: Path, run: str, manifest: pd.DataFrame, frozen: dict) -> 
 
 
 def pick_primary(bench: Path, candidates: list) -> tuple[Optional[str], dict]:
-    """§6 M7: of the candidate image runs, the one with the best benchmark val score; and every score."""
+    """M7: of the candidate image runs, the one with the best benchmark val score; and every score."""
     manifest, frozen = load_manifest(bench), load_measurable(bench)
     scores = {run: val_score(bench, run, manifest, frozen) for run in candidates if _exists(bench, run)}
     finite = {run: s for run, s in scores.items() if np.isfinite(s)}
@@ -152,7 +152,7 @@ def radiologist_manifests(bench: Path, rad: pd.DataFrame) -> tuple[pd.DataFrame,
 
 
 def joint_classes(labeler: pd.DataFrame, reader: pd.DataFrame, min_count: int = MIN_COUNT) -> dict:
-    """§6 M7a: per policy, the classes measurable under both sets of labels on the radiologist's studies."""
+    """M7a: per policy, the classes measurable under both sets of labels on the radiologist's studies."""
     out = {}
     for metric in ("v2", "u0"):
         a = set(measurable(label_matrix(labeler[labeler["in_test_clean"]]), metric, min_count))
@@ -185,7 +185,7 @@ def radiologist_report(bench: Path, labels_path: Path, prefix: str = PREFIX, can
              + (f"; {info['not_in_benchmark_test']} are not (no frontal image, or not in the split)"
                 if info["not_in_benchmark_test"] else "") + ". The radiologist read the same reports as the "
              "labeler, so these numbers measure the labeler's errors, not disagreement between report and image "
-             "(docs/V2_PLAN.md §6 M7).", "",
+             "(docs/ANALYSIS.md, M7).", "",
              "Classes measurable under both sets of labels: v2 policy " + (", ".join(frozen["test_clean:v2"]) or "none")
              + "; positive vs rest " + (", ".join(frozen["test_clean:u0"]) or "none") + "."]
     if renamed:
@@ -254,7 +254,7 @@ def radiologist_report(bench: Path, labels_path: Path, prefix: str = PREFIX, can
                 if frozen[f"test_clean:{metric}"] else None
             cells.append(fmt_ci(res["macro_auroc"], res["macro_auroc_ci"]) if res else "-")
         lines.append(f"| `{path.stem}` | " + " | ".join(cells) + " |")
-    lines += ["", f"Power (§6 M7): {info['in_official_test']:,} studies from {info['patients']:,} patients give "
+    lines += ["", f"Power (M7): {info['in_official_test']:,} studies from {info['patients']:,} patients give "
               "intervals of roughly ±0.02-0.03, so this can show a large effect, not confirm a small one."]
     out = bench / "reports" / "m7a_radiologist.md"
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -318,7 +318,7 @@ def label_files_agree(a: pd.DataFrame, b: pd.DataFrame) -> dict:
 
 def find_images(root: Path, studies: set) -> tuple[pd.DataFrame, dict]:
     """
-    The frontal image of each labeled study: the frontal view with the lowest view number (§6 M7). Files of
+    The frontal image of each labeled study: the frontal view with the lowest view number (M7). Files of
     other studies (the validation set's, say) are ignored; a copy under a test/ folder wins over one elsewhere.
     """
     rows = []
@@ -343,7 +343,7 @@ def find_images(root: Path, studies: set) -> tuple[pd.DataFrame, dict]:
 
 
 def rad_dino_exposure(source: str, patients: set) -> Optional[dict]:
-    """CheXpert rows of RAD-DINO's training_images.csv, and how many come from these test patients (§6 M7)."""
+    """CheXpert rows of RAD-DINO's training_images.csv, and how many come from these test patients (M7)."""
     if source == "skip":
         return None
     if source == "auto":
@@ -373,7 +373,7 @@ def guard_external(out_dir: Path, bench: Path) -> None:
 def prepare_chexpert(root: Path, out_dir: Path, bench: Path, rad_dino_list: str = "auto", workers: int = 4,
                      image_size: Optional[int] = None, image_format: Optional[str] = None,
                      min_count: int = MIN_COUNT, max_unreadable: float = 0.005) -> dict:
-    """§6 M7b: manifest, images, measurable classes and audit for the CheXpert test set, in its own directory."""
+    """M7b: manifest, images, measurable classes and audit for the CheXpert test set, in its own directory."""
     from .prepare_data import measurable_sets, write_images
 
     root, out_dir, bench = Path(root), Path(out_dir), Path(bench)
@@ -386,7 +386,7 @@ def prepare_chexpert(root: Path, out_dir: Path, bench: Path, rad_dino_list: str 
     gt = find_one(root, "groundtruth.csv")
     if gt is None:
         raise SystemExit(f"no groundtruth.csv under {root}: download it from github.com/rajpurkarlab/"
-                         "cheXpert-test-set-labels (§6 M7)")
+                         "cheXpert-test-set-labels (M7)")
     labels = read_chexpert_labels(gt)
     other = find_one(root, "test_labels.csv")
     agreement = label_files_agree(labels, read_chexpert_labels(other)) if other else None
@@ -395,11 +395,11 @@ def prepare_chexpert(root: Path, out_dir: Path, bench: Path, rad_dino_list: str 
     pick, counts = find_images(root, set(labels["study_id"]))
     if counts["image_files"] == 0:
         raise SystemExit(f"no CheXpert test images under {root} for the {len(labels)} studies in groundtruth.csv: "
-                         "download them first (§6 M7)")
+                         "download them first (M7)")
     exposure = rad_dino_exposure(rad_dino_list, set(labels["subject_id"]))
     if exposure and exposure["test_patients_in_list"]:
         raise SystemExit(f"RED FLAG: RAD-DINO's training list holds {exposure['test_images_in_list']} images of "
-                         f"{exposure['test_patients_in_list']} CheXpert test patients: stop (§6 M7)")
+                         f"{exposure['test_patients_in_list']} CheXpert test patients: stop (M7)")
     if exposure is None:
         logger.warning("RAD-DINO's training list was not checked (--rad-dino-list skip)")
 
@@ -488,7 +488,7 @@ def apply_probe(bench: Path, out_dir: Path, run: str, workers: int, device: str,
     diff = float(np.max(np.abs(refit - stored))) if len(rows) else float("nan")
     if not diff <= REPRODUCE_TOL:
         raise SystemExit(f"RED FLAG: the refit {run} differs from its benchmark predictions by up to {diff:.2e}: "
-                         "stop (§6 M7)")
+                         "stop (M7)")
     logger.info("%s refit at its chosen C: largest difference from its benchmark predictions %.1e", run, diff)
     del X_tr, X_va, X_te, parts
 
@@ -606,7 +606,7 @@ def chexpert_report(bench: Path, out_dir: Path, candidates: list, n_boot: int = 
 
     n = audit["sizes"]["test_clean"]
     lines = [f"# M7b: the CheXpert test set ({n['studies']:,} studies)", "",
-             f"External and image only (docs/V2_PLAN.md §6 M7): {n['studies']:,} Stanford studies from "
+             f"External and image only (docs/ANALYSIS.md, M7): {n['studies']:,} Stanford studies from "
              f"{n['patients']:,} patients, one frontal image each; ground truth from the majority vote of 5 "
              "radiologists. Nothing was trained or chosen on this set.", "", "## Red flags (read these first)", ""]
     lines += [f"- **RED FLAG:** {f}" for f in flags] or ["- none"]
@@ -671,7 +671,7 @@ def chexpert_report(bench: Path, out_dir: Path, candidates: list, n_boot: int = 
                   f"`{primary}`'s five-finding mean on MIMIC's official test: v2 policy "
                   f"{fmt_ci(mimic['v2']['macro_auroc'], mimic['v2']['macro_auroc_ci'])}, positive vs rest "
                   f"{fmt_ci(mimic['u0']['macro_auroc'], mimic['u0']['macro_auroc_ci'])}; on the CheXpert test set {here}."]
-    lines += ["", "Caveat (§6 M7): RAD-DINO pretrained on CheXpert's training and validation images from this "
+    lines += ["", "Caveat (M7): RAD-DINO pretrained on CheXpert's training and validation images from this "
               "hospital, without labels and without this test set, so M7b tests how heads trained on MIMIC's labels "
               "transfer with an encoder that knows the domain. CheXzero's encoder didn't."]
     out = out_dir / "reports" / "m7b_chexpert.md"
@@ -695,7 +695,7 @@ def main(argv: Optional[list[str]] = None) -> dict:
         p.add_argument("--candidates", help="comma-separated image runs P is chosen from (default: the prefix's "
                                             + ", ".join(CANDIDATES) + ")")
         p.add_argument("--n-boot", type=int, default=N_BOOT)
-        p.add_argument("--min-count", type=int, default=MIN_COUNT, help="Measurable-class threshold (§3.2)")
+        p.add_argument("--min-count", type=int, default=MIN_COUNT, help="Measurable-class threshold")
         p.add_argument("-v", "--verbose", action="store_true")
         if name == "radiologist":
             p.add_argument("--labels", help=f"the radiologist's labels (default: MIMIC_CXR_JPG_PATH/{RADIOLOGIST_FILE})")

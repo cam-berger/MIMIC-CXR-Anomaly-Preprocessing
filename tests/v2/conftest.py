@@ -70,7 +70,7 @@ def bench(synth, tmp_path_factory) -> Path:
     prepare_data.main(["--mimic-cxr-jpg", str(synth.mimic_root), "--out", str(out), "--population", "all",
                        "--split-scheme", "official", "--image-format", "jpg", "--image-size", "48", "--workers", "0",
                        "--min-count", "3", "--rad-dino-list", str(synth.rad_dino_list)])
-    # One pass for the embeddings and the tokens, as run.sh bench does (§6 M5 amendment).
+    # One pass for the embeddings and the tokens, as run.sh bench does (M5).
     embed.main(["--model", "test-pixels", "--tokens", "12", "--with-pooled", "--out", str(out), "--workers", "0"])
     emb = out / "embeddings" / "test-pixels_48.npz"
     probe.main(["--embeddings", str(emb), "--out", str(out), "--jobs", "1"])

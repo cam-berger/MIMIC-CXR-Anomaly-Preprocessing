@@ -1,5 +1,5 @@
 """
-M6: fine-tune a language model on one text source (docs/V2_PLAN.md §6 M6).
+M6: fine-tune a language model on one text source (docs/ANALYSIS.md, M6).
 
     python -m v2.textft --encoder biomedbert --out output/v2_bench        # the indication, seed 0
     python -m v2.textft --report --out output/v2_bench                    # reports/m6_text.md and gate G6
@@ -43,7 +43,7 @@ logger = logging.getLogger("v2.textft")
 
 @dataclass(frozen=True)
 class TextRecipe:
-    """The pre-registered fine-tuning recipe (§6 M6)."""
+    """The pre-registered fine-tuning recipe (M6)."""
 
     lr: float = 2e-5
     weight_decay: float = 0.01
@@ -147,7 +147,7 @@ def fit_text(enc: TextEncoder, texts: list[str], raw: np.ndarray, split: np.ndar
 
 
 # ---------------------------------------------------------------------------
-# Report: gate G6 and the comparisons (§6 M6)
+# Report: gate G6 and the comparisons (M6)
 # ---------------------------------------------------------------------------
 
 def ft_run(encoder: str, source: str = "indication", seed: int = 0) -> str:
@@ -188,7 +188,7 @@ def write_report(out_dir: Path, prefix: str = "rad-dino_518", image_run: str = "
     lm = [e for e in TEXT_ENCODERS if exists(ft_run(e)) or exists(f"{prefix}_ctx_indication_{e}")]
     lines = [f"# M6: a language model for the pre-imaging text ({prefix})", "",
              "Macro AUROC [95% patient-bootstrap CI] on the official test split, v2 policy unless noted; "
-             "differences are paired (docs/V2_PLAN.md §6 M6).", "", "## Red flags (read these first)", ""]
+             "differences are paired (docs/ANALYSIS.md, M6).", "", "## Red flags (read these first)", ""]
     image = res(f"{prefix}_ctx_image")
     flags = []
     for e in lm:
@@ -252,7 +252,7 @@ def write_report(out_dir: Path, prefix: str = "rad-dino_518", image_run: str = "
     for run, how in stacks:
         lines.append(f"| `{run}`{' **(best by val)**' if run == best else ''} | {how} | {cell(res(run, 'val'))} | "
                      f"{cell(res(run))} | {cell(res(run, metric='u0'))} |")
-    lines += ["", f"Adoption rule (§6 M6): the text representation for later work is the one behind the stack with "
+    lines += ["", f"Adoption rule (M6): the text representation for later work is the one behind the stack with "
               f"the best val score: **{'TF-IDF' if best == base else best or '-'}**. MMBT, published: 0.794."]
 
     lines += ["", "## All earlier text, frozen encoders", "", "| Run | val | Official test | Positive vs rest |",
@@ -273,7 +273,7 @@ def write_report(out_dir: Path, prefix: str = "rad-dino_518", image_run: str = "
             theirs = bert_pub.per_class.get(label)
             if theirs is not None:
                 lines.append(f"| {label} | {per[label]:.3f} | {theirs:.3f} | {per[label] - theirs:+.3f} |")
-    lines += ["", "Caveat (§6 M6): `clinicalbert` was pretrained on MIMIC-III notes, which may include some of these "
+    lines += ["", "Caveat (M6): `clinicalbert` was pretrained on MIMIC-III notes, which may include some of these "
               "patients' reports as unlabeled text; read a large lead for it alone with suspicion."]
     path = Path(out_dir) / "reports" / "m6_text.md"
     path.parent.mkdir(parents=True, exist_ok=True)
