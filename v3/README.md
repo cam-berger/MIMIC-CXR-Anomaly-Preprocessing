@@ -69,6 +69,9 @@ predictions (§6). The failed study IDs go to `V3_OUT/logs/`, and a re-run retri
 | `predictions/jev_*.parquet` | v2's prediction format, one row per study and finding | **no** (record-level) |
 | `jev_cache/*.jsonl` | Jev's answers per study | **no** (record-level) |
 | `logs/*_failures.csv` | Study IDs without an answer | **no** (record-level) |
+| `retrain/targets.parquet` | v3.8's training targets per study | **no** (record-level; goes to the GPU box only) |
+| `runs/ft213k_*/` | v3.8's checkpoints and their settings | **no** (trained on MIMIC) |
+| `reports/v3_retrain*.md` | v3.8's targets summary, gates L4 and L5 | yes (aggregate) |
 | `manifest.parquet`, `context.parquet`, `images`, v2 runs | Links into `BENCH_OUT` | **no** |
 
 ## 4. MIMIC data
@@ -127,3 +130,49 @@ python -m v3.label run --split train --limit 20000 --model MODEL
 python -m v3.label run --split val --model MODEL
 python -m v3.downstream --model MODEL --labels output/mimic-cxr-2.1.0-test-set-labeled.csv   # -> reports/v3_downstream.md
 ```
+
+## 8. Jev's labels for the main model (v3.8, docs/V3_PLAN.md §8h)
+
+Jev labels the rest of the training split, then M5b's RAD-DINO fine-tune is trained three ways on all of it
+(the CheXpert labeler, the labeler with the hierarchy rule, Jev's soft labels), with seeds 0 and 1, and judged on
+both radiologist sets (gates L4 and L5). `v2.finetune` runs unchanged; only its targets differ.
+
+1. **The labels** (Mac; sends report text to TypeSafe; about 193,000 requests and 3 hours at 4 in flight; cached and
+   resumable, so run it again after an interruption or to retry failures):
+   ```bash
+   python -m v3.label run --split train --all --model jev-1.14.0     # -> reports/v3_label_train_all.md
+   ```
+2. **The targets** (Mac, local). Check the coverage in the report before renting a GPU:
+   ```bash
+   python -m v3.retrain targets --model jev-1.14.0                  # -> reports/v3_retrain_targets.md
+   ```
+3. **The GPU session.** Set up the box as in `v2/README.md` §3 (steps 1-2) on branch `v3`, then upload the
+   benchmark's manifest and images, as for M5, and the targets file. Plain `rsync -a` prints nothing per file:
+   ```bash
+   ssh <gpu> 'mkdir -p MIMIC-CXR-Anomaly-Preprocessing/output/v2_bench MIMIC-CXR-Anomaly-Preprocessing/output/v3/retrain'
+   rsync -a output/v2_bench/manifest.parquet output/v2_bench/measurable_classes.json output/v2_bench/audit.json \
+       output/v2_bench/images <gpu>:MIMIC-CXR-Anomaly-Preprocessing/output/v2_bench/
+   rsync -a output/v3/retrain/targets.parquet output/v3/retrain/targets.json \
+       <gpu>:MIMIC-CXR-Anomaly-Preprocessing/output/v3/retrain/
+   ```
+   On the box, inside `tmux` (a smoke run on 64 studies, then the six runs, about 55 minutes each on a GH200; run
+   the same command again to resume; add `--batch-size 8 --accum 4` under 40 GB):
+   ```bash
+   python -m v3.retrain gpu --bench output/v2_bench --out output/v3 2>&1 | tee output/v3_retrain_gpu.log
+   ```
+4. **Bring home** the six runs only, then delete the data and the instance:
+   ```bash
+   ssh <gpu> 'cd MIMIC-CXR-Anomaly-Preprocessing/output/v3 && tar -czf ../v38.tgz predictions/ft213k_*_s[01].* \
+       runs/ft213k_*_s[01]/best.pt runs/ft213k_*_s[01]/*.json'
+   scp <gpu>:MIMIC-CXR-Anomaly-Preprocessing/output/v38.tgz output/
+   tar -xzf output/v38.tgz -C output/v3 && rm output/v38.tgz
+   ssh <gpu> 'rm -rf MIMIC-CXR-Anomaly-Preprocessing/output'
+   ```
+5. **The CheXpert test images and the report** (Mac; `apply` checks that each checkpoint gives back its own
+   benchmark predictions first):
+   ```bash
+   python -m v3.retrain apply
+   python -m v3.retrain report --labels output/mimic-cxr-2.1.0-test-set-labeled.csv   # -> reports/v3_retrain.md
+   ```
+
+The paths above assume `BENCH_OUT=output/v2_bench` and `V3_OUT=output/v3`; use yours if they differ.

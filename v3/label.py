@@ -6,6 +6,7 @@ v3.3 (docs/V3_PLAN.md §8c): Jev as a report labeler, scored against a radiologi
     python -m v3.label report                                      # -> reports/v3_label.md (gate L1)
     python -m v3.label run --split train --limit 20000 --model MODEL   # v3.5's training labels (cache only)
     python -m v3.label run --split val --model MODEL                   # v3.5's val labels (cache only)
+    python -m v3.label run --split train --all --model MODEL           # v3.8: the whole training split (cache only)
 
 Jev reads each study's own report (FINDINGS and IMPRESSION, v2.context.prior_text) and answers 12 three-way
 questions. Its answers and the CheXpert labeler's labels on the same studies become v2 prediction files
@@ -49,6 +50,7 @@ RUNS = {"labeler_chexpert": "the CheXpert labeler (comparator)", "labeler_jev": 
         "labeler_jev_prob": "Jev's probabilities (secondary)"}
 RED_FLAG = 0.70  # §8c: the CheXpert labeler below this against the radiologist means misaligned studies or labels
 PREAMBLE = "Findings and impression from the radiologist's report of a chest X-ray:"
+CHUNK = 5000  # reports read and asked at a time: v3.8's 193k never sit in memory at once
 
 
 def questions() -> dict:
@@ -110,7 +112,7 @@ def radiologist_set(out_dir: Path, labels_path: Path) -> tuple[pd.DataFrame, pd.
 def target_rows(out_dir: Path, split: str, labels_path: Optional[Path], limit: Optional[int] = None) -> pd.DataFrame:
     """
     test: the radiologist's official-test studies (v3.3); val: val studies (a pilot, or v3.5's val labels); train:
-    v3.5's sample of training studies. With `limit`, a sample of that size with a fixed seed. One row per study.
+    every training study (v3.8), or with `limit` v3.5's sample of that size with a fixed seed. One row per study.
     """
     if split == "test":
         _, reader, _, _ = radiologist_set(out_dir, labels_path)
@@ -140,9 +142,9 @@ def report_texts(rows: pd.DataFrame, reports_path: Path) -> dict[int, str]:
 
 
 def run(out_dir: Path, split: str, client: JevClient, reports_path: Path, labels_path: Path,
-        limit: Optional[int] = None, concurrency: int = 4) -> dict:
-    if split == "train" and limit is None:
-        raise SystemExit("train needs --limit: v3.5 labels a fixed-seed sample of 20,000 training studies (§8e)")
+        limit: Optional[int] = None, concurrency: int = 4, every: bool = False) -> dict:
+    if split == "train" and (limit is None) == (not every):
+        raise SystemExit("train needs --limit (v3.5's fixed-seed sample, §8e) or --all (v3.8's whole split, §8h)")
     rows = target_rows(out_dir, split, labels_path, limit)
     path = cache_path(out_dir, client.model)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -151,26 +153,29 @@ def run(out_dir: Path, split: str, client: JevClient, reports_path: Path, labels
     logger.info("labeler on %s: %d studies, %d already answered, %d to ask (model %s, prompt %s)", split, len(rows),
                 len(rows) - len(todo), len(todo), client.model, label_hash())
     qs, names = questions(), [prompt.question_name(label) for label in LABELS]
-    texts = report_texts(todo, reports_path) if len(todo) else {}
     failures: dict[int, str] = {}
+    done = 0
     with ThreadPoolExecutor(max_workers=concurrency) as pool, path.open("a") as f:
-        futures = {pool.submit(client.ask, render_state(text), qs): sid for sid, text in texts.items()}
-        for done, fut in enumerate(as_completed(futures), 1):
-            if done % 1000 == 0:
-                logger.info("labeler on %s: %d of %d asked (%d failed)", split, done, len(futures), len(failures))
-            sid = futures[fut]
-            try:
-                ans = fut.result()
-            except JevError as exc:
-                failures[sid] = str(exc.status or "network")
-                continue
-            rec = {"study_id": sid, "model": ans.model, "choices": [ans.scores[n]["choice"] for n in names],
-                   "probs": [[ans.scores[n]["probabilities"][o] for o in OPTIONS] for n in names],
-                   "scores": [LEVEL[ans.scores[n]["choice"]] for n in names],  # for run.summarize
-                   "usage": ans.usage, "latency": round(ans.latency, 3), "empty_report": not texts[sid].strip()}
-            f.write(json.dumps(rec) + "\n")
-            f.flush()
-            cache[sid] = rec
+        for start in range(0, len(todo), CHUNK):
+            texts = report_texts(todo.iloc[start:start + CHUNK], reports_path)
+            futures = {pool.submit(client.ask, render_state(text), qs): sid for sid, text in texts.items()}
+            for fut in as_completed(futures):
+                done += 1
+                if done % 1000 == 0:
+                    logger.info("labeler on %s: %d of %d asked (%d failed)", split, done, len(todo), len(failures))
+                sid = futures[fut]
+                try:
+                    ans = fut.result()
+                except JevError as exc:
+                    failures[sid] = str(exc.status or "network")
+                    continue
+                rec = {"study_id": sid, "model": ans.model, "choices": [ans.scores[n]["choice"] for n in names],
+                       "probs": [[ans.scores[n]["probabilities"][o] for o in OPTIONS] for n in names],
+                       "scores": [LEVEL[ans.scores[n]["choice"]] for n in names],  # for run.summarize
+                       "usage": ans.usage, "latency": round(ans.latency, 3), "empty_report": not texts[sid].strip()}
+                f.write(json.dumps(rec) + "\n")
+                f.flush()
+                cache[sid] = rec
     stats = summarize(rows, cache, failures)
     answered = [cache[s] for s in rows["study_id"] if s in cache]
     stats.update({"split": split, "requested_model": client.model, "prompt_hash": label_hash(),
@@ -190,7 +195,9 @@ def run(out_dir: Path, split: str, client: JevClient, reports_path: Path, labels
         stats["predictions"] = write_label_predictions(out_dir, rows, cache, client.model)
     elif split == "val" and limit is not None:
         stats["report"] = str(write_pilot(out_dir, stats))
-    else:  # v3.5's training and val labels: the cache is the output, the report holds aggregates
+    elif split == "train" and every:  # v3.8's training labels: the cache is the output, the report holds aggregates
+        stats["report"] = str(write_pilot(out_dir, stats, "v3_label_train_all.md", "v3.8 labels"))
+    else:  # v3.5's training and val labels
         stats["report"] = str(write_pilot(out_dir, stats, f"v3_label_{split}.md"))
     return stats
 
@@ -215,7 +222,7 @@ def write_label_predictions(out_dir: Path, rows: pd.DataFrame, cache: dict, mode
     return list(RUNS)
 
 
-def write_pilot(out_dir: Path, stats: dict, name: str = "v3_label_pilot.md") -> Path:
+def write_pilot(out_dir: Path, stats: dict, name: str = "v3_label_pilot.md", title: Optional[str] = None) -> Path:
     path = Path(out_dir) / "reports" / name
     path.parent.mkdir(parents=True, exist_ok=True)
     shares = ", ".join(f"{o} {v:.1%}" for o, v in stats["choice_shares"].items())
@@ -227,10 +234,9 @@ def write_pilot(out_dir: Path, stats: dict, name: str = "v3_label_pilot.md") -> 
             ("Input tokens, total / mean per study", f"{stats['input_tokens']:,} / {stats['mean_input_tokens']}"),
             ("Latency per request, median / p90 (s)", f"{stats['latency_median']} / {stats['latency_p90']}"),
             ("Jev's choices over all 12 findings", shares)]
-    title = ("v3.3 pilot: Jev as a report labeler" if name == "v3_label_pilot.md" else
-             "v3.5 labels: Jev as a report labeler")
-    lines = [f"# {title}, on {stats['split']}", "",
-             "Aggregates only (docs/V3_PLAN.md §8c, §8e); no metric here.", "", "| | |", "|---|---|"]
+    title = title or ("v3.3 pilot" if name == "v3_label_pilot.md" else "v3.5 labels")
+    lines = [f"# {title}: Jev as a report labeler, on {stats['split']}", "",
+             "Aggregates only (docs/V3_PLAN.md §8c, §8e, §8h); no metric here.", "", "| | |", "|---|---|"]
     lines += [f"| {k} | {v} |" for k, v in rows]
     path.write_text("\n".join(lines) + "\n")
     return path
@@ -307,6 +313,7 @@ def main(argv: Optional[list[str]] = None) -> dict:
     p_run = sub.add_parser("run", help="Ask Jev to label reports")
     p_run.add_argument("--split", choices=["test", "val", "train"], default="test")
     p_run.add_argument("--limit", type=int, help="A pilot: this many studies, sampled with a fixed seed")
+    p_run.add_argument("--all", action="store_true", dest="every", help="--split train: every training study (v3.8)")
     p_run.add_argument("--model", required=True, help="A pinned Jev version")
     p_run.add_argument("--concurrency", type=int, default=4)
     p_rep = sub.add_parser("report", help="Score the labelers against the radiologist (gate L1)")
@@ -323,7 +330,10 @@ def main(argv: Optional[list[str]] = None) -> dict:
         if args.model in ALIASES:
             raise SystemExit(f"{args.model} is an alias that can change under a run: pin a version (§3)")
         reports, labels = resolve_paths(args.reports, args.labels, need_labels=args.split == "test")
-        return run(out_dir, args.split, JevClient(args.model), reports, labels, args.limit, args.concurrency)
+        if args.every and (args.split != "train" or args.limit is not None):
+            raise SystemExit("--all is for --split train, without --limit")
+        return run(out_dir, args.split, JevClient(args.model), reports, labels, args.limit, args.concurrency,
+                   args.every)
     labels = resolve_paths(args.reports, args.labels, need_reports=False)[1]
     result = build_report(out_dir, labels, args.n_boot)
     path = write_report(out_dir, result)

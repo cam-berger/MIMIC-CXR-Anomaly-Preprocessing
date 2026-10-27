@@ -38,7 +38,10 @@ REFERENCE = downstream.REFERENCE  # M7b applied v2's full-data probe to this set
 
 
 def chexpert_dir(out_dir: Path, ext: Path) -> Path:
-    """V3_OUT/chexpert: links to EXT_OUT's manifest, frozen classes and audit (and M7b's reference probe)."""
+    """
+    V3_OUT/chexpert: links to EXT_OUT's manifest, frozen classes and audit (and M7b's reference probe), and to its
+    images when they are there (v3.8 applies fine-tuned checkpoints to them).
+    """
     ext, d = Path(ext).resolve(), Path(out_dir).absolute() / "chexpert"
     missing = [n for n in LINKS if not (ext / n).exists()]
     if missing:
@@ -46,6 +49,8 @@ def chexpert_dir(out_dir: Path, ext: Path) -> Path:
     (d / "predictions").mkdir(parents=True, exist_ok=True)
     for name in LINKS:
         _link(ext / name, d / name)
+    if (ext / "images").exists():
+        _link(ext / "images", d / "images")
     for suffix in (".parquet", ".json"):
         src = ext / "predictions" / f"{REFERENCE}{suffix}"
         if src.exists():

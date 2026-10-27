@@ -48,6 +48,10 @@ Results:
   CheXpert test set (L3 passes). The CheXpert hierarchy applied to the
   labeler's own labels recovers +0.053 of that with no Jev; Jev adds +0.012
   [0.004, 0.019] beyond it (v3.5-v3.7). Read it as a label-definition effect.
+- v3.8 (`v3/retrain.py`, §8h, pre-registered, not run yet): Jev's labels on
+  the whole training split as targets for M5b's fine-tune, against the
+  CheXpert labels and the hierarchy rule, two seeds, gates L4 and L5. The user
+  runs the labeling and the GPU session (`v3/README.md` §8).
 
 Rules:
 - v3 reuses v2 unchanged. It works in its own output dir `V3_OUT`, which

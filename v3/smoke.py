@@ -257,6 +257,53 @@ def check_labels(out: Path, root: Path, fake: FakeJev) -> list[str]:
     return problems
 
 
+TINY_FT = ("--model", "tiny-dinov2", "--size", "32", "--epochs", "1", "--steps-per-epoch", "2", "--batch-size", "8",
+           "--accum", "1", "--device", "cpu", "--workers", "0")  # v3.8's mechanics with a random tiny ViT on the CPU
+
+
+def stand_in_external(out: Path, root: Path) -> Path:
+    """A stand-in for M7b's EXT_OUT: the synthetic benchmark's test studies, their images and their frozen classes."""
+    from v2.common import TEST, measurable
+
+    ext = root / "ext"
+    ext.mkdir()
+    rows = load_manifest(out)
+    rows = rows[rows["split"] == TEST].drop_duplicates("study_id")
+    rows.to_parquet(ext / "manifest.parquet", index=False)
+    classes = measurable(label_matrix(rows), "v2", 3)
+    (ext / "measurable_classes.json").write_text(json.dumps({"test_clean:v2": classes, "test_clean:u0": classes}))
+    (ext / "audit.json").write_text(json.dumps({"split_scheme": "external", "test_set_name": "synthetic"}))
+    (ext / "images").symlink_to(Path(load_setup(out)["bench"]) / "images")
+    return ext
+
+
+def check_retrain(out: Path, root: Path, fake: FakeJev) -> list[str]:
+    """§8h on synthetic data: the whole training split labeled, the targets, six tiny fine-tunes, the external set, L4/L5."""
+    from . import label, retrain
+
+    reports, labels = synthetic_sources(root)
+    client = JevClient(fake.model, api_key="smoke", transport=fake)
+    label.run(out, "train", client, reports, None, every=True)
+    label.run(out, "val", client, reports, None)
+    retrain.build_targets(out, fake.model)
+    retrain.gpu(out, extra=TINY_FT)
+    ext = stand_in_external(out, root)
+    retrain.apply(out, ext, workers=0, device="cpu")
+    problems = []
+    n_ext = load_manifest(ext)["study_id"].nunique()
+    for run in retrain.all_runs():
+        pred, _ = read_predictions(out / "chexpert" / "predictions" / f"{run}.parquet")
+        if pred["study_id"].nunique() != n_ext:
+            problems.append(f"{run}: {pred['study_id'].nunique()} external studies predicted, expected {n_ext}")
+    rep = retrain.main(["report", "--ext", str(ext), "--labels", str(labels), "--n-boot", "20", "--out", str(out)])
+    if any(f.startswith(("TARGETS", "COVERAGE")) for f in rep["flags"]):
+        problems.append("v3_retrain.md: " + "; ".join(rep["flags"]))
+    text = Path(rep["report"]).read_text()
+    if "**Gate L4:**" not in text or "**Gate L5:**" not in text:
+        problems.append("v3_retrain.md missing or without L4 and L5")
+    return problems
+
+
 def offline(root: Path) -> list[str]:
     out = setup_synthetic(root)
     fake = FakeJev()
@@ -266,7 +313,7 @@ def offline(root: Path) -> list[str]:
     problems = check(out, fake, chosen, with_image=True)
     if "Gate J2" not in (out / "reports" / "v3_report.md").read_text():
         problems.append("v3_report.md without J2")
-    return problems + check_labels(out, root, fake)
+    return problems + check_labels(out, root, fake) + check_retrain(out, root, fake)
 
 
 def live_label(root: Path, model: str, n: int = 6) -> list[str]:
