@@ -1,6 +1,6 @@
 # v3 Plan: Jev as the combiner (text first, the image later)
 
-**Status:** pre-registered 2026-10-26, before any Jev request on MIMIC data; val chose the yes/no format. **v3.0 done, J1 FAIL:** Jev with the estimates and all the text scores 0.803 on the official test, -0.024 [-0.033, -0.016] below v2's val combiner of the same inputs (0.827). Adding text to Jev adds nothing detectable (-0.002 [-0.010, 0.006]), re-reading the estimates costs -0.010, and text alone trails TF-IDF by -0.043 (§9). **v3.1 done, J2: no detectable gain** from showing Jev the X-ray (-0.001 [-0.005, 0.005]); on its own Jev reads X-rays at 0.716, against RAD-DINO's 0.814 (§9). **v3.2 (exploratory):** as an input to v2's val combiner, Jev's text reading adds +0.010 [0.005, 0.014] to the image, about what TF-IDF adds, but nothing detectable on top of v2's best system (+0.002 [-0.000, 0.004]); its X-ray reading hurts (§9). **v3.3 done, L1 FAIL:** as a report labeler Jev's chosen answers score 0.914 against the radiologist, the CheXpert labeler 0.940 (-0.026 [-0.041, -0.010]), almost all of it on Lung Opacity (§9). **v3.5 done, L2: no detectable difference:** a probe trained on 20k studies with Jev's soft labels scores +0.009 [-0.007, 0.027] over the same probe with CheXpert labels, judged by the radiologist (§9). **v3.6 done, L3 PASS (+0.065) but definitional:** on the CheXpert test set the gain sits in Lung Opacity and Enlarged Cardiomediastinum, which CheXpert's radiologists label hierarchically, as Jev's broad questions do; on the five standard findings it is +0.001 (§9). **v3.7 (exploratory):** a one-line hierarchy rule on the CheXpert labeler's labels recovers about 80% of that (+0.053), and Jev's labels add +0.012 [0.004, 0.019] beyond it (§9) · how to run: [`v3/README.md`](../v3/README.md) · **Branch:** `v3` (from `v2`) · **Started:** 2026-10-26
+**Status:** pre-registered 2026-10-26, before any Jev request on MIMIC data; val chose the yes/no format. **v3.0 done, J1 FAIL:** Jev with the estimates and all the text scores 0.803 on the official test, -0.024 [-0.033, -0.016] below v2's val combiner of the same inputs (0.827). Adding text to Jev adds nothing detectable (-0.002 [-0.010, 0.006]), re-reading the estimates costs -0.010, and text alone trails TF-IDF by -0.043 (§9). **v3.1 done, J2: no detectable gain** from showing Jev the X-ray (-0.001 [-0.005, 0.005]); on its own Jev reads X-rays at 0.716, against RAD-DINO's 0.814 (§9). **v3.2 (exploratory):** as an input to v2's val combiner, Jev's text reading adds +0.010 [0.005, 0.014] to the image, about what TF-IDF adds, but nothing detectable on top of v2's best system (+0.002 [-0.000, 0.004]); its X-ray reading hurts (§9). **v3.3 done, L1 FAIL:** as a report labeler Jev's chosen answers score 0.914 against the radiologist, the CheXpert labeler 0.940 (-0.026 [-0.041, -0.010]), almost all of it on Lung Opacity (§9). **v3.5 done, L2: no detectable difference:** a probe trained on 20k studies with Jev's soft labels scores +0.009 [-0.007, 0.027] over the same probe with CheXpert labels, judged by the radiologist (§9). **v3.6 done, L3 PASS (+0.065) but definitional:** on the CheXpert test set the gain sits in Lung Opacity and Enlarged Cardiomediastinum, which CheXpert's radiologists label hierarchically, as Jev's broad questions do; on the five standard findings it is +0.001 (§9). **v3.7 (exploratory):** a one-line hierarchy rule on the CheXpert labeler's labels recovers about 80% of that (+0.053), and Jev's labels add +0.012 [0.004, 0.019] beyond it (§9). **v3.8 pre-registered (§8h):** Jev's labels on the whole training split for the main fine-tuned model, two seeds, gates L4 (CheXpert test, against the rule) and L5 (MIMIC's radiologist, against the current labels) · how to run: [`v3/README.md`](../v3/README.md) · **Branch:** `v3` (from `v2`) · **Started:** 2026-10-26
 
 ## 1. Question
 
@@ -426,6 +426,96 @@ selection are v3.5's own. No Jev requests.
   definition alone); the same comparisons on the five standard findings; and
   on M7a's 596 MIMIC-CXR studies against their radiologist, whose labels are
   not hierarchical.
+
+## 8h. v3.8: Jev's labels for the main model (written 2026-10-27 after v3.7, before any v3.8 request)
+
+**Question:** do Jev's report labels, on the whole training split, train a
+better main model than the CheXpert labeler's labels, and a better one than the
+hierarchy rule alone? v3.5 to v3.7 used a frozen probe on 20k studies. This
+uses the model v2 ships, M5b's fine-tuned RAD-DINO, on all 213,357 training
+studies, with two seeds. v3.7's +0.012 beyond the rule was exploratory; this is
+the confirmatory test.
+
+**Fixed now:**
+
+| Item | Definition |
+|---|---|
+| Training studies | The benchmark's whole training split, 213,357 studies, less any Jev hasn't answered after re-runs; more than 1% unanswered stops the step. Every arm trains on the same studies |
+| Val | The 1,733 val studies Jev answered, labeled by each arm's own source, used only to keep each run's best epoch (as v2 does) |
+| Model and recipe | M5b's `rad-dino_518_ft_attn` unchanged: `v2.finetune --model rad-dino --size 518 --head attention --epochs 3`, effective batch 32 (16 × 2, or 8 × 4 if memory forces it), at most 3 h per run, bf16 on CUDA. Only the targets differ. Seeds 0 and 1 |
+| Soft targets | P(present) + 0.5 × P(uncertain), as v3.5, for every finding of every study. v2's masked BCE takes them as they are (mask 1): binary cross-entropy against p is the same loss as v3.5's two rows weighted p and 1 − p |
+| Jev's labels | The v3.3 labeler prompt, unchanged (hash `f2cb79b46c1c`, `jev-1.14.0`). The narrowed Lung Opacity wording (§9, v3.4) is not used. v3.5's 20,000 training and 1,733 val answers are reused from the cache |
+| Data and cost | About 193,400 new requests (the rest of the training split), about 364M input tokens at v3.5's 1,884 per report; MIMIC report text to TypeSafe under the verified zero-retention terms (§3). GPU: 6 runs of about 55 min on a GH200, about 6 h and $13 |
+
+**Arms** (seeds 0 and 1 each; predictions on val and the official test, then
+applied to the CheXpert test images):
+
+| Arm | Training targets | Val targets (best epoch) |
+|---|---|---|
+| `ft213k_chexpert_s{seed}` | The CheXpert labeler, v2 policy (uncertain ignored): the current model's labels, retrained in the same session on the same studies | The CheXpert labeler |
+| `ft213k_chexpert_hier_s{seed}` | The CheXpert labeler with v3.7's hierarchy rule (no Jev) | The same, with the rule |
+| `ft213k_jev_soft_s{seed}` | Jev's soft targets | Jev's answers (present 1, uncertain ignored, absent 0) |
+
+v2's own runs of the recipe, `rad-dino_518_ft_attn_s0` (M5) and `_s1` (M8),
+are references.
+
+**Gates** (fixed now; paired 95% CIs from 1,000 patient resamples, v2 policy):
+
+- **L4, beyond the definition:** `ft213k_jev_soft` minus
+  `ft213k_chexpert_hier` on the CheXpert test set, over the six classes frozen
+  there at M7b.
+- **L5, the main model on MIMIC:** `ft213k_jev_soft` minus `ft213k_chexpert`
+  against M7a's radiologist on 596 official-test studies, over the jointly
+  measurable classes.
+
+Each gate's comparator is the stronger label set without Jev for that judge,
+as v3.7 found: the rule helps on CheXpert's hierarchical labels (+0.053) and
+costs a little against MIMIC's radiologist (−0.004). A gate PASSES when its CI
+lies above 0 for both seeds and FAILS when it lies below 0 for both. Anything
+else (a CI that includes 0, or seeds that disagree) is no detectable
+difference.
+
+**Reading:**
+
+- **L4 and L5 pass:** Jev's labels make a better main model, on both judges and
+  beyond the definition.
+- **L4 only:** Jev's edge is in matching CheXpert's definitions; on MIMIC the
+  current labels stand.
+- **L5 only:** Jev's labels improve the model on MIMIC, but on CheXpert the rule
+  does as well.
+- **Neither:** v3.7's edge doesn't hold at full scale with the main model. The
+  definition is the lever, and it needs no Jev.
+
+**Reported, not gates:** every pairwise difference on both judges for each
+seed; the CheXpert test set's five standard findings; per finding (seed 0);
+every arm on the whole official test against the CheXpert labeler's labels,
+which favours `ft213k_chexpert`; v2's two runs on both judges.
+
+**Red flags** (checked before the gates are read):
+
+- **Coverage:** more than 1% of the training studies, or of val, without a Jev
+  label: stop before the GPU.
+- **Recipe:** a run whose model, size, head, epochs, effective batch or
+  learning rates differ from M5b's, or that stopped before its 3 epochs
+  (`--max-hours`): run it again.
+- **Rerun:** `ft213k_chexpert_s{seed}` and v2's `rad-dino_518_ft_attn_s{seed}`
+  differ by more than 0.005 on the official test against the CheXpert labels.
+  Same recipe, studies and seed, and M8's seeds differed by 0.002 or less, so
+  they should agree; a GPU rerun isn't bit-identical. The log explains the
+  difference before the gates are read.
+- **Reload:** a checkpoint that doesn't give back its own benchmark predictions
+  on the Mac (correlation under 0.99 on 64 test studies, v2.external's check):
+  stop.
+
+**Order:** offline smoke; the training labels, run by the user (cached and
+resumable, about 3 h at 4 in flight); the targets file (Mac); the GPU session
+(a smoke run, then seed 0's three arms, then seed 1's); bring home the
+checkpoints and predictions; apply them to the CheXpert test images and write
+the report (Mac).
+
+**Caveats:** RAD-DINO's encoder saw unlabeled CheXpert images in pretraining
+(M7b), which affects every arm alike. The radiologist sets are small (596 and
+500 studies), so differences under about 0.01 may not be detectable.
 
 ## 9. Results log
 
