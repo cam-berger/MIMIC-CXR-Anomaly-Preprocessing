@@ -48,10 +48,13 @@ Results:
   CheXpert test set (L3 passes). The CheXpert hierarchy applied to the
   labeler's own labels recovers +0.053 of that with no Jev; Jev adds +0.012
   [0.004, 0.019] beyond it (v3.5-v3.7). Read it as a label-definition effect.
-- v3.8 (`v3/retrain.py`, §8h, pre-registered, not run yet): Jev's labels on
-  the whole training split as targets for M5b's fine-tune, against the
-  CheXpert labels and the hierarchy rule, two seeds, gates L4 and L5. The user
-  runs the labeling and the GPU session (`v3/README.md` §8).
+- v3.8 (`v3/retrain.py`, §8h): M5b's fine-tune trained on Jev's labels for
+  all 213,357 training studies, two seeds. L4 and L5 show no detectable
+  difference: +0.005 against the hierarchy rule on the CheXpert test set,
+  +0.001 to +0.002 against the CheXpert labels on MIMIC's radiologist set.
+  v3.7's edge doesn't hold at full scale. Not a gate: the rule costs -0.015
+  on MIMIC, so Jev's labels are the only targets level with the best source
+  on both judges. How to run it: `v3/README.md` §8.
 
 Rules:
 - v3 reuses v2 unchanged. It works in its own output dir `V3_OUT`, which
