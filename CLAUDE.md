@@ -10,6 +10,8 @@ An exploratory analysis of 12 CheXpert findings in MIMIC-CXR chest X-rays.
   encoders (RAD-DINO, MedSigLIP, DINOv2) and text written before the X-ray. It
   scores models on the official MIMIC-CXR split against published results, and
   checks them against a radiologist's labels and on the CheXpert test set.
+- **v3** (`v3/`, tests in `tests/v3/`) tests TypeSafe's Jev, a hosted
+  classification model, as the final classifier and as a report labeler.
 - **v1** (`src/` and the root scripts) is the original from-scratch multimodal
   pipeline. It is kept for reference.
 
@@ -19,6 +21,32 @@ Read first:
 - [`v2/README.md`](v2/README.md): how to run v2 (setup, `v2/scripts/run.sh`
   steps, the GPU session, outputs, troubleshooting).
 - [`docs/V1.md`](docs/V1.md): v1.
+
+## v3: TypeSafe's Jev
+
+`v3/` (tests in `tests/v3/`) tests TypeSafe's Jev, a hosted classification
+model, on M5's benchmark. It was tried as the final classifier, as a report
+labeler and as a source of training labels, and it didn't beat v2's simpler
+tools at any of them.
+
+- [`docs/V3.md`](docs/V3.md) summarizes what we found.
+- [`docs/V3_PLAN.md`](docs/V3_PLAN.md) is the pre-registration: each step's
+  plan and gates, written before it ran, and the results log in §9. Add new
+  steps as new sections. Don't edit a step's plan after it has run. Its
+  references to V2_PLAN mean `docs/V2_PLAN.md` at commit 04f5946.
+- [`v3/README.md`](v3/README.md) explains how to run each step.
+
+Rules:
+- v3 reuses v2 unchanged. It works in its own output dir `V3_OUT`, which
+  links into `BENCH_OUT` and never writes there. Metrics come only from
+  `v2/evaluate.py`.
+- Before and after changing code, run `pytest tests/v3 -q` and
+  `python -m v3.smoke`.
+- Jev requests carry MIMIC text (and, in v3.1, the X-ray); the user verified
+  TypeSafe's zero data retention. The data-handling rules below also cover
+  `V3_OUT/jev_cache/`, `predictions/` and `logs/`.
+- The radiologist's labels file sits in `output/` (gitignored) when the MIMIC
+  drive is away: pass `--labels`.
 
 ## Rules for v2
 
@@ -71,5 +99,5 @@ from `.env` (`MIMIC_CXR_JPG_PATH`, `MIMIC_IV_PATH`, `MIMIC_IV_ED_PATH`,
 
 ## Git
 
-- `main` holds the current work: v2, plus v1 for reference.
+- `main` holds the current work: v2 and v3, plus v1 for reference.
 - Don't commit data files (`.h5`, `.parquet`, `.csv`, images) or `.env`.
