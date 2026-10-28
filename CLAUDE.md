@@ -25,36 +25,16 @@ Read first:
 ## v3: TypeSafe's Jev
 
 `v3/` (tests in `tests/v3/`) tests TypeSafe's Jev, a hosted classification
-model, on M5's benchmark: as the combiner of v2's image estimates
-(`rad-dino_518_ft_attn_s0`) and the pre-imaging text, with and without the
-X-ray, and as a report labeler whose labels train v2's probe. Read
-[`docs/V3_PLAN.md`](docs/V3_PLAN.md) first: the pre-registration (2026-10-26),
-the gates and the results log. [`v3/README.md`](v3/README.md) explains how to
-run it. V3_PLAN's references to V2_PLAN mean `docs/V2_PLAN.md` at commit
-04f5946.
+model, on M5's benchmark. It was tried as the final classifier, as a report
+labeler and as a source of training labels, and it didn't beat v2's simpler
+tools at any of them.
 
-Results:
-- J1 fails: as the final classifier Jev scores 0.803 against 0.827 for v2's
-  val combiner of the same inputs (-0.024 [-0.033, -0.016]). The text and the
-  X-ray add nothing detectable to Jev (v3.0, v3.1).
-- As an input to v2's combiner, Jev's text answers add +0.010 to the image,
-  about what TF-IDF adds, and nothing detectable on top of v2's best system
-  (v3.2, exploratory).
-- L1 fails: as a report labeler scored against a radiologist, Jev trails the
-  CheXpert labeler (0.914 against 0.940), almost all on Lung Opacity, which it
-  defines too broadly (v3.3, v3.4).
-- Jev's labels as training targets: +0.009 [-0.007, 0.027] on MIMIC's
-  radiologist set (L2, not detectable) and +0.065 [0.054, 0.077] on the
-  CheXpert test set (L3 passes). The CheXpert hierarchy applied to the
-  labeler's own labels recovers +0.053 of that with no Jev; Jev adds +0.012
-  [0.004, 0.019] beyond it (v3.5-v3.7). Read it as a label-definition effect.
-- v3.8 (`v3/retrain.py`, §8h): M5b's fine-tune trained on Jev's labels for
-  all 213,357 training studies, two seeds. L4 and L5 show no detectable
-  difference: +0.005 against the hierarchy rule on the CheXpert test set,
-  +0.001 to +0.002 against the CheXpert labels on MIMIC's radiologist set.
-  v3.7's edge doesn't hold at full scale. Not a gate: the rule costs -0.015
-  on MIMIC, so Jev's labels are the only targets level with the best source
-  on both judges. How to run it: `v3/README.md` §8.
+- [`docs/V3.md`](docs/V3.md) summarizes what we found.
+- [`docs/V3_PLAN.md`](docs/V3_PLAN.md) is the pre-registration: each step's
+  plan and gates, written before it ran, and the results log in §9. Add new
+  steps as new sections. Don't edit a step's plan after it has run. Its
+  references to V2_PLAN mean `docs/V2_PLAN.md` at commit 04f5946.
+- [`v3/README.md`](v3/README.md) explains how to run each step.
 
 Rules:
 - v3 reuses v2 unchanged. It works in its own output dir `V3_OUT`, which

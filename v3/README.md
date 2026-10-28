@@ -1,9 +1,10 @@
 # v3: Jev as the combiner
 
-v3 gives TypeSafe's Jev the 12 estimates of v2's image model plus the text written before the X-ray, asks 12
-yes/no questions per study, and scores the answers with v2's evaluation. The question, the arms, gate J1 and the
-stop rules are fixed in [`docs/V3_PLAN.md`](../docs/V3_PLAN.md). v3 reuses v2's package and its virtual
-environment (`.venv-v2`); it adds no dependencies.
+v3 tries TypeSafe's Jev on v2's benchmark as the final classifier (sections 2 and 5), as a report labeler
+(section 6) and as a source of training labels (sections 7 and 8). Jev answers yes/no questions about each study,
+and v2's evaluation scores the answers. [`docs/V3.md`](../docs/V3.md) has the results.
+[`docs/V3_PLAN.md`](../docs/V3_PLAN.md) fixes each step's arms, gates and stop rules. v3 runs in v2's virtual
+environment (`.venv-v2`) and adds no dependencies.
 
 ## 1. Set up
 
@@ -155,8 +156,9 @@ both radiologist sets (gates L4 and L5). `v2.finetune` runs unchanged; only its 
    rsync -a output/v3/retrain/targets.parquet output/v3/retrain/targets.json \
        <gpu>:MIMIC-CXR-Anomaly-Preprocessing/output/v3/retrain/
    ```
-   On the box, inside `tmux` (a smoke run on 64 studies, then the six runs, about 55 minutes each on a GH200; run
-   the same command again to resume; add `--batch-size 8 --accum 4` under 40 GB):
+   On the box, inside `tmux`, run the command below. It does a smoke run on 64 studies, then the six runs, about 75
+   minutes each on an H100 PCIe. Run it again to resume. Under 40 GB of GPU memory, add `--batch-size 8 --accum 4`.
+   If v2's tests in `setup.sh` crawl on a box with few CPU cores, `bash v2/scripts/setup.sh --no-tests` skips them.
    ```bash
    python -m v3.retrain gpu --bench output/v2_bench --out output/v3 2>&1 | tee output/v3_retrain_gpu.log
    ```
